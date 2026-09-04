@@ -1,12 +1,32 @@
 [build-system]
-requires=["setuptools==75.8.0"]
-build-backend="setuptools.build_meta"
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name="ma-sub"
-version="0.1.0"
-requires-python="==3.11.*"
-dependencies=["PyYAML==6.0.2"]
-[project.optional-dependencies]
-test=["pytest==8.3.5"]
+name = "ma-sub"
+version = "0.1.0"
+description = "Resumable Muhtemel Ask Turkish-to-Indonesian subtitle pipeline"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = {text = "Proprietary"}
+authors = [{name = "Ismail Korkmaz"}]
+dependencies = []
+
 [project.scripts]
-mas="mas.cli:main"
+mas = "src.mas.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src", "src.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+markers = [
+  "gpu: requires an NVIDIA CUDA GPU and downloaded models",
+  "integration: multi-stage deterministic pipeline integration",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]

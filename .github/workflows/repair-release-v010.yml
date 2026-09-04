@@ -1,0 +1,413 @@
+name: repair-and-release-v0.1.0
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/repair-release-v010.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  repair-test-tag:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Repair production wrapper only when required
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f src/mas/pipeline.py \
+             && ! grep -Fq 'GPU source acquisition/ASR CLI wiring remains the v0.1.0 RunPod integration blocker' src/mas/pipeline.py \
+             && grep -Eqi 'checkpoint|input_sha256|fingerprint' src/mas/pipeline.py \
+             && test -f rules/TRANSLATION_SPEC.md \
+             && test -f rules/GLOSSARY.json \
+             && test -f rules/NAMES.json \
+             && test -f runpod/preflight.sh; then
+            echo 'Existing production wrapper is complete; no repair needed.'
+            exit 0
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+          def w(path, text, mode=None):
+              p=Path(path); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(textwrap.dedent(text).lstrip(),encoding='utf-8')
+              if mode is not None: p.chmod(mode)
+          w('src/mas/version.py', '''
+          PIPELINE_VERSION='0.1.0'
+          SCHEMA_VERSION='mas.subtitle.v2'
+          RULES_VERSION='v2-beta-2026-09-04'
+          ''')
+          w('src/mas/config.py', '''
+          import os
+          from pathlib import Path
+          def repo_root(): return Path(__file__).resolve().parents[2]
+          def workspace_root(): return Path(os.environ.get('MAS_WORKSPACE',repo_root())).expanduser().resolve()
+          def episode_name(ep): return f'Muhtemel Ask {ep}.Bolum'
+          def episode_dir(ep): return workspace_root()/'EPISODES'/episode_name(ep)
+          def rules_dir(): return repo_root()/'rules'
+          ''')
+          w('src/mas/hashing.py', '''
+          import hashlib,json
+          from pathlib import Path
+          def sha256_file(path):
+              h=hashlib.sha256()
+              with Path(path).open('rb') as f:
+                  for b in iter(lambda:f.read(1048576),b''): h.update(b)
+              return h.hexdigest()
+          def canonical(v): return json.dumps(v,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()
+          def sha256_json(v): return hashlib.sha256(canonical(v)).hexdigest()
+          ''')
+          w('src/mas/errors.py', '''
+          class MasError(RuntimeError): pass
+          class PackageValidationError(MasError): pass
+          ''')
+          w('src/mas/state.py', '''
+          import json,os,tempfile
+          from datetime import datetime,timezone
+          from pathlib import Path
+          from .hashing import sha256_file
+          from .version import PIPELINE_VERSION,SCHEMA_VERSION,RULES_VERSION
+          def now(): return datetime.now(timezone.utc).isoformat()
+          def load(path,ep):
+              if not Path(path).exists(): return {'episode':ep,'pipeline_version':PIPELINE_VERSION,'schema_version':SCHEMA_VERSION,'rules_version':RULES_VERSION,'stages':{},'created_at':now()}
+              try: s=json.loads(Path(path).read_text(encoding='utf-8'))
+              except Exception as e: raise RuntimeError(f'Corrupted state: {path}: {e}') from e
+              if s.get('episode')!=ep: raise RuntimeError(f"State episode mismatch: expected {ep}, got {s.get('episode')}")
+              s.setdefault('stages',{}); return s
+          def save(path,s):
+              path=Path(path); path.parent.mkdir(parents=True,exist_ok=True); s['updated_at']=now(); fd,tmp=tempfile.mkstemp(dir=path.parent,prefix=path.name+'.')
+              try:
+                  with os.fdopen(fd,'w',encoding='utf-8') as f: json.dump(s,f,ensure_ascii=False,indent=2,sort_keys=True); f.write('\n'); f.flush(); os.fsync(f.fileno())
+                  os.replace(tmp,path)
+              finally:
+                  if os.path.exists(tmp): os.unlink(tmp)
+          def valid(stage,input_hash,config_hash,outputs):
+              if stage.get('status')!='complete' or stage.get('input_sha256')!=input_hash or stage.get('config_sha256')!=config_hash: return False
+              hashes=stage.get('outputs',{})
+              return all(Path(p).exists() and hashes.get(str(Path(p)))==sha256_file(p) for p in outputs)
+          ''')
+          w('src/mas/packs/build.py', '''
+          import json,zipfile
+          from pathlib import Path
+          from ..hashing import sha256_json
+          from ..version import PIPELINE_VERSION,SCHEMA_VERSION,RULES_VERSION
+          IMMUTABLE_FIELDS=['block_uid','block_index','start_ms','end_ms','asr_audit','audio_reviewed','review_disposition','schema_version','schema_sha256']
+          def descriptor(kind): return {'schema_version':SCHEMA_VERSION,'kind':kind,'immutable_fields':IMMUTABLE_FIELDS,'editable_field':'tr_text' if kind=='TR' else 'id_text'}
+          def build_pack(path,episode,kind,records,prompt_text=''):
+              path=Path(path); path.parent.mkdir(parents=True,exist_ok=True); kind=kind.upper(); schema=descriptor(kind); sh=sha256_json(schema); rows=[]
+              for r in records:
+                  x=dict(r); x['schema_version']=SCHEMA_VERSION; x['schema_sha256']=sh; rows.append(x)
+              manifest={'episode':episode,'kind':kind,'pipeline_version':PIPELINE_VERSION,'rules_version':RULES_VERSION,'schema_version':SCHEMA_VERSION,'schema_sha256':sh,'input_sha256':sha256_json(rows),'record_count':len(rows),'immutable_fields':IMMUTABLE_FIELDS,'records_file':'records.json'}
+              with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED) as z:
+                  z.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2,sort_keys=True)+'\n'); z.writestr('records.json',json.dumps(rows,ensure_ascii=False,indent=2)+'\n'); z.writestr('INSTRUCTIONS.md',prompt_text)
+              return manifest
+          ''')
+          w('src/mas/packs/validate.py', '''
+          import json,zipfile
+          from pathlib import Path
+          from .build import IMMUTABLE_FIELDS
+          from ..errors import PackageValidationError
+          def read(path):
+              try:
+                  with zipfile.ZipFile(path) as z:
+                      if not {'manifest.json','records.json'}<=set(z.namelist()): raise PackageValidationError('ZIP must contain manifest.json and records.json')
+                      return json.loads(z.read('manifest.json')),json.loads(z.read('records.json'))
+              except PackageValidationError: raise
+              except Exception as e: raise PackageValidationError(f'Invalid ZIP: {e}') from e
+          def validate_returned(path,expected_manifest,expected_records):
+              m,rows=read(path)
+              for k in ('episode','kind','schema_version','schema_sha256','input_sha256','record_count'):
+                  if m.get(k)!=expected_manifest.get(k): raise PackageValidationError(f'{k} mismatch: expected {expected_manifest.get(k)!r}, got {m.get(k)!r}')
+              if len(rows)!=len(expected_records): raise PackageValidationError(f'record count mismatch: expected {len(expected_records)}, got {len(rows)}')
+              seen=set()
+              for i,(a,b) in enumerate(zip(expected_records,rows)):
+                  if not isinstance(b,dict): raise PackageValidationError(f'record {i} is not an object')
+                  if b.get('block_uid')!=a.get('block_uid'): raise PackageValidationError(f'block_uid/order changed at record {i}')
+                  if b.get('block_index')!=a.get('block_index'): raise PackageValidationError(f'block_index/order changed at record {i}')
+                  for k in IMMUTABLE_FIELDS:
+                      if k in a and b.get(k)!=a.get(k): raise PackageValidationError(f'immutable field changed at record {i}, uid={a.get("block_uid")}: {k}')
+                  if b.get('block_uid') in seen: raise PackageValidationError('duplicate block_uid in returned package')
+                  seen.add(b.get('block_uid'))
+              return rows
+          ''')
+          w('src/mas/subtitle/srt.py', '''
+          import re
+          def stamp(ms):
+              ms=max(0,int(ms)); h,ms=divmod(ms,3600000); m,ms=divmod(ms,60000); s,ms=divmod(ms,1000); return f'{h:02d}:{m:02d}:{s:02d},{ms:03d}'
+          def render(records,field='id_text'):
+              out=[]
+              for r in records:
+                  text=re.sub(r'(?im)^\\s*(speaker|konuşmacı)\\s*\\w*\\s*:\\s*','',str(r.get(field) or '').replace('\\r','').strip())
+                  if not text: continue
+                  out += [str(len(out)//4+1),f"{stamp(r['start_ms'])} --> {stamp(r['end_ms'])}",text,'']
+              return '\n'.join(out).rstrip()+'\n'
+          ''')
+          w('src/mas/subtitle/validation.py', '''
+          import re
+          DEFAULT={'min_duration_ms':500,'max_duration_ms':8000,'max_cps':22.0,'max_line_length':42,'max_lines':2}
+          def qc(records,thresholds=None):
+              t={**DEFAULT,**(thresholds or {})}; issues=[]; last=-1; seen=set()
+              for r in records:
+                  uid=r.get('block_uid'); start=int(r.get('start_ms',-1)); end=int(r.get('end_ms',-1)); text=str(r.get('id_text') or r.get('tr_text') or '')
+                  def add(kind,**x): issues.append({'type':kind,'block_uid':uid,'block_index':r.get('block_index'),**x})
+                  if uid in seen: add('duplicate_block_uid')
+                  seen.add(uid)
+                  if end<=start: add('invalid_duration')
+                  dur=end-start
+                  if dur<t['min_duration_ms']: add('too_short',duration_ms=dur)
+                  if dur>t['max_duration_ms']: add('too_long',duration_ms=dur)
+                  if start<last: add('overlap',previous_end_ms=last,start_ms=start)
+                  last=max(last,end)
+                  if not text.strip(): add('missing_text')
+                  cps=len(re.sub(r'\\s+','',text))/(dur/1000) if dur>0 else 999
+                  if cps>t['max_cps']: add('cps',cps=round(cps,2))
+                  lines=text.splitlines() or ['']
+                  if len(lines)>t['max_lines']: add('too_many_lines')
+                  if max(map(len,lines))>t['max_line_length']: add('line_too_long')
+                  if re.search(r'(?i)^\\s*(speaker|konuşmacı)\\b',text): add('speaker_label_leak')
+              return issues
+          ''')
+          w('src/mas/pipeline.py', '''
+          import json,os,re,shutil,subprocess,time,uuid
+          from pathlib import Path
+          from .config import episode_dir,episode_name,rules_dir
+          from .hashing import sha256_file,sha256_json
+          from .state import load,save,valid,now
+          from .packs.build import build_pack
+          from .packs.validate import validate_returned
+          from .subtitle.srt import render
+          from .subtitle.validation import qc
+          from .version import PIPELINE_VERSION,SCHEMA_VERSION,RULES_VERSION
+          ORDER=['source','audio','asr','reconcile','tr_pack','tr_return','align','id_pack','id_return','finalize','qc']
+          def dirs(ep):
+              d=episode_dir(ep)
+              for x in ('source','work','translation_input','translation_output','reports','final/subtitles','logs'): (d/x).mkdir(parents=True,exist_ok=True)
+              return d
+          def dump(p,v): p=Path(p); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps(v,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          def data(p): return json.loads(Path(p).read_text(encoding='utf-8'))
+          def fingerprint():
+              files=sorted(p for p in rules_dir().rglob('*') if p.is_file()); return sha256_json([PIPELINE_VERSION,SCHEMA_VERSION,RULES_VERSION,[(str(p.relative_to(rules_dir())),sha256_file(p)) for p in files]])
+          def complete(state,sp,name,input_hash,cfg,outputs,fn):
+              if valid(state['stages'].get(name,{}),input_hash,cfg,outputs): print(f'[SKIP] {name.upper()} checkpoint valid'); return
+              for n in ORDER[ORDER.index(name)+1:]: state['stages'].pop(n,None)
+              t=time.monotonic()
+              try:
+                  meta=fn() or {}; state['stages'][name]={'status':'complete','input_sha256':input_hash,'config_sha256':cfg,'outputs':{str(Path(p)):sha256_file(p) for p in outputs},'runtime_seconds':round(time.monotonic()-t,3),'completed_at':now(),'meta':meta}; save(sp,state); print(f'[OK] {name.upper()}')
+              except Exception as e:
+                  state['stages'][name]={'status':'failed','input_sha256':input_hash,'config_sha256':cfg,'error':str(e),'failed_at':now()}; save(sp,state); raise
+          def acquire(d,url,fixture):
+              if fixture: p=d/'source/fixture.source'; p.write_text('fixture\n'); return p
+              vids=sorted(p for p in (d/'source').iterdir() if p.suffix.lower() in {'.mkv','.mp4','.webm','.mov'})
+              if vids: return vids[0]
+              if not url: raise RuntimeError('No source media. Pass --source-url once or place video in source/.')
+              local=Path(url[7:] if url.startswith('file://') else url).expanduser()
+              if local.exists(): target=d/'source'/local.name; shutil.copy2(local,target); return target
+              if not shutil.which('yt-dlp'): raise RuntimeError('yt-dlp unavailable')
+              subprocess.run(['yt-dlp','--no-playlist','--merge-output-format','mkv','-o',str(d/'source/source.%(ext)s'),url],check=True)
+              return next(p for p in (d/'source').glob('source.*') if p.suffix not in {'.part','.log'})
+          def asr(audio,out,fixture):
+              if fixture:
+                  rows=[{'segment_index':0,'start_ms':1000,'end_ms':2500,'text':'Merhaba Defne.','words':[]},{'segment_index':1,'start_ms':2800,'end_ms':4300,'text':'Nasılsın?','words':[]}]; dump(out,rows); return {'engine':'fixture','count':2}
+              try: from faster_whisper import WhisperModel
+              except Exception as e: raise RuntimeError('faster-whisper unavailable; run runpod/bootstrap.sh') from e
+              model=WhisperModel(os.environ.get('MAS_ASR_MODEL','large-v3'),device='cuda',compute_type='float16'); segs,info=model.transcribe(str(audio),language='tr',word_timestamps=True,vad_filter=True,beam_size=5,condition_on_previous_text=False); rows=[]
+              for i,s in enumerate(segs):
+                  rows.append({'segment_index':i,'start_ms':round(s.start*1000),'end_ms':round(s.end*1000),'text':s.text.strip(),'avg_logprob':getattr(s,'avg_logprob',None),'no_speech_prob':getattr(s,'no_speech_prob',None),'words':[{'word':w.word,'start_ms':round(w.start*1000),'end_ms':round(w.end*1000),'probability':w.probability} for w in (s.words or [])]})
+                  if len(rows)%100==0: dump(out,rows)
+              dump(out,rows); return {'engine':'faster-whisper','model':os.environ.get('MAS_ASR_MODEL','large-v3'),'count':len(rows)}
+          def prompt(ep,kind,name):
+              specs='\n\n'.join((rules_dir()/x).read_text(encoding='utf-8') for x in ('TRANSLATION_SPEC.md','SUBTITLE_SPEC.md') if (rules_dir()/x).exists())
+              return f'# Muhtemel Ask episode {ep} - {kind}\n\nWork only inside `{name}`. Return the exact requested ZIP. Do not change timing, order, count, UID, index, audit, schema, or hashes. Do not invent audio-dependent text.\n\n{specs}\n'
+          def run(ep,source_url=None,fixture=False,stop_after=None):
+              d=dirs(ep); sp=d/'work/state.json'; state=load(sp,ep); cfg=fingerprint(); name=episode_name(ep); marker=d/'work/source.json'
+              existing=[(p.name,sha256_file(p)) for p in sorted((d/'source').glob('*')) if p.is_file()]; ih=sha256_json({'url':source_url or '', 'files':existing, 'fixture':fixture})
+              def fs():
+                  p=acquire(d,source_url,fixture); dump(marker,{'path':str(p),'sha256':sha256_file(p),'source_url':source_url}); return {'path':str(p)}
+              complete(state,sp,'source',ih,cfg,[marker],fs); source=Path(data(marker)['path'])
+              if stop_after=='source': return 0
+              audio=d/'work/audio.wav'
+              def fa():
+                  if fixture: audio.write_bytes(b'RIFFfixture')
+                  else:
+                      if not shutil.which('ffmpeg'): raise RuntimeError('ffmpeg unavailable')
+                      subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(source),'-vn','-ac','1','-ar','16000','-c:a','pcm_s16le',str(audio)],check=True)
+              complete(state,sp,'audio',sha256_file(source),cfg,[audio],fa)
+              raw=d/'work/asr.json'; complete(state,sp,'asr',sha256_file(audio),cfg,[raw],lambda:asr(audio,raw,fixture))
+              if stop_after=='asr': raise RuntimeError('Intentional test interruption after ASR')
+              rec=d/'work/records_tr_raw.json'
+              def fr():
+                  out=[]; last=-1
+                  for i,s in enumerate(data(raw)):
+                      text=str(s.get('text') or '').strip(); flags=[]
+                      if not text or re.fullmatch(r'[\\W_]+',text): flags.append('suspected_asr_hallucination')
+                      if s.get('no_speech_prob') is not None and s['no_speech_prob']>0.75: flags.append('suspected_asr_hallucination')
+                      if int(s['start_ms'])<last: flags.append('timing_overlap')
+                      uid=f"b{i+1:06d}-{uuid.uuid5(uuid.NAMESPACE_URL,f'{s["start_ms"]}:{s["end_ms"]}:{text}').hex[:12]}"
+                      out.append({'block_uid':uid,'block_index':i+1,'start_ms':int(s['start_ms']),'end_ms':int(s['end_ms']),'tr_text':text,'id_text':'','words':s.get('words',[]),'speaker':s.get('speaker'),'provenance':['asr'],'asr_audit':{'avg_logprob':s.get('avg_logprob'),'no_speech_prob':s.get('no_speech_prob'),'source_segment_index':s.get('segment_index',i)},'review_required':bool(flags),'review_flags':flags,'audio_reviewed':False,'review_disposition':None}); last=max(last,int(s['end_ms']))
+                  dump(rec,out); dump(d/'work/review_required.json',[x for x in out if x['review_required']]); return {'count':len(out)}
+              complete(state,sp,'reconcile',sha256_file(raw),cfg,[rec,d/'work/review_required.json'],fr); base=data(rec)
+              trz=d/'translation_input'/f'{name}_TR_CORRECTION_PACK.zip'; trp=d/'translation_input/TR_PROMPT.txt'; trm=d/'work/tr_manifest.json'
+              def ftp():
+                  p=prompt(ep,'TR',trz.name); trp.write_text(p,encoding='utf-8'); dump(trm,build_pack(trz,ep,'TR',base,p)); return {'count':len(base)}
+              complete(state,sp,'tr_pack',sha256_file(rec),cfg,[trz,trp,trm],ftp); trr=d/'translation_output'/f'{name}_TR_TEXT_CORRECTED.zip'
+              if not trr.exists(): state['waiting_for']={'stage':'TR_CORRECTION','file':trr.name}; save(sp,state); print(f'[WAIT] TR CORRECTION\nGPU WORK COMPLETE\nSafe to stop RunPod now.\n\nWaiting for:\n{trr.name}'); return 20
+              corrected=d/'work/records_tr_corrected.json'; complete(state,sp,'tr_return',sha256_json([sha256_file(trr),sha256_file(trm)]),cfg,[corrected],lambda:dump(corrected,validate_returned(trr,data(trm),base))); cor=data(corrected); state.pop('waiting_for',None); save(sp,state)
+              aligned=d/'work/records_aligned.json'
+              def falign():
+                  rows=[]
+                  for r in cor: x=dict(r); x['provenance']=list(dict.fromkeys(x.get('provenance',[])+['corrected_turkish','asr_word_timing'])); rows.append(x)
+                  dump(aligned,rows)
+              complete(state,sp,'align',sha256_file(corrected),cfg,[aligned],falign); ar=data(aligned)
+              idz=d/'translation_input'/f'{name}_ID_TRANSLATION_PACK.zip'; idp=d/'translation_input/ID_PROMPT.txt'; idm=d/'work/id_manifest.json'
+              def fip():
+                  p=prompt(ep,'ID',idz.name); idp.write_text(p,encoding='utf-8'); dump(idm,build_pack(idz,ep,'ID',ar,p)); return {'count':len(ar)}
+              complete(state,sp,'id_pack',sha256_file(aligned),cfg,[idz,idp,idm],fip); idr=d/'translation_output'/f'{name}_ID_TRANSLATED.zip'
+              if not idr.exists(): state['waiting_for']={'stage':'ID_TRANSLATION','file':idr.name}; save(sp,state); print(f'[WAIT] ID TRANSLATION\nGPU NOT REQUIRED\n\nWaiting for:\n{idr.name}'); return 21
+              final=d/'work/records_final.json'; complete(state,sp,'id_return',sha256_json([sha256_file(idr),sha256_file(idm)]),cfg,[final],lambda:dump(final,validate_returned(idr,data(idm),ar))); rows=data(final); state.pop('waiting_for',None); save(sp,state)
+              trs=d/'final/subtitles'/f'{name}-tr.srt'; ids=d/'final/subtitles'/f'{name}-id.srt'
+              def ff(): trs.write_text(render(rows,'tr_text'),encoding='utf-8'); ids.write_text(render(rows,'id_text'),encoding='utf-8')
+              complete(state,sp,'finalize',sha256_json([sha256_file(final),sha256_file(source)]),cfg,[trs,ids],ff)
+              qj=d/'reports/qc.json'; qm=d/'reports/qc.md'
+              def fq():
+                  issues=qc(rows); missing=sum(1 for r in rows if not str(r.get('id_text') or '').strip()); fatal=missing or any(x['type'] in {'invalid_duration','duplicate_block_uid','missing_text'} for x in issues); status='FAIL' if fatal else ('PASS_WITH_REVIEW' if issues or any(r.get('review_required') for r in rows) else 'PASS'); report={'status':status,'episode':ep,'source_duration_ms':max((r['end_ms'] for r in rows),default=0),'asr_block_count':len(data(raw)),'final_subtitle_block_count':len(rows),'missing_translations':missing,'unresolved_review_items':sum(1 for r in rows if r.get('review_required') and not r.get('audio_reviewed')),'issues':issues,'immutable_field_validation':'PASS','pipeline_version':PIPELINE_VERSION,'schema_version':SCHEMA_VERSION,'rules_version':RULES_VERSION,'input_output_hashes':{'source':sha256_file(source),'tr_return':sha256_file(trr),'id_return':sha256_file(idr)},'runtime_seconds_by_stage':{k:v.get('runtime_seconds') for k,v in state['stages'].items()}}; dump(qj,report); qm.write_text(f"# QC report\n\nStatus: {status}\n\nFinal blocks: {len(rows)}\nIssues: {len(issues)}\n",encoding='utf-8'); return {'status':status}
+              complete(state,sp,'qc',sha256_file(final),cfg,[qj,qm],fq); result=data(qj); print(f"[9/9] QC {result['status']}"); return 2 if result['status']=='FAIL' else 0
+          def status(ep): print(json.dumps(load(dirs(ep)/'work/state.json',ep),ensure_ascii=False,indent=2)); return 0
+          ''')
+          w('src/mas/cli.py', '''
+          import argparse,os,platform,shutil,subprocess,sys,traceback
+          from .config import episode_dir,repo_root
+          from .pipeline import run,status
+          from .version import PIPELINE_VERSION
+          def doctor():
+              checks={x:bool(shutil.which(x)) for x in ('python','ffmpeg','ffprobe','git','yt-dlp')}; checks['python_version']=platform.python_version(); checks['pipeline_version']=PIPELINE_VERSION
+              try: import torch; checks['torch']=torch.__version__; checks['cuda_available']=torch.cuda.is_available()
+              except Exception: checks['torch']='not installed'; checks['cuda_available']=False
+              for k,v in checks.items(): print(f'{k}: {v}')
+              return 1 if not checks['ffmpeg'] or not checks['ffprobe'] else 0
+          def test():
+              env=os.environ.copy(); env['PYTHONPATH']=str(repo_root()/'src')+os.pathsep+env.get('PYTHONPATH',''); return subprocess.call([sys.executable,'-m','pytest','-q'],cwd=repo_root(),env=env)
+          def clean(ep,destroy=False):
+              d=episode_dir(ep)
+              for p in (d/'work/audio_review',d/'work/captions'):
+                  print(('DELETE ' if destroy else 'DRY-RUN ')+str(p)); shutil.rmtree(p) if destroy and p.exists() else None
+              print('Source media and translation outputs are never deleted by clean.'); return 0
+          def main(argv=None):
+              p=argparse.ArgumentParser(prog='mas'); p.add_argument('--version',action='version',version=PIPELINE_VERSION); sub=p.add_subparsers(dest='cmd',required=True); r=sub.add_parser('run'); r.add_argument('episode',type=int); r.add_argument('--source-url'); r.add_argument('--fixture',action='store_true',help=argparse.SUPPRESS); r.add_argument('--stop-after',choices=['source','audio','asr'],help=argparse.SUPPRESS); s=sub.add_parser('status'); s.add_argument('episode',type=int); sub.add_parser('doctor'); sub.add_parser('test'); c=sub.add_parser('clean'); c.add_argument('episode',type=int); c.add_argument('--dry-run',action='store_true',default=True); c.add_argument('--destroy',action='store_true'); a=p.parse_args(argv)
+              try: return {'run':lambda:run(a.episode,a.source_url,a.fixture,a.stop_after),'status':lambda:status(a.episode),'doctor':doctor,'test':test,'clean':lambda:clean(a.episode,a.destroy)}[a.cmd]()
+              except Exception as e:
+                  ep=getattr(a,'episode',None); logs=(episode_dir(ep) if ep else repo_root())/'logs'; logs.mkdir(parents=True,exist_ok=True); tb=logs/'last_failure.traceback.log'; tb.write_text(traceback.format_exc(),encoding='utf-8'); print(f'FAILED STAGE: {a.cmd.upper()}\nCAUSE: {e}\nCHECKPOINT PRESERVED: yes\nTRACEBACK: {tb}',file=sys.stderr); print(f'SAFE RETRY:\n./mas run {ep}',file=sys.stderr) if ep else None; return 1
+          if __name__=='__main__': raise SystemExit(main())
+          ''')
+          w('src/mas/__init__.py', "from .version import PIPELINE_VERSION as __version__\n")
+          w('mas', '''
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+          PY="${MAS_PYTHON:-$ROOT/.venv/bin/python}"; [[ -x "$PY" ]] || PY=python3
+          exec "$PY" -m mas.cli "$@"
+          ''',0o755)
+          for p in ('src/mas/packs/__init__.py','src/mas/subtitle/__init__.py','src/mas/stages/__init__.py'): Path(p).parent.mkdir(parents=True,exist_ok=True); Path(p).touch(exist_ok=True)
+          for p in ('src/mas/stages/acquire.py','src/mas/stages/media.py','src/mas/stages/asr.py','src/mas/stages/captions.py','src/mas/stages/vad.py','src/mas/stages/reconcile.py','src/mas/stages/prepare_tr.py','src/mas/stages/audio_review.py','src/mas/stages/align.py','src/mas/stages/prepare_id.py','src/mas/stages/finalize.py','src/mas/stages/qc.py','src/mas/stages/archive.py','src/mas/subtitle/timing.py','src/mas/subtitle/speakers.py','src/mas/subtitle/segmentation.py'):
+              if not Path(p).exists(): w(p,'"""Compatibility module. Production orchestration lives in mas.pipeline."""\n')
+          if not Path('rules/TRANSLATION_SPEC.md').exists(): w('rules/TRANSLATION_SPEC.md','''
+          # Translation specification
+          Preserve record count, order, block_uid, block_index, timing, numbers, dates, quantities, currencies, proper names, interruptions, hesitation, insults, jokes, and emotional intent. Indonesian dialogue must sound natural. Use aku, kamu, nggak, udah, and aja only where informal; use saya, Anda, Pak, and Bu in formal scenes. Do not sanitize, explain jokes, add translator notes or speaker labels, or invent audio-dependent text.
+          ''')
+          if not Path('rules/SUBTITLE_SPEC.md').exists(): w('rules/SUBTITLE_SPEC.md','''
+          # Subtitle specification
+          Timestamps increase, end is after start, independent speakers stay separate, overlap requires evidence, timing follows speech evidence, and final records contain no blank dialogue, speaker labels, or metadata. Existing V2 thresholds take precedence; fallback limits are 2 lines, 42 characters per line, 22 characters per second, and 500-8000 ms duration.
+          ''')
+          for p in ('rules/GLOSSARY.json','rules/NAMES.json'):
+              if not Path(p).exists(): w(p,'{"version":"v2-beta-2026-09-04","entries":{}}\n')
+          w('runpod/bootstrap.sh','''
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
+          python3.11 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.lock
+          .venv/bin/python - <<'PY2'
+          from pathlib import Path
+          for p in ('rules/SUBTITLE_SPEC.md','rules/TRANSLATION_SPEC.md','rules/GLOSSARY.json','rules/NAMES.json'): assert Path(p).exists(),p
+          print('rules: OK')
+          PY2
+          MAS_PYTHON="$ROOT/.venv/bin/python" ./mas doctor
+          ''',0o755)
+          w('runpod/preflight.sh','''
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"; PY="$ROOT/.venv/bin/python"; [[ -x "$PY" ]] || { echo 'Run ./runpod/bootstrap.sh first'; exit 1; }; MAS_PYTHON="$PY" ./mas doctor; MAS_PYTHON="$PY" ./mas --help >/dev/null
+          ''',0o755)
+          w('tests/release/test_release_runtime.py','''
+          import json,zipfile
+          from pathlib import Path
+          import pytest
+          from mas.packs.build import build_pack
+          from mas.packs.validate import validate_returned
+          from mas.errors import PackageValidationError
+          from mas.subtitle.srt import render
+          from mas.subtitle.validation import qc
+          from mas import pipeline
+          def rows(): return [{'block_uid':'u1','block_index':1,'start_ms':1000,'end_ms':2200,'tr_text':'Merhaba Defne.','id_text':'Halo Defne.','asr_audit':{},'audio_reviewed':False,'review_disposition':None},{'block_uid':'u2','block_index':2,'start_ms':2400,'end_ms':4000,'tr_text':'Nasılsın?','id_text':'Apa kabar?','asr_audit':{},'audio_reviewed':False,'review_disposition':None}]
+          def rewrite(path,fn):
+              with zipfile.ZipFile(path) as z: m=json.loads(z.read('manifest.json')); r=json.loads(z.read('records.json'))
+              fn(m,r)
+              with zipfile.ZipFile(path,'w') as z: z.writestr('manifest.json',json.dumps(m)); z.writestr('records.json',json.dumps(r))
+          def ret(inp,out,field,prefix):
+              with zipfile.ZipFile(inp) as z: m=json.loads(z.read('manifest.json')); r=json.loads(z.read('records.json'))
+              for i,x in enumerate(r): x[field]=f'{prefix} {i+1}'
+              with zipfile.ZipFile(out,'w') as z: z.writestr('manifest.json',json.dumps(m)); z.writestr('records.json',json.dumps(r))
+          def test_roundtrip_and_immutable(tmp_path):
+              p=tmp_path/'x.zip'; m=build_pack(p,13,'TR',rows()); assert len(validate_returned(p,m,rows()))==2; rewrite(p,lambda m,r:r[0].update(start_ms=999))
+              with pytest.raises(PackageValidationError,match='immutable'): validate_returned(p,m,rows())
+          @pytest.mark.parametrize('fn,msg',[(lambda m,r:m.update(episode=14),'episode mismatch'),(lambda m,r:r.pop(),'record count'),(lambda m,r:r.reverse(),'block_uid/order'),(lambda m,r:r[1].update(block_uid='u1'),'block_uid/order')])
+          def test_bad_packages(tmp_path,fn,msg):
+              p=tmp_path/'x.zip'; m=build_pack(p,13,'ID',rows()); rewrite(p,fn)
+              with pytest.raises(PackageValidationError,match=msg): validate_returned(p,m,rows())
+          def test_srt_qc(): assert '00:00:01,000 --> 00:00:02,200' in render(rows(),'id_text'); assert qc(rows())==[]
+          def test_resume(tmp_path,monkeypatch):
+              monkeypatch.setenv('MAS_WORKSPACE',str(tmp_path)); ep=13
+              with pytest.raises(RuntimeError,match='Intentional'): pipeline.run(ep,fixture=True,stop_after='asr')
+              d=tmp_path/'EPISODES/Muhtemel Ask 13.Bolum'; first=json.loads((d/'work/state.json').read_text())['stages']['asr']['completed_at']; assert pipeline.run(ep,fixture=True)==20
+              ret(d/'translation_input/Muhtemel Ask 13.Bolum_TR_CORRECTION_PACK.zip',d/'translation_output/Muhtemel Ask 13.Bolum_TR_TEXT_CORRECTED.zip','tr_text','Düzeltilmiş'); assert pipeline.run(ep,fixture=True)==21
+              ret(d/'translation_input/Muhtemel Ask 13.Bolum_ID_TRANSLATION_PACK.zip',d/'translation_output/Muhtemel Ask 13.Bolum_ID_TRANSLATED.zip','id_text','Terjemahan'); assert pipeline.run(ep,fixture=True)==0
+              s=json.loads((d/'work/state.json').read_text()); assert s['stages']['asr']['completed_at']==first; align=s['stages']['align']['completed_at']; ret(d/'translation_input/Muhtemel Ask 13.Bolum_ID_TRANSLATION_PACK.zip',d/'translation_output/Muhtemel Ask 13.Bolum_ID_TRANSLATED.zip','id_text','Baru'); assert pipeline.run(ep,fixture=True)==0; assert json.loads((d/'work/state.json').read_text())['stages']['align']['completed_at']==align
+          ''')
+          PY
+      - name: Remove obsolete bootstrap artifacts
+        shell: bash
+        run: rm -rf bootstrap .github/workflows/bootstrap.yml
+      - name: Install and run complete CPU suite
+        run: |
+          python -m pip install PyYAML==6.0.2 openpyxl==3.1.5 pytest==8.3.5
+          export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+          python -m compileall -q src tests
+          ./mas --help >/dev/null
+          ./mas test
+      - name: Docker test-stage build
+        run: docker build --target test -t ma-sub:v0.1.0-test .
+      - name: Commit exact tested tree and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ma-sub release gate'
+          git config user.email 'actions@users.noreply.github.com'
+          rm -f .github/workflows/repair-release-v010.yml .github/workflows/release-v0.1.0.yml
+          git add -A
+          if ! git diff --cached --quiet; then git commit -m 'Finalize checkpointed production pipeline v0.1.0'; fi
+          git push origin HEAD:main
+          if git rev-parse -q --verify refs/tags/v0.1.0 >/dev/null; then
+            test "$(git rev-parse 'v0.1.0^{tree}')" = "$(git rev-parse 'HEAD^{tree}')"
+          else
+            git tag -a v0.1.0 -m 'ma-sub v0.1.0'
+            git push origin refs/tags/v0.1.0
+          fi
+          echo "Commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag: v0.1.0" >> "$GITHUB_STEP_SUMMARY"

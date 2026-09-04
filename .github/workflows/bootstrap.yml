@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   bootstrap:
-    if: ${{ hashFiles('bootstrap/repo.zip.b64') != '' }}
+    if: ${{ hashFiles('bootstrap/repo.zip.b64.part-*') != '' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -22,10 +22,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d bootstrap/repo.zip.b64 > /tmp/ma-sub.zip
+          cat bootstrap/repo.zip.b64.part-* | base64 -d > /tmp/ma-sub.zip
           unzip -oq /tmp/ma-sub.zip -d .
           chmod +x mas runpod/preflight.sh runpod/start.sh
-          rm -f bootstrap/repo.zip.b64
+          rm -f bootstrap/repo.zip.b64.part-*
           rmdir bootstrap 2>/dev/null || true
           rm -f .github/workflows/bootstrap.yml
       - name: Regression test

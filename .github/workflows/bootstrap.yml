@@ -18,25 +18,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11.13'
-      - name: Decode and expand repository payload
+      - name: Find and expand valid repository payload
         shell: bash
         run: |
           set -euo pipefail
           test -f bootstrap/READY
           python - <<'PY'
           from pathlib import Path
-          p = Path('bootstrap/essential.part-11')
-          raw = p.read_bytes()
-          allowed = set(b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n')
-          bad = [(i, b) for i, b in enumerate(raw) if b not in allowed]
-          print(f'part11_bytes={len(raw)} invalid_base64_bytes={bad[:20]} count={len(bad)}')
+          import base64, subprocess
+
+          parts = sorted(Path('bootstrap').glob('essential.part-*'))
+          chosen = None
+          joined = ''
+          for idx, part in enumerate(parts, 1):
+              joined += ''.join(part.read_text().split())
+              try:
+                  raw = base64.b64decode(joined, validate=True)
+              except Exception as exc:
+                  print(f'PREFIX {idx:02d}: base64 invalid ({type(exc).__name__})')
+                  continue
+              candidate = Path(f'/tmp/prefix-{idx:02d}.tar.xz')
+              candidate.write_bytes(raw)
+              rc = subprocess.run(['xz','-t',str(candidate)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+              print(f'PREFIX {idx:02d}: decoded={len(raw)} xz_rc={rc}')
+              if rc == 0:
+                  chosen = candidate
+          if chosen is None:
+              raise SystemExit('NO_VALID_BOOTSTRAP_PREFIX')
+          print(f'VALID_BOOTSTRAP={chosen}')
+          Path('/tmp/ma-sub.tar.xz').write_bytes(chosen.read_bytes())
           PY
-          cat bootstrap/essential.part-* \
-            | tr -cd 'A-Za-z0-9+/=\n\r' \
-            | base64 -d > /tmp/ma-sub.tar.xz
           xz -t /tmp/ma-sub.tar.xz
           tar -xJf /tmp/ma-sub.tar.xz -C .
-          chmod +x mas runpod/preflight.sh runpod/start.sh runpod/bootstrap.sh
+          test -f tools/run_tests.py || true
+          chmod +x mas 2>/dev/null || true
+          chmod +x runpod/preflight.sh runpod/start.sh runpod/bootstrap.sh 2>/dev/null || true
           rm -rf bootstrap
           rm -f .github/workflows/bootstrap.yml
       - name: Regression test

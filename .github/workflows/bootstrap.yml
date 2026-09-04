@@ -18,13 +18,39 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11.13'
-      - name: Expand repository payload
+      - name: Decode and expand repository payload
         shell: bash
         run: |
           set -euo pipefail
           test -f bootstrap/READY
-          cat bootstrap/essential.part-* | base64 -d > /tmp/ma-sub.tar.xz
-          tar -xJf /tmp/ma-sub.tar.xz -C .
+          rm -f /tmp/ma-sub.tar.xz /tmp/parts.tar.xz
+          set +e
+          cat bootstrap/essential.part-* | base64 -d > /tmp/ma-sub.tar.xz 2>/tmp/joined.err
+          joined_rc=$?
+          xz -t /tmp/ma-sub.tar.xz >/dev/null 2>&1
+          joined_xz=$?
+          : > /tmp/parts.tar.xz
+          parts_rc=0
+          for part in bootstrap/essential.part-*; do
+            base64 -d "$part" >> /tmp/parts.tar.xz 2>/tmp/part.err || {
+              echo "INVALID_PART: $part"
+              parts_rc=1
+            }
+          done
+          xz -t /tmp/parts.tar.xz >/dev/null 2>&1
+          parts_xz=$?
+          set -e
+          echo "joined_decode_rc=$joined_rc joined_xz_rc=$joined_xz"
+          echo "per_part_decode_rc=$parts_rc per_part_xz_rc=$parts_xz"
+          if [ "$joined_rc" -eq 0 ] && [ "$joined_xz" -eq 0 ]; then
+            payload=/tmp/ma-sub.tar.xz
+          elif [ "$parts_rc" -eq 0 ] && [ "$parts_xz" -eq 0 ]; then
+            payload=/tmp/parts.tar.xz
+          else
+            echo 'BOOTSTRAP_PAYLOAD_INVALID' >&2
+            exit 22
+          fi
+          tar -xJf "$payload" -C .
           chmod +x mas runpod/preflight.sh runpod/start.sh runpod/bootstrap.sh
           rm -rf bootstrap
           rm -f .github/workflows/bootstrap.yml

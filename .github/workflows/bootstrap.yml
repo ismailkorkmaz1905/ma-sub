@@ -1,0 +1,47 @@
+name: bootstrap-ma-sub
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    if: ${{ hashFiles('bootstrap/repo.zip.b64') != '' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Expand repository payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d bootstrap/repo.zip.b64 > /tmp/ma-sub.zip
+          unzip -oq /tmp/ma-sub.zip -d .
+          chmod +x mas runpod/preflight.sh runpod/start.sh
+          rm -f bootstrap/repo.zip.b64
+          rmdir bootstrap 2>/dev/null || true
+          rm -f .github/workflows/bootstrap.yml
+      - name: Regression test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install PyYAML==6.0.2 openpyxl==3.1.5 pytest==8.3.5
+          python -m compileall -q src cli tests
+          pytest -q
+      - name: Commit expanded v0.1.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ma-sub bootstrap'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git commit -m 'Import Muhtemel Ask Pipeline v0.1.0'
+          git push origin HEAD:main

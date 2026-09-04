@@ -22,7 +22,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat bootstrap/payload.part-* | base64 -d > /tmp/ma-sub.tar.xz
+          cat bootstrap/essential.part-* | base64 -d > /tmp/ma-sub.tar.xz
           tar -xJf /tmp/ma-sub.tar.xz -C .
           chmod +x mas runpod/preflight.sh runpod/start.sh
           rm -rf bootstrap

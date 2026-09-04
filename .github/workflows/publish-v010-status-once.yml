@@ -1,0 +1,75 @@
+name: publish-v0.1.0-status-once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v010-status-once.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ma-sub-v010-status-publish
+  cancel-in-progress: false
+
+jobs:
+  publish-and-clean:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for release writer and publish non-sensitive verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 60
+          git fetch origin main --tags
+          git reset --hard origin/main
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+
+          payload = {
+              'repository': 'ismailkorkmaz1905/ma-sub',
+              'main_sha': git('rev-parse', 'origin/main'),
+          }
+          status = Path('RELEASE_STATUS.json')
+          if status.exists():
+              payload.update(json.loads(status.read_text(encoding='utf-8')))
+          else:
+              payload.update({
+                  'repository_status': 'RELEASE_STATUS_MISSING',
+                  'tag': 'v0.1.0',
+              })
+          try:
+              payload['tag_commit_sha'] = git('rev-parse', 'v0.1.0^{}')
+          except Exception as exc:
+              payload['tag_error'] = str(exc)
+          Path('/tmp/ma-sub-release-status.json').write_text(
+              json.dumps(payload, sort_keys=True),
+              encoding='utf-8',
+          )
+          PY
+          curl --fail --silent --show-error \
+            --data-binary @/tmp/ma-sub-release-status.json \
+            https://ntfy.sh/ma-sub-v010-20260904-8f4c1a7d9b2e6c0f
+
+      - name: Delete one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'ma-sub status cleanup'
+          git config user.email 'actions@users.noreply.github.com'
+          rm -f .github/workflows/publish-v010-status-once.yml
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'Remove one-shot v0.1.0 status publisher'
+            git push origin HEAD:main
+          fi

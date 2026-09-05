@@ -349,6 +349,13 @@ def test_local_http_ui_serves_audio_and_saves(tmp_path):
     thread.start()
     connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
     try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        page = response.read().decode("utf-8")
+        assert response.status == 200
+        assert "Konuşma var" in page
+        assert "ASR uydurmuş, konuşma yok" in page
+
         connection.request("GET", "/api/state?token=secret")
         response = connection.getresponse()
         state = json.loads(response.read())

@@ -66,7 +66,7 @@ Review every acceptance boundary:
 - Strict and emergency folders, filenames, markers, receipts, and release claims cannot overlap.
 - Gmail stage notifications do not expose credentials and notification failure does not corrupt state.
 - YouTube cookies are accepted only from an explicit Netscape-format file, never logged or committed, and authentication failures do not trigger unsafe fallback.
-- Drive publication is restricted to final Turkish and Indonesian SRT files under the episode folder. It uses a temporary name, reads remote bytes back, compares exact byte count and SHA-256, and only then publishes the exact final name. Source media, MKV output, code, logs, reports, and intermediate artifacts are never synced to Drive.
+- Drive publication is restricted to the final MKV, Turkish SRT, and Indonesian SRT files under the episode folder. It uses a temporary name, reads remote bytes back, compares exact byte count and SHA-256, and only then publishes the exact final name. Source media, code, logs, reports, and intermediate artifacts are never synced to Drive.
 - RunPod success, failure, translation-wait, maximum-runtime, idle-timeout, and signal paths preserve atomic state and request shutdown.
 - External observation confirms provider desired state EXITED and no active GPU compute charge. Report retained volume/storage billing separately.
 

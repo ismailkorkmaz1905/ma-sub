@@ -66,7 +66,7 @@ For each ChatGPT handoff, preserve the returned ZIP exactly and resume with:
 - Strict finalization report and subtitle QA reports
 - Local final byte counts and SHA-256 values
 - Drive temporary upload, remote readback receipt, and exact-name publication
-- Drive inventory proving that only final Turkish and Indonesian SRT files are retained in episode folders
+- Drive inventory proving that only final MKV, Turkish SRT, and Indonesian SRT files are retained in episode folders
 - RunPod stop response, external `GET /v1/pods/{podId}` result, and billing screenshot/export
 
 ## External shutdown verification

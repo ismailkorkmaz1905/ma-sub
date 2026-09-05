@@ -21,7 +21,7 @@ Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr vi
 - Added hash-bound atomic resume state, source immutability checks, finite network retries and timeouts, and no-progress watchdogs.
 - Added speaker-aware overlap handling. Different known speakers remain separate; same-speaker overlap fails; unknown-speaker overlap remains unresolved evidence.
 - Enforced timing-only overrides and strict separation of emergency and strict outputs.
-- Added Google Drive upload verification using remote byte-count and SHA-256 readback. Publication is restricted to the final Turkish and Indonesian SRT files under the Drive `EPISODES` tree; the repository, source media, MKV output, logs, reports, and intermediate artifacts are not synced.
+- Added Google Drive upload verification using remote byte-count and SHA-256 readback. Publication is restricted to the final MKV, Turkish SRT, and Indonesian SRT files under the Drive `EPISODES` tree; the repository, source media, logs, reports, and intermediate artifacts are not synced.
 - Added Gmail notifications for run start, every stage start/completion/failure, translation waits, and final readiness. `./mas notify-test` verifies configured credentials.
 - Added per-invocation local run logs with UTC metadata, Git SHA, stdout/stderr, exit code, elapsed time, and full tracebacks. Command source URLs and secret values are not logged; `logs/LATEST` points to the newest session.
 - Added optional YouTube Netscape cookie input through `MAS_YTDLP_COOKIES`. Cookie contents are validated without being logged.
@@ -41,7 +41,7 @@ Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr vi
 - A user-exported 3,225-byte Netscape cookie file was copied byte-for-byte to `C:\Users\Ismail\.config\ma-sub\youtube-cookies.txt`, restricted to the current Windows user, and bound through the persistent user-level `MAS_YTDLP_COOKIES` variable. Its 23 non-comment records and YouTube domain were validated without logging cookie values. Authenticated source acquisition and the equivalent RunPod secret-file mount remain unverified.
 - Official-channel discovery was exercised live with the cookie file and resolved Episode 12 to `https://www.youtube.com/watch?v=yVCzw_dFZA8`. Media download itself remains unverified in the production pipeline.
 - Real full-episode GPU inference was not performed.
-- Live Google Drive upload/readback was not performed. The connected Drive currently requires a one-time cleanup of old system snapshots and Episode 12 intermediate/source artifacts; preserve only the final SRT copy in the episode folder.
+- Live Google Drive upload/readback was not performed. Old system snapshots and Episode 12 intermediate/source folders were moved to Drive Trash during cleanup. Episode 12 final MKV and SRT files must be retained.
 - Live RunPod stop and external billing-state verification were not performed.
 
 Skipped local tests include Windows cases that require symlink privilege. Treat skipped tests as reported evidence, not passes.

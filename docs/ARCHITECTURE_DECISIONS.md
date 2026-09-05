@@ -32,7 +32,7 @@ Strict artifacts and markers live under `final/`. Emergency artifacts and marker
 
 Final files publish through `rclone` or a provider API using a temporary name. PASS requires reading the remote bytes back and matching both exact byte count and SHA-256 before the exact final name is published. A mounted path, copy exit code, or metadata-only hash is insufficient.
 
-Drive is not a workspace or repository mirror. The strict publisher uploads only the final Turkish and Indonesian SRT files under `EPISODES/Muhtemel Ask N.Bolum/`. Source media, MKV output, code, logs, reports, credentials, and intermediate artifacts remain outside Drive.
+Drive is not a workspace or repository mirror. The strict publisher uploads only the final MKV, Turkish SRT, and Indonesian SRT files under `EPISODES/Muhtemel Ask N.Bolum/`. Source media, code, logs, reports, credentials, and intermediate artifacts remain outside Drive.
 
 ## ADR-009: Network work is bounded
 

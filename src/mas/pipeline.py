@@ -33,7 +33,7 @@ from .engine.tr_correction import create_tr_correction_pack, read_tr_correction_
 
 WAIT_TR = 20
 WAIT_ID = 21
-STRICT_DRIVE_OUTPUTS = ("tr_srt", "id_srt")
+STRICT_DRIVE_OUTPUTS = ("mkv", "tr_srt", "id_srt")
 
 
 def _paths(episode):

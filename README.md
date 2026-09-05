@@ -139,7 +139,7 @@ a no-progress watchdog.
 - Verified cross-speaker overlap remains separate. Speaker text is never merged.
 - Strict outputs live under `final/`. Emergency outputs live under `emergency/` and cannot create or replace strict markers.
 - Local file existence is not delivery. Drive publication passes only after remote byte count and SHA-256 readback match.
-- Drive is a delivery target, not a repository mirror. Only the final Turkish and Indonesian SRT files are uploaded into each episode folder. Source media, MKV output, logs, reports, code, and intermediate artifacts stay out of Drive.
+- Drive is a delivery target, not a repository mirror. Only the final MKV, Turkish SRT, and Indonesian SRT files are uploaded into each episode folder. Source media, logs, reports, code, and intermediate artifacts stay out of Drive.
 - A RunPod stop response is a request, not proof of zero billing. Verify provider state from outside the pod.
 
 ## RunPod

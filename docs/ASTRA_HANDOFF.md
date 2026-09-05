@@ -12,6 +12,8 @@ Episode 12 has retained historical MKV and subtitle material on Drive. Its exact
 
 The third Episode 11 attempt verified SSH, cookie and rclone setup but failed before inference because `uv pip sync` omitted Torch transitive dependencies; `typing_extensions` was the observed missing import. The controller verified `EXITED` after `360.016 seconds`. Bootstrap now reuses the persistent `/workspace` environment and caches and uses dependency-resolving `uv pip install`. The corrected bootstrap has not yet been exercised on the paid Pod.
 
+The following automated retry exposed uv's default first-index conflict between the PyTorch wheel index and yt-dlp's `requests` constraint. Bootstrap and Docker now resolve across both required trusted indexes. Linux/Python 3.11 resolution completed with `131 packages`; paid-Pod verification remains required.
+
 ## Review commands
 
 Windows:

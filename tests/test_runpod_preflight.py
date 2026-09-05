@@ -85,5 +85,8 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     script = (ROOT / "runpod" / "bootstrap.sh").read_text(encoding="utf-8")
     assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"' in script
     assert 'if [[ ! -x "$VENV/bin/python" ]]; then' in script
-    assert 'uv pip install --python "$VENV/bin/python" --requirements requirements.lock' in script
+    assert (
+        'uv pip install --python "$VENV/bin/python" '
+        '--index-strategy unsafe-best-match --requirements requirements.lock'
+    ) in script
     assert "uv pip sync" not in script

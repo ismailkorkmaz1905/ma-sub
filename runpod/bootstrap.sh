@@ -34,5 +34,5 @@ mkdir -p "$UV_CACHE_DIR"
 if [[ ! -x "$VENV/bin/python" ]]; then
   uv venv --python 3.11 "$VENV"
 fi
-uv pip install --python "$VENV/bin/python" --requirements requirements.lock
+uv pip install --python "$VENV/bin/python" --index-strategy unsafe-best-match --requirements requirements.lock
 PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod

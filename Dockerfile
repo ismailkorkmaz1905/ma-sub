@@ -15,7 +15,7 @@ RUN apt-get update \
     && uv venv --python 3.11 /opt/venv
 WORKDIR /workspace/ma-sub
 COPY requirements.lock ./
-RUN uv pip install --python /opt/venv/bin/python --requirements requirements.lock
+RUN uv pip install --python /opt/venv/bin/python --index-strategy unsafe-best-match --requirements requirements.lock
 COPY . ./
 RUN chmod +x mas runpod/*.sh
 ENTRYPOINT ["./mas"]

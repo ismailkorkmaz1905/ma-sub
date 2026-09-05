@@ -50,6 +50,29 @@ def test_wait_requires_running_ip_and_ssh_mapping():
     ) == ("192.0.2.4", "10022")
 
 
+def test_ssh_authentication_failure_stops_without_retry(monkeypatch, tmp_path):
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        return type(
+            "Result",
+            (),
+            {"returncode": 255, "stderr": b"root@host: Permission denied (publickey)."},
+        )()
+
+    monkeypatch.setattr(runpod_controller.subprocess, "run", run)
+    monkeypatch.setattr(
+        runpod_controller.time,
+        "sleep",
+        lambda seconds: (_ for _ in ()).throw(AssertionError("must not retry")),
+    )
+
+    with pytest.raises(runpod_controller.RunPodControllerError, match="authentication rejected"):
+        runpod_controller._wait_for_ssh(tmp_path / "key", "192.0.2.4", "10022")
+    assert len(calls) == 1
+
+
 def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(tmp_path):
     values = {
         "RUNPOD_POD_ID": "pod123",

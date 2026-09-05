@@ -6,7 +6,7 @@ The maintained package, strict CLI orchestration, historical source archive, run
 
 Real GPU inference has not been performed. Live Google Drive byte/SHA-256 readback and provider-side RunPod shutdown have not been verified. Review `main` directly. Do not create a stable tag on local test results alone.
 
-The configured RunPod is `p54vvbyu76eztn` (`muhtemel-ask-ep12`). Its API credentials are stored outside Git in Windows User environment variables. The last recorded authenticated REST read observed `desiredStatus=EXITED`, but its exact observation time was not retained. Re-query before and after a real run. This does not verify automatic startup, remote execution, pipeline shutdown, or billing. The attached 50 GB network volume is `xgogcmey5o`; its last recorded rate was `$0.07/GB/month`, deriving to `$3.50/month`, but current pricing must be re-queried.
+The configured RunPod is `p54vvbyu76eztn` (`muhtemel-ask-ep12`). Its API credentials are stored outside Git in Windows User environment variables. On 2026-09-05, the first Episode 11 attempt started the Pod but failed before deployment because the existing Pod had no SSH public key. The controller stopped it and an authenticated REST read verified `desiredStatus=EXITED`; the run log recorded `347.187 seconds`. The Pod-specific `PUBLIC_KEY` and `SSH_PUBLIC_KEY` values were then populated and read back as exact matches while it remained `EXITED`. Successful SSH and GPU execution still require a paid retry. The attached 50 GB network volume is `xgogcmey5o`; its last recorded rate was `$0.07/GB/month`, deriving to `$3.50/month`, but current pricing must be re-queried.
 
 Episode 12 has retained historical MKV and subtitle material on Drive. Its exact remote sizes and hashes were not recorded. Do not use Episode 12 for the first real run. The local RunPod controller, complete source discovery, source identity checks, download watchdog, strict Pod preflight, handoff transfer, and fail-closed Drive publication are implemented and locally tested. No successful real-environment runtime verification is claimed.
 
@@ -59,7 +59,7 @@ export MAS_IDLE_TIMEOUT_SECONDS=1800
 ./runpod/run-episode.sh 11
 ```
 
-The Windows entrypoint `.\mas.ps1 run 11` owns bounded Pod start, API and SSH readiness, deployment, streamed logs, handoff download/upload, secret cleanup, stop, and external EXITED polling. It performs local preflight before startup and refuses a dirty repository or non-EXITED Pod. These paths are locally tested but have not been exercised against the paid Pod.
+The Windows entrypoint `.\mas.ps1 run 11` owns bounded Pod start, API and SSH readiness, deployment, streamed logs, handoff download/upload, secret cleanup, stop, and external EXITED polling. It performs local preflight before startup and refuses a dirty repository or non-EXITED Pod. Startup and controller-driven failure shutdown were exercised against the paid Pod. Deployment, successful SSH, GPU work, handoffs, and pipeline-driven shutdown were not.
 
 For each ChatGPT handoff, preserve the returned ZIP exactly and resume with:
 

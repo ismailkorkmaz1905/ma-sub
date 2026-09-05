@@ -67,6 +67,9 @@ class RunPodClient:
             last = self.get()
             if predicate(last):
                 return last
+            elapsed = time.monotonic() - started
+            status = last.get("desiredStatus", "UNKNOWN")
+            print(f"[RUNPOD] waiting for {description}: status={status}; elapsed={elapsed:.1f}s")
             self.sleep(poll)
         status = (last or {}).get("desiredStatus", "UNKNOWN")
         raise RunPodControllerError(f"RunPod {description} timed out after {timeout}s; status={status}")
@@ -202,13 +205,21 @@ def _scp_args(key, host, port):
 def _wait_for_ssh(key, host, port, *, timeout=300):
     started = time.monotonic()
     command = _ssh_args(key, host, port) + ["true"]
+    attempt = 0
     while time.monotonic() - started < timeout:
+        attempt += 1
         try:
             result = subprocess.run(command, capture_output=True, timeout=20, check=False)
         except subprocess.TimeoutExpired:
             result = None
         if result is not None and result.returncode == 0:
             return
+        if result is not None and b"Permission denied" in result.stderr:
+            raise RunPodControllerError(
+                "SSH authentication rejected; verify the Pod PUBLIC_KEY and SSH_PUBLIC_KEY"
+            )
+        elapsed = time.monotonic() - started
+        print(f"[RUNPOD] waiting for SSH: attempt={attempt}; elapsed={elapsed:.1f}s")
         time.sleep(5)
     raise RunPodControllerError(f"SSH readiness timed out after {timeout}s")
 

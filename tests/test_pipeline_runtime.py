@@ -30,7 +30,7 @@ def test_drive_upload_cannot_target_emergency(tmp_path):
         upload_verified(source, "drive:emergency/strict.srt")
 
 
-def test_stage_records_elapsed_seconds_on_success_and_failure(tmp_path, monkeypatch):
+def test_stage_records_elapsed_seconds_on_success_and_failure(tmp_path, monkeypatch, capsys):
     state = {"episode": 13}
     values = iter((10.0, 12.5, 20.0, 23.25))
     monkeypatch.setattr("mas.pipeline.time.monotonic", lambda: next(values))
@@ -43,6 +43,12 @@ def test_stage_records_elapsed_seconds_on_success_and_failure(tmp_path, monkeypa
     with pytest.raises(ValueError, match="broken"):
         _stage(path, state, "failed", lambda: (_ for _ in ()).throw(ValueError("broken")))
     assert state["stages"]["failed"]["elapsed_seconds"] == 3.25
+    assert capsys.readouterr().out.splitlines() == [
+        "[STAGE] ok: START",
+        "[STAGE] ok: PASS elapsed=2.5s",
+        "[STAGE] failed: START",
+        "[STAGE] failed: FAIL elapsed=3.2s",
+    ]
 
 
 def test_drive_readback_hashes_stream_without_buffering_file(tmp_path, monkeypatch):

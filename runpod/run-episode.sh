@@ -47,7 +47,7 @@ trap 'exit 129' HUP
 
 bash "$ROOT/runpod/preflight.sh" 2>&1 | tee -a "$LOG_PATH"
 
-setsid stdbuf -oL -eL ./mas run "$@" --local > >(tee -a "$LOG_PATH") 2>&1 &
+setsid env PYTHONUNBUFFERED=1 stdbuf -oL -eL ./mas run "$@" --local > >(tee -a "$LOG_PATH") 2>&1 &
 pipeline_pid=$!
 started="$(date +%s)"
 stop_reason=""

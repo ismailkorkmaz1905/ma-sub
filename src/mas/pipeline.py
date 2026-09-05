@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -84,28 +85,46 @@ def _guard_existing_source(state, source_dir):
 def _stage(path, state, name, action):
     started = time.monotonic()
     set_stage(path, state, name, "running")
+    print(f"[STAGE] {name}: START", flush=True)
     notify(state["episode"], f"{name} basladi")
+    heartbeat_stop = threading.Event()
+
+    def heartbeat():
+        while not heartbeat_stop.wait(30):
+            elapsed = time.monotonic() - started
+            print(f"[STAGE] {name}: RUNNING elapsed={elapsed:.1f}s", flush=True)
+
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    heartbeat_thread.start()
     try:
         details = action() or {}
     except Exception as exc:
+        heartbeat_stop.set()
+        heartbeat_thread.join()
+        elapsed = time.monotonic() - started
         set_stage(
             path,
             state,
             name,
             "failed",
             error=f"{type(exc).__name__}: {exc}",
-            elapsed_seconds=round(time.monotonic() - started, 3),
+            elapsed_seconds=round(elapsed, 3),
         )
+        print(f"[STAGE] {name}: FAIL elapsed={elapsed:.1f}s", flush=True)
         notify(state["episode"], f"{name} basarisiz", f"{type(exc).__name__}: {exc}")
         raise
+    heartbeat_stop.set()
+    heartbeat_thread.join()
+    elapsed = time.monotonic() - started
     set_stage(
         path,
         state,
         name,
         "pass",
-        elapsed_seconds=round(time.monotonic() - started, 3),
+        elapsed_seconds=round(elapsed, 3),
         **details,
     )
+    print(f"[STAGE] {name}: PASS elapsed={elapsed:.1f}s", flush=True)
     notify(state["episode"], f"{name} tamamlandi")
     return details
 

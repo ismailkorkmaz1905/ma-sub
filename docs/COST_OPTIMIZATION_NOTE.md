@@ -10,3 +10,12 @@ Possible later architecture:
 - Consider spot or another GPU provider only after measuring reliability and startup/model-download overhead.
 
 Preferred direction: keep RunPod, but change to `local preparation -> short GPU work -> local finalization`. No implementation decision has been made.
+
+## Persistence and resume
+
+- Keep the Python environment, uv/model caches and tools under `/workspace`; create or sync them only when their lock hash changes.
+- Completed download, audio, raw ASR and forced-alignment outputs use hash-verified markers and can be reused.
+- An interrupted audio extraction or forced-alignment stage currently restarts that stage.
+- Raw ASR can reuse its recovery checkpoint only after that checkpoint has been written; an earlier interruption restarts raw ASR.
+- Audio review checkpoints every few clips and resumes completed decisions.
+- Future work: add finer checkpoints inside long ASR and alignment work without weakening source, schema or hash validation.

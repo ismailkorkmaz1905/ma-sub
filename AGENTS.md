@@ -19,6 +19,8 @@ Start by reading `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`
 - Different known speakers may overlap, but their text must never be merged. Same-speaker overlap fails. Unknown-speaker overlap remains review evidence.
 - Network work must have finite retries, connection/request timeouts, and a no-progress watchdog.
 - Keep credentials, Gmail app passwords, RunPod keys, rclone configuration, and YouTube cookies out of Git. Use environment variables or provider secrets.
+- Start paid RunPod compute only when an operator starts a real episode run. The controller must use bounded readiness timeouts, stream logs, preserve checkpoints, and verify shutdown from outside the Pod on every exit path.
+- Treat the 50 GB network volume as a fixed `$3.50/month` cost at the observed `$0.07/GB/month` rate. File deletion does not reduce that allocation; permanent volume deletion requires preserved deliverables and explicit user approval.
 
 ## Required workflow
 

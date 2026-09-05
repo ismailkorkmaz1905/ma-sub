@@ -160,4 +160,6 @@ export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
 
 `run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. On completion, failure, handoff wait, or watchdog termination, it requests a provider-side stop through RunPod's REST API.
 
+The current local CLI does not start a stopped RunPod or open a remote shell. Until the local controller is implemented, Pod startup and remote command launch remain explicit operator steps. Do not start paid compute until the repository, secrets, cookies, and Drive remote are ready.
+
 Keep provider keys and pipeline credentials in environment secrets, never in the repository or command history. Stopping a Pod releases its GPU but may retain billable volume storage. A Pod with a network volume may require termination instead of stop after artifacts are verified.

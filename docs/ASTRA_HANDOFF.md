@@ -6,6 +6,8 @@ The maintained package, strict CLI orchestration, historical source archive, run
 
 Real GPU inference has not been performed. Live Google Drive byte/SHA-256 readback and provider-side RunPod shutdown have not been verified. Review `main` directly. Do not create a stable tag on local test results alone.
 
+The configured RunPod is `p54vvbyu76eztn` (`muhtemel-ask-ep12`). Its API credentials are stored outside Git in Windows User environment variables, and an authenticated REST read observed `desiredStatus=EXITED`. This does not verify automatic startup, remote execution, pipeline shutdown, or billing. The attached 50 GB network volume `xgogcmey5o` costs `$3.50/month` at the observed `$0.07/GB/month` rate until it is permanently deleted.
+
 ## Review commands
 
 Windows:
@@ -18,6 +20,7 @@ git rev-parse HEAD
 & .\.venv\Scripts\python.exe -m pytest -q tests
 & .\.venv\Scripts\python.exe -m pytest -q tests/regression/test_ep12_reliability.py
 & .\.venv\Scripts\python.exe -m pytest -q tests/test_pipeline_runtime.py
+.\mas.ps1 doctor
 git diff --check
 docker build --check .
 docker build -t ma-sub:astra .
@@ -45,10 +48,16 @@ Store secrets in RunPod environment variables, not the repository or shell histo
 export RUNPOD_POD_ID='POD_ID'
 export RUNPOD_API_KEY='API_KEY'
 export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles/EPISODES'
+export MAS_GMAIL_ADDRESS='your.account@gmail.com'
+export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
+export MAS_NOTIFY_TO='your.account@gmail.com'
+export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
 export MAS_MAX_RUNTIME_SECONDS=14400
 export MAS_IDLE_TIMEOUT_SECONDS=1800
 ./runpod/run-episode.sh 13
 ```
+
+The current local CLI does not start or connect to a stopped Pod. Until the RunPod controller is completed, starting the Pod and launching the remote command are explicit operator steps. Do not start compute before all Pod-local secrets, repository state, Drive configuration, and cookie file are ready.
 
 For each ChatGPT handoff, preserve the returned ZIP exactly and resume with:
 

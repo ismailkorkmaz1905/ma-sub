@@ -36,7 +36,7 @@ git branch --all
 & .\.venv\Scripts\python.exe -m pytest -q tests/regression/test_ep12_reliability.py
 & .\.venv\Scripts\python.exe -m pytest -q tests/test_pipeline_runtime.py
 git diff --check
-./mas doctor
+.\mas.ps1 doctor
 
 Run at minimum on Linux or RunPod:
 
@@ -68,6 +68,8 @@ Review every acceptance boundary:
 - YouTube cookies are accepted only from an explicit Netscape-format file, never logged or committed, and authentication failures do not trigger unsafe fallback.
 - Drive publication is restricted to the final MKV, Turkish SRT, and Indonesian SRT files under the episode folder. It uses a temporary name, reads remote bytes back, compares exact byte count and SHA-256, and only then publishes the exact final name. Source media, code, logs, reports, and intermediate artifacts are never synced to Drive.
 - RunPod success, failure, translation-wait, maximum-runtime, idle-timeout, and signal paths preserve atomic state and request shutdown.
+- A local real-run command starts an EXITED Pod only when work is requested, waits with bounded timeout, launches the remote pipeline securely, streams logs, and verifies shutdown externally. It must not leave paid compute running after any exit path.
+- The retained 50 GB network volume cost is accounted for separately. Ordinary file deletion must not be claimed to reduce its fixed allocation cost; permanent deletion may happen only after required evidence and deliverables are preserved.
 - External observation confirms provider desired state EXITED and no active GPU compute charge. Report retained volume/storage billing separately.
 
 Real GPU truth boundary:

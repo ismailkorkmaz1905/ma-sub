@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from mas.engine.forced_align import (
+    AUDIO_REVIEW_SCORE_CONTEXT,
     CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE,
     DEFAULT_MAX_OUTWARD_DRIFT_MS,
     DEFAULT_MAX_WORD_DURATION_MS,
@@ -460,6 +461,82 @@ class ForcedAlignmentTests(unittest.TestCase):
                 align_corrected_segments(
                     self._audio(directory), [_coarse()[1]], whisperx_module=fake
                 )
+
+    def test_hash_bound_audio_review_supports_low_alignment_score(self) -> None:
+        coarse = [_coarse()[1]]
+        coarse[0]["audio_reviewed"] = True
+        coarse[0]["review_disposition"] = "confirmed_dialogue"
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {
+                            "word": coarse[0]["text"],
+                            "start": 4.1,
+                            "end": 4.7,
+                            "score": 0.0,
+                        }
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+
+        self.assertTrue(data["segments"][0]["audio_reviewed"])
+        self.assertEqual(
+            data["segments"][0]["review_disposition"], "confirmed_dialogue"
+        )
+        self.assertEqual(data["words"][0]["score_context"], AUDIO_REVIEW_SCORE_CONTEXT)
+        validate_forced_alignment_data(data)
+
+        tampered = copy.deepcopy(data)
+        tampered["words"][0]["score_context"] = "adjacent_unchanged_word"
+        tampered["segments"][0]["words"][0]["score_context"] = (
+            "adjacent_unchanged_word"
+        )
+        with self.assertRaisesRegex(ForcedAlignmentError, "unexpected score_context"):
+            validate_forced_alignment_data(tampered)
+
+    def test_hash_bound_audio_review_supports_low_edited_token_score(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "Merhaba dunya",
+                "asr_text": "Merhaba",
+                "deletion_audio_reviewed": False,
+                "audio_reviewed": True,
+                "review_disposition": "confirmed_dialogue",
+                "utterance_uid": "utt-reviewed-insert",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 1.1, "end": 1.4, "score": 0.9},
+                        {"word": "dunya", "start": 1.5, "end": 1.9, "score": 0.3},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+
+        self.assertEqual(data["words"][1]["edit_kind"], "inserted")
+        self.assertEqual(data["words"][1]["score_context"], AUDIO_REVIEW_SCORE_CONTEXT)
+        validate_forced_alignment_data(data)
+
+    def test_inconsistent_audio_review_fields_hard_fail(self) -> None:
+        coarse = [_coarse()[1]]
+        coarse[0]["audio_reviewed"] = True
+        with self.assertRaisesRegex(ForcedAlignmentError, "fields are inconsistent"):
+            validate_coarse_segments(coarse)
 
     def test_unchanged_word_uses_bounded_adjacent_score_context(self) -> None:
         coarse = [

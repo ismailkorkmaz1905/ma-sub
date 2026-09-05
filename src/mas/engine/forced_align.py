@@ -45,6 +45,7 @@ REVIEW_WORD_SCORE = 0.55
 DEFAULT_MAX_WORD_DURATION_MS = 2_500
 DEFAULT_MAX_OUTWARD_DRIFT_MS = 500
 EDITED_TOKEN_MIN_WORD_SCORE = 0.55
+AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 
 
 class ForcedAlignmentError(RuntimeError):
@@ -340,6 +341,20 @@ def validate_coarse_segments(
             raise ForcedAlignmentError(
                 f"coarse segment {index} deletion_audio_reviewed must be boolean"
             )
+        audio_reviewed = raw.get("audio_reviewed", False)
+        review_disposition = raw.get("review_disposition", "not_applicable")
+        if not isinstance(audio_reviewed, bool):
+            raise ForcedAlignmentError(
+                f"coarse segment {index} audio_reviewed must be boolean"
+            )
+        if review_disposition not in {"not_applicable", "confirmed_dialogue"}:
+            raise ForcedAlignmentError(
+                f"coarse segment {index} review_disposition is invalid for alignment"
+            )
+        if audio_reviewed != (review_disposition == "confirmed_dialogue"):
+            raise ForcedAlignmentError(
+                f"coarse segment {index} audio-review fields are inconsistent"
+            )
         _, edit_audit = _token_edit_audit(
             asr_text,
             text,
@@ -370,6 +385,8 @@ def validate_coarse_segments(
                 "text": text,
                 "asr_text": asr_text,
                 "deletion_audio_reviewed": deletion_audio_reviewed,
+                "audio_reviewed": audio_reviewed,
+                "review_disposition": review_disposition,
                 "utterance_uid": utterance_uid,
             }
         if segment_speaker_id is not None:
@@ -385,7 +402,6 @@ def _validate_word_record(
     raw_index: int,
     window_start_ms: int,
     window_end_ms: int,
-    min_word_score: float,
     max_word_duration_ms: int,
 ) -> tuple[str, int, int, float] | None:
     text_value = raw.get("word", raw.get("text"))
@@ -448,11 +464,6 @@ def _validate_word_record(
     if not 0.0 <= score <= 1.0:
         raise ForcedAlignmentError(
             f"{utterance_uid} word {text!r} alignment score must be within [0, 1]"
-        )
-    if score < min_word_score:
-        raise ForcedAlignmentError(
-            f"{utterance_uid} word {text!r} alignment score {score:.6f} is below "
-            f"the required minimum {min_word_score:.6f}"
         )
     return text, start_ms, end_ms, score
 
@@ -518,6 +529,10 @@ def _normalize_aligned_words(
         deletion_audio_reviewed=bool(coarse["deletion_audio_reviewed"]),
     )
     raw_words = _raw_aligned_words(result, utterance_uid)
+    audio_review_supported = (
+        coarse["audio_reviewed"] is True
+        and coarse["review_disposition"] == "confirmed_dialogue"
+    )
 
     accepted: list[tuple[str, int, int, float | None]] = []
     punctuation_only_count = 0
@@ -529,9 +544,6 @@ def _normalize_aligned_words(
             raw_index=raw_index,
             window_start_ms=int(coarse["start_ms"]),
             window_end_ms=int(coarse["end_ms"]),
-            min_word_score=min(
-                min_word_score, CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
-            ),
             max_word_duration_ms=max_word_duration_ms,
         )
         if normalized is None:
@@ -569,27 +581,39 @@ def _normalize_aligned_words(
         zip(accepted, expected_tokens, token_edits)
     ):
         edit_kind = str(token_edit["edit_kind"])
-        contextual_low_score = score < min_word_score
-        if contextual_low_score:
+        score_context = None
+        if score < min_word_score:
             neighbor_scores = [
                 accepted[position][3]
                 for position in (offset - 1, offset + 1)
                 if 0 <= position < len(accepted)
             ]
-            if edit_kind != "unchanged" or not any(
-                neighbor_score >= min_word_score for neighbor_score in neighbor_scores
+            if audio_review_supported:
+                score_context = AUDIO_REVIEW_SCORE_CONTEXT
+            elif (
+                score < CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
+                or edit_kind != "unchanged"
+                or not any(
+                    neighbor_score >= min_word_score
+                    for neighbor_score in neighbor_scores
+                )
             ):
                 raise ForcedAlignmentError(
                     f"{utterance_uid} word {canonical_text!r} alignment score "
                     f"{score:.6f} is below the required minimum "
                     f"{min_word_score:.6f} without adjacent unchanged-word support"
                 )
+            else:
+                score_context = "adjacent_unchanged_word"
         if edit_kind in {"inserted", "replaced"} and score < EDITED_TOKEN_MIN_WORD_SCORE:
-            raise ForcedAlignmentError(
-                f"{utterance_uid} edited token {canonical_text!r} alignment score "
-                f"{score:.6f} is below the edited-token minimum "
-                f"{EDITED_TOKEN_MIN_WORD_SCORE:.6f}"
-            )
+            if audio_review_supported:
+                score_context = AUDIO_REVIEW_SCORE_CONTEXT
+            else:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} edited token {canonical_text!r} alignment score "
+                    f"{score:.6f} is below the edited-token minimum "
+                    f"{EDITED_TOKEN_MIN_WORD_SCORE:.6f}"
+                )
         words.append(
             {
                 "word_index": first_word_index + offset,
@@ -605,8 +629,8 @@ def _normalize_aligned_words(
                 "asr_token_index": token_edit["asr_token_index"],
                 "timing_source": TIMING_SOURCE,
                 **(
-                    {"score_context": "adjacent_unchanged_word"}
-                    if contextual_low_score
+                    {"score_context": score_context}
+                    if score_context is not None
                     else {}
                 ),
                 **(
@@ -710,6 +734,7 @@ def _computed_report(segments: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "low_score_edited_token_count": sum(
             word["edit_kind"] in {"inserted", "replaced"}
             and float(word["score"]) < EDITED_TOKEN_MIN_WORD_SCORE
+            and word.get("score_context") != AUDIO_REVIEW_SCORE_CONTEXT
             for word in words
         ),
         "unreviewed_deleted_token_count": sum(
@@ -957,6 +982,26 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
             raise ForcedAlignmentError(
                 f"{utterance_uid} deletion_audio_reviewed must be boolean"
             )
+        audio_reviewed = raw_segment.get("audio_reviewed", False)
+        review_disposition = raw_segment.get(
+            "review_disposition", "not_applicable"
+        )
+        if not isinstance(audio_reviewed, bool):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} audio_reviewed must be boolean"
+            )
+        if review_disposition not in {"not_applicable", "confirmed_dialogue"}:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} review_disposition is invalid for alignment"
+            )
+        audio_review_supported = (
+            audio_reviewed is True
+            and review_disposition == "confirmed_dialogue"
+        )
+        if audio_reviewed != audio_review_supported:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} audio-review fields are inconsistent"
+            )
         expected_token_edits, expected_edit_audit = _token_edit_audit(
             asr_text,
             text,
@@ -1102,6 +1147,7 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
                     f"{utterance_uid} word {word_text!r} alignment score must be "
                     "within [0, 1]"
                 )
+            expected_score_context = None
             if score < min_word_score:
                 neighbor_scores = [
                     _finite_number(
@@ -1115,10 +1161,11 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
                     if 0 <= position < len(segment_words)
                     and isinstance(segment_words[position], Mapping)
                 ]
-                if (
+                if audio_review_supported:
+                    expected_score_context = AUDIO_REVIEW_SCORE_CONTEXT
+                elif (
                     score < contextual_unchanged_min_word_score
                     or token_edit["edit_kind"] != "unchanged"
-                    or word.get("score_context") != "adjacent_unchanged_word"
                     or not any(
                         neighbor_score >= min_word_score
                         for neighbor_score in neighbor_scores
@@ -1128,17 +1175,22 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
                         f"{utterance_uid} word {word_text!r} alignment score is below "
                         "provenance min_word_score without contextual support"
                     )
-            elif word.get("score_context") is not None:
-                raise ForcedAlignmentError(
-                    f"{utterance_uid} word {word_text!r} has unexpected score_context"
-                )
+                else:
+                    expected_score_context = "adjacent_unchanged_word"
             if (
                 token_edit["edit_kind"] in {"inserted", "replaced"}
                 and score < edited_token_min_word_score
             ):
+                if audio_review_supported:
+                    expected_score_context = AUDIO_REVIEW_SCORE_CONTEXT
+                else:
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} edited token {word_text!r} alignment score "
+                        "is below provenance edited_token_min_word_score"
+                    )
+            if word.get("score_context") != expected_score_context:
                 raise ForcedAlignmentError(
-                    f"{utterance_uid} edited token {word_text!r} alignment score "
-                    "is below provenance edited_token_min_word_score"
+                    f"{utterance_uid} word {word_text!r} has unexpected score_context"
                 )
             probability = word.get("probability")
             if probability != score:
@@ -1489,6 +1541,8 @@ def align_corrected_segments(
                 "text": coarse["text"],
                 "asr_text": coarse["asr_text"],
                 "deletion_audio_reviewed": coarse["deletion_audio_reviewed"],
+                "audio_reviewed": coarse["audio_reviewed"],
+                "review_disposition": coarse["review_disposition"],
                 "edit_audit": edit_audit,
                 "timing_source": TIMING_SOURCE,
                 "words": words,

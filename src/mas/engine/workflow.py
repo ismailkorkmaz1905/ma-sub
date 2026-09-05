@@ -352,6 +352,8 @@ def correction_records_to_alignment_inputs(
                         and record["review_disposition"]
                         == "confirmed_dialogue"
                     ),
+                    "audio_reviewed": bool(record["audio_reviewed"]),
+                    "review_disposition": str(record["review_disposition"]),
                     "utterance_uid": uid,
                 }
             )
@@ -510,6 +512,8 @@ def _assert_alignment_matches_inputs(
             ("text", "text"),
             ("asr_text", "asr_text"),
             ("deletion_audio_reviewed", "deletion_audio_reviewed"),
+            ("audio_reviewed", "audio_reviewed"),
+            ("review_disposition", "review_disposition"),
             ("alignment_window_start_ms", "start_ms"),
             ("alignment_window_end_ms", "end_ms"),
             ("coarse_start_ms", "coarse_start_ms"),

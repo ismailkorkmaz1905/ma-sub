@@ -21,6 +21,7 @@ from mas.engine.forced_align import (
     TIMING_SOURCE,
     ForcedAlignmentError,
     align_corrected_segments,
+    correction_deletes_lexical_tokens,
     validate_coarse_segments,
     validate_forced_alignment_data,
 )
@@ -629,6 +630,10 @@ class ForcedAlignmentTests(unittest.TestCase):
             ["inserted", "inserted"],
         )
         self.assertEqual(data["segments"][0]["edit_audit"]["edited_token_ratio"], 1.0)
+
+    def test_blank_corrected_text_reports_lexical_deletion(self) -> None:
+        self.assertTrue(correction_deletes_lexical_tokens("Yanlis altyazi", ""))
+        self.assertFalse(correction_deletes_lexical_tokens("", ""))
 
     def test_punctuation_and_case_only_change_is_not_lexical_edit(self) -> None:
         coarse = [

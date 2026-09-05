@@ -243,7 +243,9 @@ def _token_edit_audit(
         "replaced_token_count": replaced_count,
         "inserted_token_count": inserted_count,
         "edited_token_count": edited_count,
-        "edited_token_ratio": edited_count / corrected_count,
+        "edited_token_ratio": (
+            edited_count / corrected_count if corrected_count else 0.0
+        ),
         "deleted_asr_token_count": deleted_asr_token_count,
         "deletion_audio_reviewed": deletion_audio_reviewed,
         "unreviewed_deleted_token_count": unreviewed_deleted_count,

@@ -46,8 +46,8 @@ Windows PowerShell:
 ```powershell
 uv venv --python 3.11 .venv
 uv pip sync --python .venv\Scripts\python.exe requirements.lock
-./mas doctor
-./mas test
+.\mas.ps1 doctor
+.\mas.ps1 test
 ```
 
 ## Run an episode
@@ -55,7 +55,7 @@ uv pip sync --python .venv\Scripts\python.exe requirements.lock
 Configure secrets outside the repository:
 
 ```bash
-export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles'
+export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles/EPISODES'
 export MAS_GMAIL_ADDRESS='your.account@gmail.com'
 export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
 export MAS_NOTIFY_TO='your.account@gmail.com'
@@ -67,6 +67,12 @@ Start a new strict run:
 ```bash
 ./mas run 13
 ```
+
+On Windows PowerShell, use `.\mas.ps1 run 13`. No RunPod credentials are
+required for `doctor`, tests, source discovery, or an offline fixture. A full
+episode run requires a CUDA-capable environment. `RUNPOD_POD_ID` and
+`RUNPOD_API_KEY` are needed only when the run is executing on a RunPod Pod and
+automatic shutdown is expected.
 
 For a new episode, MAS searches the official `@muhtemelaskdizi` videos page and
 accepts only the exact full-episode title equivalent to `Muhtemel Ask 13. Bolum`.
@@ -95,6 +101,18 @@ Useful operator commands:
 
 `clean` is a dry run unless `--destroy` is supplied.
 
+## Run logs
+
+Every `./mas run EPISODE` invocation writes a separate UTF-8 log under:
+
+```text
+EPISODES/Muhtemel Ask 13.Bolum/logs/run-<UTC timestamp>-<PID>.log
+```
+
+`logs/LATEST` contains the newest log filename. Each log records UTC start/end metadata, elapsed seconds, exit code, Git commit, non-secret configuration readiness, console output, errors, and full exception tracebacks. Source URLs are redacted from logged command arguments. Gmail passwords, cookie values, RunPod keys, and other secret values are never written. The resumable machine state remains separately available in `work/state.json`.
+
+RunPod also mirrors process output into `logs/runpod-session.log` so provider/watchdog shutdown incidents retain their final console history.
+
 ## Gmail notifications
 
 Notifications cover run start, stage progress, handoff waits, failures, and final readiness. They are enabled only when both `MAS_GMAIL_ADDRESS` and `MAS_GMAIL_APP_PASSWORD` are set. `MAS_NOTIFY_TO` defaults to the sending address.
@@ -121,6 +139,7 @@ a no-progress watchdog.
 - Verified cross-speaker overlap remains separate. Speaker text is never merged.
 - Strict outputs live under `final/`. Emergency outputs live under `emergency/` and cannot create or replace strict markers.
 - Local file existence is not delivery. Drive publication passes only after remote byte count and SHA-256 readback match.
+- Drive is a delivery target, not a repository mirror. Only the final Turkish and Indonesian SRT files are uploaded into each episode folder. Source media, MKV output, logs, reports, code, and intermediate artifacts stay out of Drive.
 - A RunPod stop response is a request, not proof of zero billing. Verify provider state from outside the pod.
 
 ## RunPod
@@ -131,7 +150,7 @@ Bootstrap an interactive Pod checkout, configure provider and delivery secrets, 
 ./runpod/bootstrap.sh
 export RUNPOD_POD_ID='POD_ID'
 export RUNPOD_API_KEY='API_KEY'
-export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles'
+export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles/EPISODES'
 export MAS_GMAIL_ADDRESS='your.account@gmail.com'
 export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
 export MAS_NOTIFY_TO='your.account@gmail.com'

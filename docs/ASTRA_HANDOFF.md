@@ -44,7 +44,7 @@ Store secrets in RunPod environment variables, not the repository or shell histo
 ```bash
 export RUNPOD_POD_ID='POD_ID'
 export RUNPOD_API_KEY='API_KEY'
-export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles'
+export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles/EPISODES'
 export MAS_MAX_RUNTIME_SECONDS=14400
 export MAS_IDLE_TIMEOUT_SECONDS=1800
 ./runpod/run-episode.sh 13
@@ -66,6 +66,7 @@ For each ChatGPT handoff, preserve the returned ZIP exactly and resume with:
 - Strict finalization report and subtitle QA reports
 - Local final byte counts and SHA-256 values
 - Drive temporary upload, remote readback receipt, and exact-name publication
+- Drive inventory proving that only final Turkish and Indonesian SRT files are retained in episode folders
 - RunPod stop response, external `GET /v1/pods/{podId}` result, and billing screenshot/export
 
 ## External shutdown verification

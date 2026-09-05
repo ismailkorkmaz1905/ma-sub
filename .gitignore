@@ -9,4 +9,5 @@ htmlcov/
 var/
 models/
 *.log
+EPISODES/
 .DS_Store

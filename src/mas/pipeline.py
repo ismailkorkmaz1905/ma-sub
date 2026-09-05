@@ -33,6 +33,7 @@ from .engine.tr_correction import create_tr_correction_pack, read_tr_correction_
 
 WAIT_TR = 20
 WAIT_ID = 21
+STRICT_DRIVE_OUTPUTS = ("tr_srt", "id_srt")
 
 
 def _paths(episode):
@@ -296,7 +297,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     receipt_path = dirs["final"] / "drive_readback_receipt.json"
     def publish():
         receipts = []
-        for key in ("mkv", "tr_srt", "id_srt"):
+        for key in STRICT_DRIVE_OUTPUTS:
             local = root / report["outputs"][key]["relative_path"]
             receipts.append(upload_verified(local, f"{remote_root.rstrip('/')}/{name}/{local.name}"))
         atomic_write_json(receipt_path, {"status": "PASS", "mode": "strict", "files": receipts})

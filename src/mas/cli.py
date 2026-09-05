@@ -2,10 +2,12 @@ import argparse
 import shutil
 import subprocess
 import sys
+from contextlib import nullcontext
 
 from .config import episode_dir
 from .notify import notify, send_email
 from .pipeline import run, status
+from .runlog import RunLog
 
 
 def doctor():
@@ -57,25 +59,38 @@ def main(argv=None):
     clean_parser.add_argument("episode", type=int)
     clean_parser.add_argument("--destroy", action="store_true")
     args = parser.parse_args(argv)
-    try:
-        if args.command == "run":
-            return run(args.episode, args.source_url, args.fixture, args.stop_after)
-        if args.command == "status":
-            return status(args.episode)
-        if args.command == "doctor":
-            return doctor()
-        if args.command == "test":
-            return test()
-        if args.command == "notify-test":
-            return notify_test()
-        return clean(args.episode, args.destroy)
-    except Exception as exc:
-        if getattr(args, "episode", None):
-            notify(args.episode, "pipeline basarisiz", f"{type(exc).__name__}: {exc}")
-        print(f"FAILED STAGE: {args.command.upper()}\nCAUSE: {exc}\nCHECKPOINT PRESERVED: yes", file=sys.stderr)
-        if getattr(args, "episode", None):
-            print(f"SAFE RETRY:\n./mas run {args.episode}", file=sys.stderr)
-        return 1
+    context = RunLog(args.episode, ["mas", *(argv or sys.argv[1:])]) if args.command == "run" else nullcontext()
+    with context as run_log:
+        try:
+            if args.command == "run":
+                result = run(args.episode, args.source_url, args.fixture, args.stop_after)
+            elif args.command == "status":
+                result = status(args.episode)
+            elif args.command == "doctor":
+                result = doctor()
+            elif args.command == "test":
+                result = test()
+            elif args.command == "notify-test":
+                result = notify_test()
+            else:
+                result = clean(args.episode, args.destroy)
+            if run_log:
+                run_log.finish(result)
+            return result
+        except Exception as exc:
+            if run_log:
+                run_log.record_exception()
+            if getattr(args, "episode", None):
+                details = f"{type(exc).__name__}: {exc}"
+                if run_log:
+                    details += f"\nLog: {run_log.path}"
+                notify(args.episode, "pipeline basarisiz", details)
+            print(f"FAILED STAGE: {args.command.upper()}\nCAUSE: {exc}\nCHECKPOINT PRESERVED: yes", file=sys.stderr)
+            if getattr(args, "episode", None):
+                print(f"SAFE RETRY:\n./mas run {args.episode}", file=sys.stderr)
+            if run_log:
+                run_log.finish(1)
+            return 1
 
 
 if __name__ == "__main__":

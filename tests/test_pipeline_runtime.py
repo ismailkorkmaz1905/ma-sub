@@ -37,8 +37,9 @@ def test_stage_records_elapsed_seconds_on_success_and_failure(tmp_path, monkeypa
     monkeypatch.setattr("mas.pipeline.notify", lambda *args: None)
     path = tmp_path / "state.json"
 
-    _stage(path, state, "ok", lambda: {"value": 1})
+    _stage(path, state, "ok", lambda: {"value": 1, "path": "audio.wav"})
     assert state["stages"]["ok"]["elapsed_seconds"] == 2.5
+    assert state["stages"]["ok"]["path"] == "audio.wav"
 
     with pytest.raises(ValueError, match="broken"):
         _stage(path, state, "failed", lambda: (_ for _ in ()).throw(ValueError("broken")))
@@ -129,8 +130,8 @@ def test_stage_notifies_start_and_failure(tmp_path, monkeypatch):
 
     assert state["stages"]["id_return"]["status"] == "failed"
     assert events == [
-        (13, "id_return basladi", None),
-        (13, "id_return basarisiz", "ValueError: invalid returned ZIP"),
+        (13, "id_return başladı", None),
+        (13, "id_return başarısız", "ValueError: invalid returned ZIP"),
     ]
 
 

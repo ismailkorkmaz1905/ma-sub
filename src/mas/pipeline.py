@@ -86,7 +86,7 @@ def _stage(path, state, name, action):
     started = time.monotonic()
     set_stage(path, state, name, "running")
     print(f"[STAGE] {name}: START", flush=True)
-    notify(state["episode"], f"{name} basladi")
+    notify(state["episode"], f"{name} başladı")
     heartbeat_stop = threading.Event()
 
     def heartbeat():
@@ -111,7 +111,7 @@ def _stage(path, state, name, action):
             elapsed_seconds=round(elapsed, 3),
         )
         print(f"[STAGE] {name}: FAIL elapsed={elapsed:.1f}s", flush=True)
-        notify(state["episode"], f"{name} basarisiz", f"{type(exc).__name__}: {exc}")
+        notify(state["episode"], f"{name} başarısız", f"{type(exc).__name__}: {exc}")
         raise
     heartbeat_stop.set()
     heartbeat_thread.join()
@@ -125,7 +125,7 @@ def _stage(path, state, name, action):
         **details,
     )
     print(f"[STAGE] {name}: PASS elapsed={elapsed:.1f}s", flush=True)
-    notify(state["episode"], f"{name} tamamlandi")
+    notify(state["episode"], f"{name} tamamlandı")
     return details
 
 
@@ -191,7 +191,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     state = load(state_path, episode)
     state["mode"] = "strict"
     save(state_path, state)
-    notify(episode, "isleme alindi")
+    notify(episode, "işleme alındı")
     url_path = dirs["source"] / "source.url"
     url = _resolve_source_url(url_path, state, episode, source_url)
     config_dir, series, names, religious = _load_configs()
@@ -250,7 +250,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     tr_text = dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip"
     if not tr_text.is_file():
         set_stage(state_path, state, "tr_return", "blocked", expected=str(tr_text))
-        notify(episode, "Turkce duzeltme bekleniyor", str(tr_text))
+        notify(episode, "Türkçe düzeltme bekleniyor", str(tr_text))
         print(f"[WAIT] TR CORRECTION\nPack: {tr_pack}\nExpected: {tr_text}\nSafe to stop RunPod.")
         return WAIT_TR
     def validate_tr_return():
@@ -332,7 +332,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
     if not id_output.is_file():
         set_stage(state_path, state, "id_return", "blocked", expected=str(id_output))
-        notify(episode, "Endonezce ceviri bekleniyor", str(id_output))
+        notify(episode, "Endonezce çeviri bekleniyor", str(id_output))
         print(f"[WAIT] ID TRANSLATION\nPack: {id_pack}\nExpected: {id_output}\nSafe to stop RunPod.")
         return WAIT_ID
     def validate_id_return():
@@ -374,7 +374,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         atomic_write_json(receipt_path, {"status": "PASS", "mode": "strict", "files": receipts})
         return {"receipt": str(receipt_path), "sha256": sha256_file(receipt_path)}
     _stage(state_path, state, "drive_readback", publish)
-    notify(episode, "bolum hazir", str(receipt_path))
+    notify(episode, "bölüm hazır", str(receipt_path))
     set_stage(state_path, state, "compute_shutdown", "running")
     if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1":
         shutdown = {"requested": False, "reason": "external_controller", "delegated": True}

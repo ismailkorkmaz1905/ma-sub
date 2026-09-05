@@ -20,7 +20,7 @@ from mas.evidence_guard import (
 from mas.progress import Progress
 
 ROOT = Path(__file__).resolve().parents[2]
-CASES = json.loads((ROOT / 'tests/fixtures/ep12_incident_intervals.json').read_text())['cases']
+CASES = json.loads((ROOT / 'tests/fixtures/ep12_incident_intervals.json').read_text(encoding='utf-8'))['cases']
 SHA = 'a' * 64
 
 
@@ -45,7 +45,7 @@ def test_bad_budget_rejected(bad):
 
 
 def test_policy_allocates_exactly_four_hours():
-    policy = json.loads((ROOT / 'config/runtime_policy.json').read_text())
+    policy = json.loads((ROOT / 'config/runtime_policy.json').read_text(encoding='utf-8'))
     assert sum(policy['planned_stage_minutes'].values()) * 60 == 14400
     assert policy['include_chatgpt_handoff_wait'] is True
     assert policy['allow_automatic_cpu_fallback'] is False

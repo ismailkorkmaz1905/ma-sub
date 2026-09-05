@@ -69,7 +69,14 @@ def atomic_json(path: Path, data: object) -> None:
             f.write(encoded)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
         if os.name == 'posix':
             fd = os.open(path.parent, os.O_RDONLY)
             try:

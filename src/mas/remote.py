@@ -1,0 +1,124 @@
+import hashlib
+import os
+import queue
+import shutil
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+
+class RemoteVerificationError(RuntimeError):
+    pass
+
+
+def _run_watchdog(command, *, idle_timeout=120, total_timeout=3600, stdout_handler=None):
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    events = queue.Queue()
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+
+    def read(name, stream):
+        read_chunk = getattr(stream, "read1", stream.read)
+        while True:
+            chunk = read_chunk(65536)
+            if not chunk:
+                break
+            events.put((name, chunk))
+        events.put((name, None))
+
+    threads = [threading.Thread(target=read, args=(name, stream), daemon=True)
+               for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))]
+    for thread in threads:
+        thread.start()
+    started = last_progress = time.monotonic()
+    closed = set()
+    while len(closed) < 2 or process.poll() is None:
+        now = time.monotonic()
+        if now - last_progress > idle_timeout or now - started > total_timeout:
+            process.kill()
+            process.wait()
+            raise RemoteVerificationError("network progress watchdog expired")
+        wait_timeout = max(
+            0.01,
+            min(1, idle_timeout - (now - last_progress), total_timeout - (now - started)),
+        )
+        try:
+            name, chunk = events.get(timeout=wait_timeout)
+        except queue.Empty:
+            continue
+        if chunk is None:
+            closed.add(name)
+        else:
+            if name == "stdout" and stdout_handler is not None:
+                stdout_handler(chunk)
+            else:
+                buffers[name].extend(chunk)
+            last_progress = time.monotonic()
+    code = process.wait()
+    if code:
+        message = buffers["stderr"].decode("utf-8", "replace").strip()
+        raise RemoteVerificationError(f"network command failed ({code}): {message}")
+    return bytes(buffers["stdout"])
+
+
+def _file_signature(path):
+    digest = hashlib.sha256()
+    size = 0
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return size, digest.hexdigest()
+
+
+def _remote_signature(command, *, idle_timeout, total_timeout):
+    digest = hashlib.sha256()
+    size = 0
+
+    def consume(chunk):
+        nonlocal size
+        digest.update(chunk)
+        size += len(chunk)
+
+    _run_watchdog(
+        command,
+        idle_timeout=idle_timeout,
+        total_timeout=total_timeout,
+        stdout_handler=consume,
+    )
+    return size, digest.hexdigest()
+
+
+def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600):
+    path = Path(source)
+    if not path.is_file() or path.is_symlink() or path.stat().st_size <= 0:
+        raise RemoteVerificationError(f"unsafe upload source: {path}")
+    if not remote or "emergency" in remote.casefold():
+        raise RemoteVerificationError("MAS_DRIVE_STRICT_REMOTE must name a strict destination")
+    if not shutil.which("rclone"):
+        raise RemoteVerificationError("rclone is required for Drive upload verification")
+    expected_size, expected_sha = _file_signature(path)
+    partial = remote + f".partial-{os.getpid()}"
+    common = ["--contimeout", "30s", "--timeout", "2m", "--retries", "3",
+              "--low-level-retries", "3", "--stats", "10s", "--stats-one-line"]
+    _run_watchdog(["rclone", "copyto", str(path), partial, *common],
+                  idle_timeout=idle_timeout, total_timeout=total_timeout)
+    partial_size, partial_sha = _remote_signature(
+        ["rclone", "cat", partial, "--contimeout", "30s",
+         "--timeout", "2m", "--retries", "3", "--low-level-retries", "3"],
+        idle_timeout=idle_timeout,
+        total_timeout=total_timeout,
+    )
+    if partial_size != expected_size or partial_sha != expected_sha:
+        raise RemoteVerificationError("partial Drive byte/SHA-256 readback mismatch")
+    _run_watchdog(["rclone", "moveto", partial, remote, *common],
+                  idle_timeout=idle_timeout, total_timeout=total_timeout)
+    final_size, final_sha = _remote_signature(
+        ["rclone", "cat", remote, "--contimeout", "30s",
+         "--timeout", "2m", "--retries", "3", "--low-level-retries", "3"],
+        idle_timeout=idle_timeout,
+        total_timeout=total_timeout,
+    )
+    if final_size != expected_size or final_sha != expected_sha:
+        raise RemoteVerificationError("final Drive byte/SHA-256 readback mismatch")
+    return {"bytes": expected_size, "sha256": expected_sha, "remote": remote}

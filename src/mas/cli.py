@@ -1,23 +1,82 @@
-import argparse,shutil,subprocess,sys
-from .pipeline import run,status
+import argparse
+import shutil
+import subprocess
+import sys
+
 from .config import episode_dir
+from .notify import notify, send_email
+from .pipeline import run, status
+
+
 def doctor():
- print('mas doctor')
- for x in ('python','ffmpeg','ffprobe','git'): print(f"{x}: {'OK' if shutil.which(x) else 'MISSING'}")
- try:
-  import torch; print(f'torch: {torch.__version__}; cuda={torch.cuda.is_available()}')
- except Exception: print('torch: optional/not installed in CPU dev environment')
- return 0
-def test(): return subprocess.call([sys.executable,'-m','pytest','-q'])
-def clean(ep,destroy=False):
- d=episode_dir(ep)
- for p in [d/'work']: print(('DELETE ' if destroy else 'DRY-RUN ')+str(p)); shutil.rmtree(p,ignore_errors=True) if destroy else None
- return 0
+    print("mas doctor")
+    for executable in ("python", "ffmpeg", "ffprobe", "git", "rclone"):
+        print(f"{executable}: {'OK' if shutil.which(executable) else 'MISSING'}")
+    try:
+        import torch
+        print(f"torch: {torch.__version__}; cuda={torch.cuda.is_available()}")
+    except Exception:
+        print("torch: MISSING")
+    return 0
+
+
+def test():
+    return subprocess.call([sys.executable, "-m", "pytest", "-q"])
+
+
+def notify_test():
+    result = send_email(None, "bildirim testi", "MAS e-posta bildirimi calisiyor.")
+    if result.get("status") != "sent":
+        raise RuntimeError("MAS_GMAIL_ADDRESS and MAS_GMAIL_APP_PASSWORD are required")
+    print(f"Test email sent to {result['recipient']}")
+    return 0
+
+
+def clean(episode, destroy=False):
+    target = episode_dir(episode) / "work"
+    print(("DELETE " if destroy else "DRY-RUN ") + str(target))
+    if destroy:
+        shutil.rmtree(target, ignore_errors=True)
+    return 0
+
+
 def main(argv=None):
- p=argparse.ArgumentParser(prog='mas'); sub=p.add_subparsers(dest='cmd',required=True); r=sub.add_parser('run'); r.add_argument('episode',type=int); r.add_argument('--source-url'); r.add_argument('--fixture',action='store_true'); s=sub.add_parser('status'); s.add_argument('episode',type=int); sub.add_parser('doctor'); sub.add_parser('test'); c=sub.add_parser('clean'); c.add_argument('episode',type=int); c.add_argument('--dry-run',action='store_true',default=True); c.add_argument('--destroy',action='store_true'); a=p.parse_args(argv)
- try: return {'run':lambda:run(a.episode,a.source_url,a.fixture),'status':lambda:status(a.episode),'doctor':doctor,'test':test,'clean':lambda:clean(a.episode,a.destroy)}[a.cmd]()
- except Exception as e:
-  print(f'FAILED STAGE: {a.cmd.upper()}\nCAUSE: {e}\nCHECKPOINT PRESERVED: yes',file=sys.stderr)
-  if getattr(a,'episode',None): print(f'SAFE RETRY:\n./mas run {a.episode}',file=sys.stderr)
-  return 1
-if __name__=='__main__': raise SystemExit(main())
+    parser = argparse.ArgumentParser(prog="mas")
+    commands = parser.add_subparsers(dest="command", required=True)
+    run_parser = commands.add_parser("run")
+    run_parser.add_argument("episode", type=int)
+    run_parser.add_argument("--source-url")
+    run_parser.add_argument("--fixture", action="store_true")
+    run_parser.add_argument("--stop-after", type=int, choices=(1, 2, 3), help=argparse.SUPPRESS)
+    status_parser = commands.add_parser("status")
+    status_parser.add_argument("episode", type=int)
+    commands.add_parser("doctor")
+    commands.add_parser("test")
+    commands.add_parser("notify-test")
+    clean_parser = commands.add_parser("clean")
+    clean_parser.add_argument("episode", type=int)
+    clean_parser.add_argument("--destroy", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "run":
+            return run(args.episode, args.source_url, args.fixture, args.stop_after)
+        if args.command == "status":
+            return status(args.episode)
+        if args.command == "doctor":
+            return doctor()
+        if args.command == "test":
+            return test()
+        if args.command == "notify-test":
+            return notify_test()
+        return clean(args.episode, args.destroy)
+    except Exception as exc:
+        if getattr(args, "episode", None):
+            notify(args.episode, "pipeline basarisiz", f"{type(exc).__name__}: {exc}")
+        print(f"FAILED STAGE: {args.command.upper()}\nCAUSE: {exc}\nCHECKPOINT PRESERVED: yes", file=sys.stderr)
+        if getattr(args, "episode", None):
+            print(f"SAFE RETRY:\n./mas run {args.episode}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

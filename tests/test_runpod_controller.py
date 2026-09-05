@@ -89,6 +89,9 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(tmp_path):
     assert "MAS_GIT_COMMIT=" + "a" * 40 in content
     assert "youtube-cookies.txt" in content
     assert "UV_CACHE_DIR=/workspace/.cache/uv" in content
+    assert "UV_HTTP_TIMEOUT=120" in content
+    assert "UV_HTTP_RETRIES=3" in content
+    assert "UV_CONCURRENT_DOWNLOADS=4" in content
     assert "HF_HOME=/workspace/.cache/huggingface" in content
     assert b"\r" not in target.read_bytes()
 

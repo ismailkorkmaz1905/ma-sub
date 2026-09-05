@@ -54,7 +54,7 @@ uv pip sync --python .venv\Scripts\python.exe requirements.lock
 Configure secrets outside the repository:
 
 ```bash
-export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles/EPISODES'
+export MAS_DRIVE_STRICT_REMOTE='gdrive:Muhtemel_Ask_Subtitles/EPISODES'
 export MAS_GMAIL_ADDRESS='your.account@gmail.com'
 export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
 export MAS_NOTIFY_TO='your.account@gmail.com'
@@ -157,7 +157,7 @@ Bootstrap an interactive Pod checkout, configure provider and delivery secrets, 
 ./runpod/bootstrap.sh
 export RUNPOD_POD_ID='POD_ID'
 export RUNPOD_API_KEY='API_KEY'
-export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles/EPISODES'
+export MAS_DRIVE_STRICT_REMOTE='gdrive:Muhtemel_Ask_Subtitles/EPISODES'
 export MAS_GMAIL_ADDRESS='your.account@gmail.com'
 export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
 export MAS_NOTIFY_TO='your.account@gmail.com'

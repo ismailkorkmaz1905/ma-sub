@@ -44,12 +44,12 @@ docker build -t ma-sub:astra .
 
 ## In-Pod command after preflight
 
-Store secrets in RunPod environment variables, not the repository or shell history. Configure the `gdrive` rclone remote before starting.
+The Windows controller copies short-lived secret files and the local `gdrive` config to the Pod, then removes them before shutdown. Never place them in Git or shell history.
 
 ```bash
 export RUNPOD_POD_ID='POD_ID'
 export RUNPOD_API_KEY='API_KEY'
-export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles/EPISODES'
+export MAS_DRIVE_STRICT_REMOTE='gdrive:Muhtemel_Ask_Subtitles/EPISODES'
 export MAS_GMAIL_ADDRESS='your.account@gmail.com'
 export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
 export MAS_NOTIFY_TO='your.account@gmail.com'

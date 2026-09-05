@@ -28,6 +28,9 @@ Production code lives under `src/mas/` and runs through `./mas`. Notebooks and t
 - Git, OpenSSH, and the generated RunPod SSH private key on the Windows controller
 - A configured local `rclone` Google Drive remote; its config is copied to the Pod only for the run
 - A RunPod Pod ID and API key for automatic start and externally verified stop
+- For automatic capacity migration: the exact network volume ID, data center,
+  GPU type, and maximum hourly price in the `MAS_RUNPOD_*` user environment
+  variables
 - A Gmail app password when email stage notifications are expected
 - A Netscape-format YouTube cookies file when authenticated source download is required
 
@@ -168,6 +171,15 @@ export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
 ```
 
 `run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. Under the local controller, the controller owns secret cleanup and externally verified shutdown. A standalone in-Pod run retains its provider-side failure-stop fallback.
+
+When `MAS_RUNPOD_AUTO_MIGRATE=1`, an exact provider "not enough free GPUs"
+response triggers bounded migration instead of failing the episode. The
+controller first verifies that the old Pod is `EXITED`, its configured network
+volume and data center match, and no local Pod volume is at risk. It then
+terminates only that Pod, attaches the same network volume to an available Pod
+of the configured GPU type, rejects a price above
+`MAS_RUNPOD_MAX_COST_PER_HR`, persists the new Pod ID, and resumes. Other HTTP
+500 errors do not trigger migration.
 
 The controller, complete channel discovery, source identity guards, download
 watchdogs, strict GPU/Drive preflight, handoff transfer, and external shutdown

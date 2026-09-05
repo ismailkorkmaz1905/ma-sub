@@ -31,14 +31,24 @@ class RunPodClient:
         self.attempts = attempts
         self.sleep = sleep
 
-    def request(self, method, suffix=""):
+    def _request_url(self, method, url, *, payload=None, attempts=None):
+        data = None
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+        }
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
-            f"https://rest.runpod.io/v1/pods/{self.pod_id}{suffix}",
+            url,
+            data=data,
             method=method,
-            headers={"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"},
+            headers=headers,
         )
         last_error = None
-        for attempt in range(self.attempts):
+        request_attempts = self.attempts if attempts is None else attempts
+        for attempt in range(request_attempts):
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     payload = response.read()
@@ -60,13 +70,21 @@ class RunPodClient:
                 if detail:
                     message += f": {detail}"
                 last_error = RunPodControllerError(message)
-                if attempt + 1 < self.attempts:
+                if attempt + 1 < request_attempts:
                     self.sleep(2 ** attempt)
             except (urllib.error.URLError, TimeoutError, RunPodControllerError) as exc:
                 last_error = exc
-                if attempt + 1 < self.attempts:
+                if attempt + 1 < request_attempts:
                     self.sleep(2 ** attempt)
-        raise RunPodControllerError(f"RunPod request failed after {self.attempts} attempts: {last_error}")
+        raise RunPodControllerError(
+            f"RunPod request failed after {request_attempts} attempts: {last_error}"
+        )
+
+    def request(self, method, suffix=""):
+        return self._request_url(
+            method,
+            f"https://rest.runpod.io/v1/pods/{self.pod_id}{suffix}",
+        )
 
     def get(self):
         return self.request("GET")
@@ -76,6 +94,29 @@ class RunPodClient:
 
     def stop(self):
         return self.request("POST", "/stop")
+
+    def terminate(self):
+        return self._request_url(
+            "DELETE",
+            f"https://rest.runpod.io/v1/pods/{self.pod_id}",
+            attempts=1,
+        )
+
+    def get_network_volume(self, volume_id):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", volume_id or ""):
+            raise RunPodControllerError("RunPod network volume ID is invalid")
+        return self._request_url(
+            "GET",
+            f"https://rest.runpod.io/v1/networkvolumes/{volume_id}",
+        )
+
+    def create_pod(self, payload):
+        return self._request_url(
+            "POST",
+            "https://rest.runpod.io/v1/pods",
+            payload=payload,
+            attempts=1,
+        )
 
     def wait(self, predicate, description, *, timeout, poll=5):
         started = time.monotonic()
@@ -175,6 +216,106 @@ def _startup_mode(pod):
     if status == "RUNNING" and os.getenv("MAS_RUNPOD_ADOPT_RUNNING") == "1":
         return "adopt"
     raise RunPodControllerError(f"pod must be EXITED before an automatic run; status={status}")
+
+
+def _is_capacity_error(exc):
+    return "not enough free gpus" in str(exc).lower()
+
+
+def _persist_windows_user_pod_id(pod_id):
+    if os.name != "nt":
+        raise RunPodControllerError(
+            "automatic Pod migration requires Windows user-environment persistence"
+        )
+    import winreg
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+        winreg.SetValueEx(key, "RUNPOD_POD_ID", 0, winreg.REG_SZ, pod_id)
+    os.environ["RUNPOD_POD_ID"] = pod_id
+
+
+def _migrate_capacity_bound_pod(client, pod):
+    volume_id = os.getenv("MAS_RUNPOD_NETWORK_VOLUME_ID")
+    data_center_id = os.getenv("MAS_RUNPOD_DATA_CENTER_ID")
+    gpu_type_id = os.getenv("MAS_RUNPOD_GPU_TYPE_ID")
+    if not volume_id or not data_center_id or not gpu_type_id:
+        raise RunPodControllerError(
+            "automatic Pod migration requires MAS_RUNPOD_NETWORK_VOLUME_ID, "
+            "MAS_RUNPOD_DATA_CENTER_ID and MAS_RUNPOD_GPU_TYPE_ID"
+        )
+    if pod.get("desiredStatus") != "EXITED":
+        raise RunPodControllerError("refusing migration because the old Pod is not EXITED")
+    if pod.get("networkVolumeId") != volume_id or pod.get("volumeInGb") not in (0, None):
+        raise RunPodControllerError(
+            "refusing migration because the persistent volume boundary changed"
+        )
+    volume = client.get_network_volume(volume_id)
+    if volume.get("id") != volume_id or volume.get("dataCenterId") != data_center_id:
+        raise RunPodControllerError(
+            "refusing migration because the network volume identity changed"
+        )
+    payload = {
+        "cloudType": "SECURE",
+        "computeType": "GPU",
+        "containerDiskInGb": int(pod.get("containerDiskInGb") or 30),
+        "dataCenterIds": [data_center_id],
+        "dataCenterPriority": "availability",
+        "dockerEntrypoint": [],
+        "dockerStartCmd": [],
+        "env": dict(pod.get("env") or {}),
+        "gpuCount": 1,
+        "gpuTypeIds": [gpu_type_id],
+        "gpuTypePriority": "availability",
+        "imageName": pod.get("imageName"),
+        "interruptible": False,
+        "name": pod.get("name") or "muhtemel-ask-production",
+        "networkVolumeId": volume_id,
+        "ports": list(pod.get("ports") or ["8888/http", "22/tcp"]),
+        "supportPublicIp": True,
+        "volumeInGb": 0,
+        "volumeMountPath": "/workspace",
+    }
+    if not payload["imageName"]:
+        raise RunPodControllerError("refusing migration because the Pod image is missing")
+    old_id = client.pod_id
+    client.terminate()
+    try:
+        created = client.create_pod(payload)
+    except RunPodControllerError as exc:
+        raise RunPodControllerError(
+            f"old Pod {old_id} was terminated but its network volume is retained; "
+            f"replacement creation failed: {exc}"
+        ) from exc
+    new_id = created.get("id")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9_-]+", new_id or "")
+        or created.get("networkVolumeId") != volume_id
+    ):
+        raise RunPodControllerError("replacement Pod response failed identity validation")
+    max_cost = float(os.getenv("MAS_RUNPOD_MAX_COST_PER_HR", "0.75"))
+    cost = float(created.get("costPerHr") or created.get("adjustedCostPerHr") or 0)
+    replacement = RunPodClient(
+        new_id,
+        client.api_key,
+        timeout=client.timeout,
+        attempts=client.attempts,
+        sleep=client.sleep,
+    )
+    if cost <= 0 or cost > max_cost:
+        replacement.terminate()
+        raise RunPodControllerError(
+            f"replacement Pod hourly cost {cost} exceeds allowed {max_cost}"
+        )
+    try:
+        _persist_windows_user_pod_id(new_id)
+    except Exception:
+        replacement.terminate()
+        raise
+    print(
+        f"[RUNPOD] migrated capacity-bound pod {old_id} -> {new_id}; "
+        f"network volume preserved; hourly cost={cost:.2f}"
+    )
+    return replacement
 
 
 def _stream(chunk, target):
@@ -318,7 +459,18 @@ def run_remote_episode(episode, source_url=None):
         controller_started_pod = True
         if startup_mode == "start":
             print(f"[RUNPOD] starting pod {values['RUNPOD_POD_ID']}")
-            client.start()
+            try:
+                client.start()
+            except RunPodControllerError as exc:
+                if (
+                    os.getenv("MAS_RUNPOD_AUTO_MIGRATE") != "1"
+                    or not _is_capacity_error(exc)
+                ):
+                    raise
+                controller_started_pod = False
+                client = _migrate_capacity_bound_pod(client, initial)
+                values["RUNPOD_POD_ID"] = client.pod_id
+                controller_started_pod = True
         else:
             print(f"[RUNPOD] adopting newly deployed pod {values['RUNPOD_POD_ID']}")
         pod = client.wait(

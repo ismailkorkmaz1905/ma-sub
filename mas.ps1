@@ -12,10 +12,20 @@ $userEnvironmentNames = @(
     "MAS_GMAIL_APP_PASSWORD",
     "MAS_NOTIFY_TO",
     "MAS_DRIVE_STRICT_REMOTE",
-    "MAS_RCLONE_CONFIG"
+    "MAS_RCLONE_CONFIG",
+    "MAS_RUNPOD_AUTO_MIGRATE",
+    "MAS_RUNPOD_NETWORK_VOLUME_ID",
+    "MAS_RUNPOD_DATA_CENTER_ID",
+    "MAS_RUNPOD_GPU_TYPE_ID",
+    "MAS_RUNPOD_MAX_COST_PER_HR"
 )
 foreach ($name in $userEnvironmentNames) {
-    if (-not [Environment]::GetEnvironmentVariable($name, "Process")) {
+    if ($name -eq "RUNPOD_POD_ID") {
+        $value = [Environment]::GetEnvironmentVariable($name, "User")
+        if ($value) {
+            [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    } elseif (-not [Environment]::GetEnvironmentVariable($name, "Process")) {
         $value = [Environment]::GetEnvironmentVariable($name, "User")
         if ($value) {
             [Environment]::SetEnvironmentVariable($name, $value, "Process")

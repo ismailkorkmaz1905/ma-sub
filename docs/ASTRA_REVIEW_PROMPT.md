@@ -71,6 +71,7 @@ Review every acceptance boundary:
 - Existing exact-name Drive objects are inventoried by byte count and SHA-256 and preserved with an auditable receipt before replacement. Retained historical Episode 12 material is never silently overwritten or deleted.
 - RunPod success, failure, translation-wait, maximum-runtime, idle-timeout, and signal paths preserve atomic state and request shutdown.
 - A local real-run command starts an EXITED Pod only when work is requested, waits with bounded timeout, launches the remote pipeline securely, streams logs, and verifies shutdown externally. It must not leave paid compute running after any exit path.
+- Automatic capacity migration is allowed only for the exact no-free-GPU provider error. It must verify the old Pod is EXITED, preserve the exact network volume and data center, enforce the configured GPU type and hourly price ceiling, persist the replacement Pod ID, and avoid retrying an ambiguous create request.
 - The retained 50 GB network volume cost is accounted for separately. Ordinary file deletion must not be claimed to reduce its fixed allocation cost; permanent deletion may happen only after required evidence and deliverables are preserved.
 - RunPod state and storage pricing are re-queried during the review with observation timestamps; stale handoff values are not treated as current facts.
 - External observation confirms provider desired state EXITED and no active GPU compute charge. Report retained volume/storage billing separately.

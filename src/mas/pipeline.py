@@ -37,6 +37,19 @@ from .engine.tr_correction import create_tr_correction_pack, read_tr_correction_
 WAIT_TR = 20
 WAIT_ID = 21
 STRICT_DRIVE_OUTPUTS = ("mkv", "tr_srt", "id_srt")
+STAGE_NOTIFICATION_NAMES = {
+    "download": "kaynak dosyası kontrolü",
+    "audio": "ses dosyası hazırlığı",
+    "raw_asr": "Türkçe konuşma tanıma ve kanıt hazırlığı",
+    "tr_pack": "Türkçe düzeltme paketi hazırlığı",
+    "tr_return": "Türkçe düzeltme dönüşü doğrulaması",
+    "audio_review": "Türkçe ses incelemesi",
+    "forced_alignment": "altyazı zaman hizalaması",
+    "id_pack": "Endonezce çeviri paketi hazırlığı",
+    "id_return": "Endonezce çeviri dönüşü doğrulaması",
+    "finalize": "final altyazı ve video üretimi",
+    "drive_readback": "Google Drive yükleme ve hash doğrulaması",
+}
 
 
 def _paths(episode):
@@ -84,9 +97,16 @@ def _guard_existing_source(state, source_dir):
 
 def _stage(path, state, name, action):
     started = time.monotonic()
+    notification_name = STAGE_NOTIFICATION_NAMES.get(name, name)
     set_stage(path, state, name, "running")
     print(f"[STAGE] {name}: START", flush=True)
-    notify(state["episode"], f"{name} başladı")
+    start_details = None
+    if name == "download":
+        start_details = (
+            "Mevcut immutable kaynak varsa yeniden indirilmeyecek; byte ve "
+            "SHA-256 bütünlüğü doğrulanacak."
+        )
+    notify(state["episode"], f"{notification_name} başladı", start_details)
     heartbeat_stop = threading.Event()
 
     def heartbeat():
@@ -111,7 +131,11 @@ def _stage(path, state, name, action):
             elapsed_seconds=round(elapsed, 3),
         )
         print(f"[STAGE] {name}: FAIL elapsed={elapsed:.1f}s", flush=True)
-        notify(state["episode"], f"{name} başarısız", f"{type(exc).__name__}: {exc}")
+        notify(
+            state["episode"],
+            f"{notification_name} başarısız",
+            f"{type(exc).__name__}: {exc}",
+        )
         raise
     heartbeat_stop.set()
     heartbeat_thread.join()
@@ -125,7 +149,11 @@ def _stage(path, state, name, action):
         **details,
     )
     print(f"[STAGE] {name}: PASS elapsed={elapsed:.1f}s", flush=True)
-    notify(state["episode"], f"{name} tamamlandı")
+    notify(
+        state["episode"],
+        f"{notification_name} tamamlandı",
+        f"Süre: {elapsed:.1f} saniye",
+    )
     return details
 
 

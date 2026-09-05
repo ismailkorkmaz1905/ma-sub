@@ -59,6 +59,89 @@ def test_client_preserves_safe_runpod_http_error_detail(monkeypatch):
         client.start()
 
 
+def test_client_create_pod_uses_single_json_request(monkeypatch):
+    captured = {}
+
+    def open_request(request, timeout):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["content_type"] = request.headers["Content-type"]
+        captured["payload"] = json.loads(request.data)
+        return _Response({"id": "newpod"})
+
+    monkeypatch.setattr(runpod_controller.urllib.request, "urlopen", open_request)
+    client = runpod_controller.RunPodClient("oldpod", "secret")
+
+    assert client.create_pod({"gpuCount": 1}) == {"id": "newpod"}
+    assert captured == {
+        "url": "https://rest.runpod.io/v1/pods",
+        "method": "POST",
+        "content_type": "application/json",
+        "payload": {"gpuCount": 1},
+    }
+
+
+def test_capacity_migration_preserves_exact_network_volume(monkeypatch):
+    for name, value in {
+        "MAS_RUNPOD_NETWORK_VOLUME_ID": "volume123",
+        "MAS_RUNPOD_DATA_CENTER_ID": "EU-RO-1",
+        "MAS_RUNPOD_GPU_TYPE_ID": "NVIDIA GeForce RTX 4090",
+        "MAS_RUNPOD_MAX_COST_PER_HR": "0.75",
+    }.items():
+        monkeypatch.setenv(name, value)
+    persisted = []
+    monkeypatch.setattr(
+        runpod_controller, "_persist_windows_user_pod_id", persisted.append
+    )
+
+    class Client:
+        pod_id = "oldpod"
+        api_key = "secret"
+        timeout = 15
+        attempts = 3
+        sleep = staticmethod(lambda _seconds: None)
+
+        def __init__(self):
+            self.terminated = False
+            self.payload = None
+
+        def get_network_volume(self, volume_id):
+            assert volume_id == "volume123"
+            return {"id": volume_id, "dataCenterId": "EU-RO-1", "size": 50}
+
+        def terminate(self):
+            self.terminated = True
+
+        def create_pod(self, payload):
+            self.payload = payload
+            return {
+                "id": "newpod",
+                "networkVolumeId": "volume123",
+                "costPerHr": "0.74",
+            }
+
+    client = Client()
+    pod = {
+        "desiredStatus": "EXITED",
+        "networkVolumeId": "volume123",
+        "volumeInGb": 0,
+        "containerDiskInGb": 30,
+        "imageName": "runpod/image",
+        "name": "production",
+        "ports": ["22/tcp"],
+        "env": {"PUBLIC_KEY": "public"},
+    }
+
+    replacement = runpod_controller._migrate_capacity_bound_pod(client, pod)
+
+    assert client.terminated is True
+    assert client.payload["networkVolumeId"] == "volume123"
+    assert client.payload["gpuTypeIds"] == ["NVIDIA GeForce RTX 4090"]
+    assert client.payload["dataCenterIds"] == ["EU-RO-1"]
+    assert replacement.pod_id == "newpod"
+    assert persisted == ["newpod"]
+
+
 def test_wait_requires_running_ip_and_ssh_mapping():
     assert runpod_controller._ssh_endpoint({"desiredStatus": "RUNNING"}) is None
     assert runpod_controller._ssh_endpoint(

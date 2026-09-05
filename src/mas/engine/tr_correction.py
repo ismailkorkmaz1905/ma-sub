@@ -166,7 +166,7 @@ OUTPUT_BATCH_DESCRIPTOR_FIELDS = frozenset(
 
 # Bounds are generous for a feature-length episode but make all decompression
 # bounded before any member is read.
-MAX_ZIP_MEMBERS = 448
+MAX_ZIP_MEMBERS = 1024
 MAX_MEMBER_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 128 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 250.0
@@ -175,17 +175,17 @@ MAX_SPEECH_HOLE_AUDIO_FILES = 192
 MAX_SPEECH_HOLE_AUDIO_BYTES = 16 * 1024 * 1024
 MAX_SPEECH_HOLE_AUDIO_TOTAL_BYTES = 128 * 1024 * 1024
 # Keep automatically discovered candidates at the original conservative bound.
-# An already inspected text correction may explicitly request a bounded second
-# review set without turning an automatic detector runaway into hundreds of WAVs.
+# An already inspected text correction may explicitly request a larger bounded
+# review set. This does not expand the automatic detector budget.
 MAX_AUTOMATIC_ASR_HALLUCINATION_AUDIO_FILES = 192
-MAX_EXPLICIT_ASR_HALLUCINATION_AUDIO_FILES = 128
+MAX_EXPLICIT_ASR_HALLUCINATION_AUDIO_FILES = 512
 MAX_ASR_HALLUCINATION_AUDIO_FILES = (
     MAX_AUTOMATIC_ASR_HALLUCINATION_AUDIO_FILES
     + MAX_EXPLICIT_ASR_HALLUCINATION_AUDIO_FILES
 )
 MAX_ASR_HALLUCINATION_AUDIO_BYTES = 16 * 1024 * 1024
 MAX_ASR_HALLUCINATION_AUDIO_TOTAL_BYTES = 128 * 1024 * 1024
-MAX_REVIEW_AUDIO_FILES = 384
+MAX_REVIEW_AUDIO_FILES = 896
 MAX_REVIEW_AUDIO_TOTAL_BYTES = 128 * 1024 * 1024
 
 

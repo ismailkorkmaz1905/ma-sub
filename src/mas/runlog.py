@@ -15,6 +15,12 @@ class _Tee:
         self.stream = stream
         self.log = log
         self.lock = lock
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, OSError, ValueError):
+                pass
 
     def write(self, value):
         with self.lock:

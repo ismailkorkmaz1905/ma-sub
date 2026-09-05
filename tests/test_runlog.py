@@ -1,8 +1,26 @@
 import json
+import io
 from pathlib import Path
+import threading
 
 from mas import cli
 from mas import runlog
+
+
+def test_tee_reconfigures_narrow_stream_for_turkish_output():
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+    log = io.StringIO()
+    tee = runlog._Tee(stream, log, threading.RLock())
+
+    tee.write("Türkçe hizalama: Ağabeyim.\n")
+    tee.flush()
+
+    assert stream.encoding == "utf-8"
+    assert raw.getvalue().decode("utf-8").replace("\r\n", "\n") == (
+        "Türkçe hizalama: Ağabeyim.\n"
+    )
+    assert log.getvalue() == "Türkçe hizalama: Ağabeyim.\n"
 
 
 def _latest(root):

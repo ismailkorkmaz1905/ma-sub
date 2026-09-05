@@ -39,5 +39,7 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 $env:PYTHONPATH = Join-Path $repoRoot "src"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 & $python -m mas.cli @args
 exit $LASTEXITCODE

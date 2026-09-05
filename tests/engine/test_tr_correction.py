@@ -623,6 +623,24 @@ class TRCorrectionTests(unittest.TestCase):
         punctuation_only[0]["tr_corrected"] = self.inputs[0]["asr_text"].upper() + "!"
         validate_tr_correction_records(self.inputs[:-1], punctuation_only)
 
+    def test_unchanged_dialogue_can_request_exact_audio_review(self) -> None:
+        inputs = copy.deepcopy(self.inputs[:-1])
+        outputs = _outputs(inputs)
+        expected_text = outputs[0]["tr_corrected"]
+        outputs[0].update(
+            {
+                "review_required": True,
+                "audio_reviewed": False,
+                "review_disposition": "pending_audio_review",
+                "note": "Forced-alignment score requires exact audio review.",
+            }
+        )
+
+        validated = validate_tr_correction_records(inputs, outputs)
+
+        self.assertTrue(validated[0]["review_required"])
+        self.assertEqual(validated[0]["tr_corrected"], expected_text)
+
     def test_lexical_deletion_reports_all_unsupported_uids(self) -> None:
         inputs = copy.deepcopy(self.inputs[:-1])
         outputs = _outputs(inputs)

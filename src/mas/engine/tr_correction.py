@@ -2105,18 +2105,18 @@ def validate_tr_correction_records(
                     f"Correction {uid} dialogue requires non-empty tr_corrected"
                 )
         else:
-            is_pending_deletion_review = (
-                has_lexical_deletion
-                and review_required
+            is_pending_audio_review = (
+                review_required
                 and not audio_reviewed
                 and review_disposition == "pending_audio_review"
             )
-            if not is_pending_deletion_review and (
+            if not is_pending_audio_review and (
                 audio_reviewed or review_disposition != "not_applicable"
             ):
                 raise TRCorrectionError(
-                    f"Correction {uid} has no immutable audio-review record and "
-                    "must use audio_reviewed=false, review_disposition=not_applicable"
+                    f"Correction {uid} has no immutable audio-review record and must "
+                    "remain pending or use audio_reviewed=false, "
+                    "review_disposition=not_applicable"
                 )
             if non_dialogue:
                 raise TRCorrectionError(

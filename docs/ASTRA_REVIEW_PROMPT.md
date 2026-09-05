@@ -3,11 +3,11 @@
 Copy the following prompt into a fresh Astra review session after the candidate commit and real-run evidence are available.
 
 ```text
-Perform an independent release-blocking review of C:\Users\Ismail\CodeBase\ma-sub on branch engineering/ep12-reliability and PR #1.
+Perform an independent release-blocking review of C:\Users\Ismail\CodeBase\ma-sub on the sole maintained production branch, main.
 
 Authority and prohibitions:
 - You may read the full repository, run tests, install required test dependencies, build Docker, inspect Git and PR state, and inspect supplied real-run artifacts and logs.
-- Do not merge PR #1, do not push to main, do not create or move a stable tag, and do not alter external production data.
+- Do not create or move a stable tag and do not alter external production data.
 - Review the exact candidate commit. Report its full SHA.
 - Treat notebooks and everything under legacy/ as reference-only. Production must execute through normal Python modules and ./mas.
 - Do not weaken tests, schema, hashes, source immutability, timing authority, overlap policy, subtitle QA, or strict/emergency separation.
@@ -27,11 +27,11 @@ Read completely before evaluating:
 Run at minimum on Windows:
 
 git fetch --all --prune
-git switch engineering/ep12-reliability
+git switch main
 git status --short --branch
 git rev-parse HEAD
 git log --oneline --decorate -10
-gh pr view 1 --json number,state,isDraft,headRefName,baseRefName,url,statusCheckRollup
+git branch --all
 & .\.venv\Scripts\python.exe -m pytest -q tests
 & .\.venv\Scripts\python.exe -m pytest -q tests/regression/test_ep12_reliability.py
 & .\.venv\Scripts\python.exe -m pytest -q tests/test_pipeline_runtime.py
@@ -41,7 +41,7 @@ git diff --check
 Run at minimum on Linux or RunPod:
 
 git fetch --all --prune
-git switch engineering/ep12-reliability
+git switch main
 test -z "$(git status --porcelain)"
 git rev-parse HEAD
 ./runpod/bootstrap.sh
@@ -78,13 +78,13 @@ Real GPU truth boundary:
 Return exactly:
 1. Decision: PASS, FAIL, or BLOCKED
 2. Candidate commit SHA and worktree status
-3. PR state and CI results
+3. Branch consolidation state and CI results
 4. Test and Docker results with pass/fail/skip counts
 5. Findings ordered by severity, each with file and line evidence
 6. Acceptance matrix: automated, GPU, acoustic quality, Drive readback, RunPod shutdown, billing
 7. Real evidence inspected and hashes recorded
-8. Remaining blockers before merge or stable tag
+8. Remaining blockers before stable tag
 9. Exact reproduction and first real-run commands
 
-PASS is allowed only when every automated and real-environment gate is directly verified. Otherwise keep PR #1 draft and explicitly state that merge and stable tag remain prohibited.
+PASS is allowed only when every automated and real-environment gate is directly verified. Otherwise explicitly state that the stable tag remains prohibited.
 ```

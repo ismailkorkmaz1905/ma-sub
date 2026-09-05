@@ -4,7 +4,7 @@
 
 The maintained package, strict CLI orchestration, historical source archive, runtime policy, Docker definition, and RunPod control scripts are in this branch. Legacy notebooks are reference-only under `legacy/`.
 
-Real GPU inference has not been performed. Live Google Drive byte/SHA-256 readback and provider-side RunPod shutdown have not been verified. Do not merge to `main` or create a stable tag on local test results alone.
+Real GPU inference has not been performed. Live Google Drive byte/SHA-256 readback and provider-side RunPod shutdown have not been verified. Review `main` directly. Do not create a stable tag on local test results alone.
 
 ## Review commands
 
@@ -12,7 +12,7 @@ Windows:
 
 ```powershell
 git fetch --all --prune
-git switch engineering/ep12-reliability
+git switch main
 git status --short --branch
 git rev-parse HEAD
 & .\.venv\Scripts\python.exe -m pytest -q tests
@@ -27,7 +27,7 @@ Linux or RunPod:
 
 ```bash
 git fetch --all --prune
-git switch engineering/ep12-reliability
+git switch main
 git status --short --branch
 git rev-parse HEAD
 ./runpod/bootstrap.sh

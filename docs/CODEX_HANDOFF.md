@@ -3,10 +3,10 @@
 ## Repository snapshot
 
 - Repository: `ismailkorkmaz1905/ma-sub`
-- Branch: `engineering/ep12-reliability`
-- Pull request: [#1](https://github.com/ismailkorkmaz1905/ma-sub/pull/1), open and draft against `main`
+- Production branch: `main`
+- Pre-consolidation work: `engineering/ep12-reliability` and [PR #1](https://github.com/ismailkorkmaz1905/ma-sub/pull/1), pending consolidation into `main`
 - Implementation baseline HEAD before this handoff-document change: `63bd7bbd353ceb5d30de579c92c6999586f68132`
-- Recorded implementation worktree before this handoff-document change: clean and synchronized with `origin/engineering/ep12-reliability`
+- Recorded implementation worktree before this handoff-document change: clean and synchronized with `origin/engineering/ep12-reliability`; re-check after consolidation into `main`
 - Recorded PR checks: both test jobs and both Dockerfile jobs passed on 2026-09-05
 
 Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr view 1` because this snapshot can become stale.
@@ -55,7 +55,7 @@ Skipped local tests include Windows cases that require symlink privilege. Treat 
 7. Exercise success, failure, handoff wait, maximum-runtime, and idle-watchdog shutdown paths.
 8. From outside the Pod, confirm provider state is `EXITED` and no active GPU compute charge remains.
 9. Run the Astra prompt in `docs/ASTRA_REVIEW_PROMPT.md` against the final commit and retained runtime evidence.
-10. Keep PR #1 draft. Do not merge to `main` or create a stable tag until all real-environment gates pass and the user decides.
+10. Consolidate the implementation into the sole maintained `main` branch and close obsolete branch/PR state. Do not create a stable tag until all real-environment gates pass and the user decides.
 
 ## Secret handling
 
@@ -76,5 +76,5 @@ Do not place secret values in this file, shell history, issue comments, test out
 ## Fresh Codex CLI continuation prompt
 
 ```text
-C:\Users\Ismail\CodeBase\ma-sub reposundaki calismayi devral. Once repo kokundeki AGENTS.md dosyasini, sonra README.md ve docs/CODEX_HANDOFF.md dosyasini tamamen oku. engineering/ep12-reliability dalinda kal; PR #1 acik ve draft kalsin. main dalina merge etme ve stable tag basma. Once git status, HEAD ve PR kontrollerini yap; kirli agacta kullanici degisikliklerini koru. CODEX_HANDOFF.md icindeki acik release islerinden devam et. Gercek GPU, Drive readback veya RunPod kapanisi yapilmadiysa yapilmis gibi raporlama. Schema, hash, source immutability, timing-only override, speaker overlap, strict/emergency ayrimi ve subtitle kalite kurallarini test gecsin diye gevsetme. Anlamli degisiklikleri test et, commit et ve yalniz engineering/ep12-reliability dalina push et.
+C:\Users\Ismail\CodeBase\ma-sub reposundaki calismayi devral. Once repo kokundeki AGENTS.md dosyasini, sonra README.md ve docs/CODEX_HANDOFF.md dosyasini tamamen oku. Tek production dali olarak main uzerinde calis; once git status, HEAD ve varsa eski branch/PR durumunu kontrol et, kirli agacta kullanici degisikliklerini koru. CODEX_HANDOFF.md icindeki acik release islerinden devam et. Gercek GPU, Drive readback veya RunPod kapanisi yapilmadiysa yapilmis gibi raporlama. Schema, hash, source immutability, timing-only override, speaker overlap, strict/emergency ayrimi ve subtitle kalite kurallarini test gecsin diye gevsetme. Anlamli degisiklikleri test et, commit et ve main dalina push et. Astra incelemesi ve gercek GPU episode kaniti tamamlanmadan stable tag basma.
 ```

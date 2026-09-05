@@ -8,8 +8,8 @@ Start by reading `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`
 
 ## Repository boundaries
 
-- Work on `engineering/ep12-reliability` and keep PR #1 open and draft.
-- Do not merge to `main` and do not create a stable tag. Those decisions require Astra review and a real GPU episode run.
+- Use `main` as the sole maintained production branch. Consolidate pending implementation work into `main` and close obsolete feature branches and pull requests after their commits are preserved.
+- Do not create a stable tag. A stable release requires Astra review and a real GPU episode run.
 - Preserve user changes in a dirty worktree.
 - Keep source media immutable after its SHA-256 is recorded.
 - Never silently fall back to CPU for GPU-required stages.
@@ -28,7 +28,7 @@ Start by reading `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`
 4. Run focused tests, then the full suite before declaring completion.
 5. Run `git diff --check`.
 6. For runtime or release work, also check the Docker definition and the RunPod scripts.
-7. Commit meaningful stages and push only to `engineering/ep12-reliability` when authorized by the active task.
+7. Commit meaningful stages and push to `main` when authorized by the active task.
 8. State explicitly whether a claim came from local tests, CI, a real GPU run, live Drive readback, or external RunPod observation.
 
 ## Commands

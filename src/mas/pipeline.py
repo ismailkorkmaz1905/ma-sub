@@ -9,6 +9,7 @@ from .hashing import sha256_file, sha256_json
 from .notify import notify
 from .remote import upload_verified
 from .runpod import stop_current_pod
+from .source_discovery import discover_episode_source
 from .state import load, save, set_stage
 from .engine.api import (
     AudioReviewConfig,
@@ -115,7 +116,11 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             raise RuntimeError("source URL cannot change after episode initialization")
         url_path.write_text(source_url.strip() + "\n", encoding="utf-8")
     if not url_path.is_file():
-        raise RuntimeError("source URL is required for a new episode")
+        resolved_url = discover_episode_source(
+            episode,
+            cookies_file=os.getenv("MAS_YTDLP_COOKIES"),
+        )
+        url_path.write_text(resolved_url + "\n", encoding="utf-8")
     url = url_path.read_text(encoding="utf-8").strip()
     config_dir, series, names, religious = _load_configs()
     holder = {}

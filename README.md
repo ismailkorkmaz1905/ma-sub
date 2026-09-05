@@ -1,21 +1,38 @@
 # Muhtemel Ask Subtitles
 
-MAS production engine turns one episode source into strict Turkish and Indonesian subtitle deliverables. Notebooks are retained only as read-only historical references under `legacy/`. Production execution uses Python modules and the `mas` CLI.
+Muhtemel Ask Subtitles is the single production pipeline for turning one episode source into strict Turkish and Indonesian subtitle deliverables.
 
-Real full-episode GPU inference has not been performed on this branch. A passing local suite is not evidence of model quality, CUDA compatibility, remote Drive persistence, or provider shutdown.
+```text
+source -> audio -> Turkish ASR -> acoustic review -> correction handoff
+       -> alignment -> Indonesian handoff -> subtitle QA -> Drive verification
+       -> notification -> RunPod shutdown request
+```
 
-## Operator workflow
+Production code lives under `src/mas/` and runs through `./mas`. Notebooks and the imported source snapshot under `legacy/` are read-only reference material, not production entrypoints.
 
-Requirements:
+> Release status: real full-episode GPU inference has not been performed. Passing local tests do not verify model quality, CUDA compatibility, live Google Drive persistence, or provider shutdown. Do not create a stable tag until the Astra review and a real GPU episode run pass.
+
+## Start here
+
+- [Operator and architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
+- [EP12 incident acceptance criteria](docs/EP12_ACCEPTANCE.md)
+- [Codex continuation handoff](docs/CODEX_HANDOFF.md)
+- [Astra handoff](docs/ASTRA_HANDOFF.md)
+- [Astra review prompt](docs/ASTRA_REVIEW_PROMPT.md)
+
+## Requirements
 
 - Python 3.11
-- NVIDIA GPU and working CUDA runtime for ASR, acoustic review, and forced alignment
+- NVIDIA GPU with a working CUDA runtime for ASR, acoustic review, and forced alignment
 - `ffmpeg`, `ffprobe`, Git, and `rclone`
 - A configured `rclone` Google Drive remote
-- RunPod Pod ID and API key when automatic provider shutdown is expected
+- A RunPod Pod ID and API key when automatic provider shutdown is expected
 - A Gmail app password when email stage notifications are expected
+- A Netscape-format YouTube cookies file when authenticated source download is required
 
-Local setup:
+## Local setup
+
+Linux, macOS, or RunPod:
 
 ```bash
 uv venv --python 3.11 .venv
@@ -24,7 +41,18 @@ uv pip sync --python .venv/bin/python requirements.lock
 ./mas test
 ```
 
-Start a new strict run:
+Windows PowerShell:
+
+```powershell
+uv venv --python 3.11 .venv
+uv pip sync --python .venv\Scripts\python.exe requirements.lock
+./mas doctor
+./mas test
+```
+
+## Run an episode
+
+Configure secrets outside the repository:
 
 ```bash
 export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles'
@@ -32,26 +60,30 @@ export MAS_GMAIL_ADDRESS='your.account@gmail.com'
 export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
 export MAS_NOTIFY_TO='your.account@gmail.com'
 export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
-./mas run 13 --source-url 'SOURCE_URL'
 ```
 
-Resume after either ChatGPT handoff:
+Start a new strict run:
 
 ```bash
 ./mas run 13
 ```
 
-The CLI emits the exact expected ZIP path when it blocks for Turkish correction or Indonesian translation. Place only the returned exact ZIP in `translation_output/`, then run the same resume command. Never edit source media, pack manifests, immutable IDs, block order, Turkish text in the Indonesian return, or timing in a translation return.
+For a new episode, MAS searches the official `@muhtemelaskdizi` videos page and
+accepts only the exact full-episode title equivalent to `Muhtemel Ask 13. Bolum`.
+Turkish accents and spacing may differ. Clips, trailers, previews, recaps, missing
+matches, and ambiguous matches are rejected. The resolved watch URL is saved to
+the episode's immutable `source/source.url`. Use `--source-url` only for an
+explicit operator override before the episode is initialized.
 
-Email notifications are enabled only when both `MAS_GMAIL_ADDRESS` and `MAS_GMAIL_APP_PASSWORD` are set. `MAS_NOTIFY_TO` defaults to the sending Gmail address. Use a Google app password, not the account password, and store it as an environment or RunPod secret.
-
-Verify the credentials by sending one real message before starting an episode:
+Resume the same run after a Turkish correction or Indonesian translation handoff:
 
 ```bash
-./mas notify-test
+./mas run 13
 ```
 
-Useful commands:
+The CLI prints the exact ZIP path it expects when a handoff blocks progress. Put only that returned ZIP in `translation_output/`, then run the same resume command. Never edit source media, pack manifests, immutable IDs, block order, Turkish text in the Indonesian return, or timing in a translation return.
+
+Useful operator commands:
 
 ```bash
 ./mas status 13
@@ -63,7 +95,25 @@ Useful commands:
 
 `clean` is a dry run unless `--destroy` is supplied.
 
-## Strict release boundary
+## Gmail notifications
+
+Notifications cover run start, stage progress, handoff waits, failures, and final readiness. They are enabled only when both `MAS_GMAIL_ADDRESS` and `MAS_GMAIL_APP_PASSWORD` are set. `MAS_NOTIFY_TO` defaults to the sending address.
+
+Use a Google app password, never the account password. Keep it in an environment variable or RunPod secret and verify it before an episode run:
+
+```bash
+./mas notify-test
+```
+
+## YouTube cookies
+
+`MAS_YTDLP_COOKIES` must point to an exported Netscape-format cookies file. Keep the file outside the repository, mount or copy it into RunPod as a secret, and never paste cookie contents into logs, commits, issues, or handoff documents. An authentication failure does not permit an unauthenticated or lower-quality fallback.
+
+The same cookies file is used for official-channel source discovery and source
+download. Discovery has finite yt-dlp retries, socket timeout, total timeout, and
+a no-progress watchdog.
+
+## Strict safety boundary
 
 - Missing CUDA is a hard failure for GPU stages. There is no silent CPU fallback.
 - Source media is immutable after its SHA-256 is recorded.
@@ -75,18 +125,20 @@ Useful commands:
 
 ## RunPod
 
-Bootstrap an interactive Pod checkout:
+Bootstrap an interactive Pod checkout, configure provider and delivery secrets, then start the episode:
 
 ```bash
 ./runpod/bootstrap.sh
 export RUNPOD_POD_ID='POD_ID'
 export RUNPOD_API_KEY='API_KEY'
 export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles'
-./runpod/run-episode.sh 13 --source-url 'SOURCE_URL'
+export MAS_GMAIL_ADDRESS='your.account@gmail.com'
+export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
+export MAS_NOTIFY_TO='your.account@gmail.com'
+export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
+./runpod/run-episode.sh 13
 ```
 
-`run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. On completion, failure, handoff wait, or watchdog termination, it requests a provider-side stop through RunPod's REST API. Keep the API key in an environment secret, never in the repository or command history.
+`run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. On completion, failure, handoff wait, or watchdog termination, it requests a provider-side stop through RunPod's REST API.
 
-Stopping a Pod releases its GPU but may retain billable volume storage. A Pod with a network volume may need termination instead of stop. Decide that separately after artifacts are verified.
-
-See [architecture decisions](docs/ARCHITECTURE_DECISIONS.md), [incident acceptance](docs/EP12_ACCEPTANCE.md), [Codex handoff](docs/CODEX_HANDOFF.md), [Astra handoff](docs/ASTRA_HANDOFF.md), and the [Astra review prompt](docs/ASTRA_REVIEW_PROMPT.md).
+Keep provider keys and pipeline credentials in environment secrets, never in the repository or command history. Stopping a Pod releases its GPU but may retain billable volume storage. A Pod with a network volume may require termination instead of stop after artifacts are verified.

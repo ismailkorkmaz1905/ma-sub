@@ -249,6 +249,61 @@ class RawASRV2Tests(unittest.TestCase):
         self.assertEqual([item["text"] for item in segments], ["Evet", "Hayır"])
         self.assertEqual(len(words), 2)
 
+    def test_rescue_fragment_already_inside_primary_text_is_not_duplicated(self) -> None:
+        primary_segments = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 2_000,
+                "text": "Lütfen, rica ediyorum.",
+                "source": "main",
+            }
+        ]
+        rescue_segments = [
+            {
+                "start_ms": 1_400,
+                "end_ms": 1_800,
+                "text": "Lütfen.",
+                "source": "rescue-1",
+            }
+        ]
+        segments, _ = merge_rescue_evidence(
+            primary_segments,
+            [],
+            rescue_segments,
+            [],
+        )
+        self.assertEqual([item["text"] for item in segments], ["Lütfen, rica ediyorum."])
+
+    def test_rescue_fragment_with_only_temporal_touch_is_preserved(self) -> None:
+        primary_segments = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 2_000,
+                "text": "Lütfen, rica ediyorum.",
+                "source": "main",
+            }
+        ]
+        rescue_segments = [
+            {
+                "start_ms": 1_990,
+                "end_ms": 2_500,
+                "text": "Lütfen.",
+                "source": "rescue-1",
+            }
+        ]
+        segments, _ = merge_rescue_evidence(
+            primary_segments,
+            [],
+            rescue_segments,
+            [],
+        )
+        self.assertEqual(len(segments), 2)
+
+    def test_known_subtitle_credit_hallucination_accepts_initial_order(self) -> None:
+        self.assertTrue(
+            raw_asr_v2_module._is_known_subtitle_hallucination("Altyazı .K. M")
+        )
+
     def test_correction_uid_binds_time_and_text(self) -> None:
         records = build_correction_utterances(
             [{"start_ms": 1000, "end_ms": 2000, "text": "Merhaba", "source": "main"}],

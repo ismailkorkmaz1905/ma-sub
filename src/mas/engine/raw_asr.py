@@ -670,12 +670,33 @@ def merge_rescue_evidence(
 
     merged_segments = [dict(item) for item in primary_segments]
     for segment in rescue_segments:
-        if not str(segment.get("text", "")).strip():
+        rescue_text = str(segment.get("text", "")).strip()
+        if not rescue_text:
             continue
+        rescue_normalized = _normalized_lexical_text(rescue_text)
         duplicate = any(
-            str(existing.get("text", "")).strip().casefold()
-            == str(segment.get("text", "")).strip().casefold()
-            and _overlap_ms(existing, segment) > 0
+            _overlap_ms(existing, segment) > 0
+            and (
+                _normalized_lexical_text(existing.get("text", ""))
+                == rescue_normalized
+                or (
+                    _overlap_ms(existing, segment)
+                    >= max(
+                        1,
+                        min(
+                            int(existing["end_ms"]) - int(existing["start_ms"]),
+                            int(segment["end_ms"]) - int(segment["start_ms"]),
+                        )
+                        // 2,
+                    )
+                    and f" {rescue_normalized} "
+                    in (
+                        " "
+                        + _normalized_lexical_text(existing.get("text", ""))
+                        + " "
+                    )
+                )
+            )
             for existing in merged_segments
         )
         if not duplicate:
@@ -747,7 +768,7 @@ def _normalized_lexical_text(text: Any) -> str:
 
 
 def _is_known_subtitle_hallucination(text: Any) -> bool:
-    return _normalized_lexical_text(text) == "altyazı m k"
+    return _normalized_lexical_text(text) in {"altyazı m k", "altyazı k m"}
 
 
 def _split_segment_for_correction(

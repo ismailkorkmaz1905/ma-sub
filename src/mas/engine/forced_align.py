@@ -40,6 +40,7 @@ DEFAULT_TURKISH_ALIGNMENT_MODEL = (
     "mpoyraz/wav2vec2-xls-r-300m-cv7-turkish"
 )
 DEFAULT_MIN_WORD_SCORE = 0.30
+CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE = 0.25
 REVIEW_WORD_SCORE = 0.55
 DEFAULT_MAX_WORD_DURATION_MS = 2_500
 DEFAULT_MAX_OUTWARD_DRIFT_MS = 500
@@ -526,7 +527,9 @@ def _normalize_aligned_words(
             raw_index=raw_index,
             window_start_ms=int(coarse["start_ms"]),
             window_end_ms=int(coarse["end_ms"]),
-            min_word_score=min_word_score,
+            min_word_score=min(
+                min_word_score, CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
+            ),
             max_word_duration_ms=max_word_duration_ms,
         )
         if normalized is None:
@@ -564,6 +567,21 @@ def _normalize_aligned_words(
         zip(accepted, expected_tokens, token_edits)
     ):
         edit_kind = str(token_edit["edit_kind"])
+        contextual_low_score = score < min_word_score
+        if contextual_low_score:
+            neighbor_scores = [
+                accepted[position][3]
+                for position in (offset - 1, offset + 1)
+                if 0 <= position < len(accepted)
+            ]
+            if edit_kind != "unchanged" or not any(
+                neighbor_score >= min_word_score for neighbor_score in neighbor_scores
+            ):
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {canonical_text!r} alignment score "
+                    f"{score:.6f} is below the required minimum "
+                    f"{min_word_score:.6f} without adjacent unchanged-word support"
+                )
         if edit_kind in {"inserted", "replaced"} and score < EDITED_TOKEN_MIN_WORD_SCORE:
             raise ForcedAlignmentError(
                 f"{utterance_uid} edited token {canonical_text!r} alignment score "
@@ -584,6 +602,11 @@ def _normalize_aligned_words(
                 "edit_kind": edit_kind,
                 "asr_token_index": token_edit["asr_token_index"],
                 "timing_source": TIMING_SOURCE,
+                **(
+                    {"score_context": "adjacent_unchanged_word"}
+                    if contextual_low_score
+                    else {}
+                ),
                 **(
                     {"speaker_id": coarse["speaker_id"]}
                     if "speaker_id" in coarse
@@ -787,6 +810,18 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
         raise ForcedAlignmentError(
             f"provenance min_word_score must be within "
             f"[{DEFAULT_MIN_WORD_SCORE}, 1]"
+        )
+    contextual_unchanged_min_word_score = _finite_number(
+        provenance.get("contextual_unchanged_min_word_score"),
+        "provenance contextual_unchanged_min_word_score",
+    )
+    if (
+        contextual_unchanged_min_word_score
+        != CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
+    ):
+        raise ForcedAlignmentError(
+            "provenance contextual_unchanged_min_word_score must equal "
+            f"{CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE}"
         )
     review_word_score = _finite_number(
         provenance.get("review_word_score"), "provenance review_word_score"
@@ -1040,9 +1075,34 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
                     "within [0, 1]"
                 )
             if score < min_word_score:
+                neighbor_scores = [
+                    _finite_number(
+                        segment_words[position].get("score"),
+                        f"{utterance_uid} neighboring word score",
+                    )
+                    for position in (
+                        segment_word_offset - 1,
+                        segment_word_offset + 1,
+                    )
+                    if 0 <= position < len(segment_words)
+                    and isinstance(segment_words[position], Mapping)
+                ]
+                if (
+                    score < contextual_unchanged_min_word_score
+                    or token_edit["edit_kind"] != "unchanged"
+                    or word.get("score_context") != "adjacent_unchanged_word"
+                    or not any(
+                        neighbor_score >= min_word_score
+                        for neighbor_score in neighbor_scores
+                    )
+                ):
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} alignment score is below "
+                        "provenance min_word_score without contextual support"
+                    )
+            elif word.get("score_context") is not None:
                 raise ForcedAlignmentError(
-                    f"{utterance_uid} word {word_text!r} alignment score is below "
-                    "provenance min_word_score"
+                    f"{utterance_uid} word {word_text!r} has unexpected score_context"
                 )
             if (
                 token_edit["edit_kind"] in {"inserted", "replaced"}
@@ -1415,6 +1475,9 @@ def align_corrected_segments(
             "device": device,
             "interpolation": interpolation_mode,
             "min_word_score": min_word_score,
+            "contextual_unchanged_min_word_score": (
+                CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
+            ),
             "review_word_score": REVIEW_WORD_SCORE,
             "edited_token_min_word_score": EDITED_TOKEN_MIN_WORD_SCORE,
             "max_word_duration_ms": max_word_duration_ms,
@@ -1434,6 +1497,7 @@ def align_corrected_segments(
 
 
 __all__ = [
+    "CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE",
     "DEFAULT_MAX_OUTWARD_DRIFT_MS",
     "DEFAULT_MAX_WORD_DURATION_MS",
     "DEFAULT_MIN_WORD_SCORE",

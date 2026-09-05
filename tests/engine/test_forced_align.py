@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from mas.engine.forced_align import (
+    CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE,
     DEFAULT_MAX_OUTWARD_DRIFT_MS,
     DEFAULT_MAX_WORD_DURATION_MS,
     DEFAULT_MIN_WORD_SCORE,
@@ -458,6 +459,40 @@ class ForcedAlignmentTests(unittest.TestCase):
                 align_corrected_segments(
                     self._audio(directory), [_coarse()[1]], whisperx_module=fake
                 )
+
+    def test_unchanged_word_uses_bounded_adjacent_score_context(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "Ağabeyim Ağabey",
+                "asr_text": "Ağabeyim Ağabey",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-context-score",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Ağabeyim", "start": 1.1, "end": 1.4, "score": 0.275},
+                        {"word": "Ağabey", "start": 1.5, "end": 1.9, "score": 0.80},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+        self.assertEqual(
+            data["provenance"]["contextual_unchanged_min_word_score"],
+            CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE,
+        )
+        self.assertEqual(
+            data["words"][0]["score_context"], "adjacent_unchanged_word"
+        )
+        self.assertNotIn("score_context", data["words"][1])
 
     def test_inserted_token_requires_edited_token_acoustic_floor(self) -> None:
         coarse = [

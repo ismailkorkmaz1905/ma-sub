@@ -4,6 +4,8 @@
 __pycache__
 .pytest_cache
 var
+EPISODES
+legacy
 *.pyc
 *.pyo
 *.log

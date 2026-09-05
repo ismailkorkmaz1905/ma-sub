@@ -1,7 +1,19 @@
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
-ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y --no-install-recommends python3.11 python3-pip ffmpeg git curl && rm -rf /var/lib/apt/lists/*
+ARG UV_VERSION=0.8.14
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /usr/local/bin/uv
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git procps rclone \
+    && rm -rf /var/lib/apt/lists/* \
+    && uv python install 3.11 \
+    && uv venv --python 3.11 /opt/venv
 WORKDIR /workspace/ma-sub
-COPY . .
-RUN python3.11 -m pip install --no-cache-dir -r requirements.lock
+COPY requirements.lock ./
+RUN uv pip sync --python /opt/venv/bin/python requirements.lock
+COPY . ./
+RUN chmod +x mas runpod/*.sh
 ENTRYPOINT ["./mas"]

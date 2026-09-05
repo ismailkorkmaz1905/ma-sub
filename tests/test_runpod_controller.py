@@ -9,6 +9,49 @@ from mas import cli
 from mas import runpod_controller
 
 
+def test_local_tr_return_must_match_current_pack(tmp_path, monkeypatch):
+    name = "Muhtemel Ask 11.Bolum"
+    pack = tmp_path / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
+    returned = tmp_path / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    pack.parent.mkdir()
+    returned.parent.mkdir()
+    pack.write_bytes(b"pack")
+    returned.write_bytes(b"returned")
+    checked = []
+    monkeypatch.setattr(
+        runpod_controller,
+        "validate_tr_correction_output",
+        lambda actual_pack, actual_return: checked.append(
+            (actual_pack, actual_return)
+        ),
+    )
+
+    runpod_controller._validate_local_tr_return(tmp_path, name)
+
+    assert checked == [(pack, returned)]
+
+
+def test_stale_local_tr_return_fails_before_upload(tmp_path, monkeypatch):
+    name = "Muhtemel Ask 11.Bolum"
+    pack = tmp_path / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
+    returned = tmp_path / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    pack.parent.mkdir()
+    returned.parent.mkdir()
+    pack.write_bytes(b"pack")
+    returned.write_bytes(b"stale")
+    monkeypatch.setattr(
+        runpod_controller,
+        "validate_tr_correction_output",
+        lambda *_paths: (_ for _ in ()).throw(ValueError("SHA mismatch")),
+    )
+
+    with pytest.raises(
+        runpod_controller.RunPodControllerError,
+        match="does not match the current pack",
+    ):
+        runpod_controller._validate_local_tr_return(tmp_path, name)
+
+
 class _Response:
     status = 200
 

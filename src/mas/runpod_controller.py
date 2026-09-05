@@ -13,11 +13,28 @@ import urllib.request
 from pathlib import Path
 
 from .config import ROOT, episode_dir
+from .engine.tr_correction import validate_tr_correction_output
 from .remote import RemoteVerificationError, _run_watchdog
 
 
 class RunPodControllerError(RuntimeError):
     pass
+
+
+def _validate_local_tr_return(local_root, name):
+    pack = Path(local_root) / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
+    returned = Path(local_root) / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    if returned.is_file():
+        if not pack.is_file():
+            raise RunPodControllerError(
+                f"local Turkish correction pack is missing: {pack}"
+            )
+        try:
+            validate_tr_correction_output(pack, returned)
+        except Exception as exc:
+            raise RunPodControllerError(
+                "local Turkish correction return does not match the current pack"
+            ) from exc
 
 
 class RunPodClient:
@@ -658,6 +675,7 @@ def run_remote_episode(episode, source_url=None):
             name = f"Muhtemel Ask {episode}.Bolum"
             local_root = episode_dir(episode)
             remote_root = f"/workspace/ma-sub/EPISODES/{name}"
+            _validate_local_tr_return(local_root, name)
             for filename in (f"{name}_TR_TEXT_CORRECTED.zip", f"{name}_ID_TRANSLATED.zip"):
                 local_return = local_root / "translation_output" / filename
                 if local_return.is_file():
@@ -716,6 +734,12 @@ def run_remote_episode(episode, source_url=None):
                     (
                         f"{remote_root}/prepare/audio_review_v2.recovery.json",
                         local_root / "prepare" / "audio_review_v2.recovery.json",
+                    ),
+                    (
+                        f"{remote_root}/translation_output/{name}_TR_TEXT_CORRECTED.zip",
+                        local_root
+                        / "translation_output"
+                        / f"{name}_TR_TEXT_CORRECTED.zip",
                     ),
                 )
                 for position, (remote_file, local_file) in enumerate(

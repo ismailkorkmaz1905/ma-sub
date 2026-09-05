@@ -2659,70 +2659,7 @@ def transcribe_raw_audio_v2(
             cached["resumed"] = True
             return cached
         recovery_path = destination / RAW_ASR_V2_RECOVERY_FILENAME
-        recover_without_inference = (
-            recovery_path.is_file()
-            and not output_path.exists()
-            and not marker_path.exists()
-        )
-        if recovery_path.is_file() and output_path.is_file() and marker_path.is_file():
-            previous = load_valid_raw_asr_v2(
-                destination,
-                audio_path=source_path,
-                episode=episode,
-                require_independent_vad=settings.require_independent_vad,
-            )
-            if previous is not None:
-                previous_model = previous.get("model")
-                previous_settings = (
-                    previous_model.get("settings")
-                    if isinstance(previous_model, Mapping)
-                    else None
-                )
-                if isinstance(previous_settings, Mapping):
-                    normalized_previous_settings = json.loads(
-                        json.dumps(
-                            dict(previous_settings),
-                            sort_keys=True,
-                            allow_nan=False,
-                        )
-                    )
-                    normalized_current_settings = json.loads(
-                        json.dumps(
-                            asdict(settings),
-                            sort_keys=True,
-                            allow_nan=False,
-                        )
-                    )
-                    previous_review_uids = previous.get(
-                        "hallucination_review_utterance_uids", []
-                    )
-                    settings_match_except_reviews = (
-                        set(normalized_previous_settings)
-                        == set(normalized_current_settings)
-                        and all(
-                            normalized_previous_settings[key]
-                            == normalized_current_settings[key]
-                            for key in normalized_current_settings
-                            if key != "extra_audio_review_uids"
-                        )
-                    )
-                    review_requests_only_add_scrutiny = (
-                        isinstance(previous_review_uids, list)
-                        and normalized_previous_settings.get(
-                            "extra_audio_review_uids"
-                        )
-                        == previous_review_uids
-                        and set(previous_review_uids).issubset(
-                            requested_hallucination_reviews
-                        )
-                        and list(previous_review_uids)
-                        != list(requested_hallucination_reviews)
-                    )
-                    recover_without_inference = (
-                        settings_match_except_reviews
-                        and review_requests_only_add_scrutiny
-                    )
-        if recover_without_inference:
+        if recovery_path.is_file():
             return recover_raw_asr_v2_from_checkpoint(
                 source_path,
                 destination,

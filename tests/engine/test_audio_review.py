@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from mas.engine.audio_review import (
     _FasterWhisperReviewDecoder,
+    _write_exact_target_crop,
     AudioReviewV2Config,
     AudioReviewV2Error,
     resolve_tr_audio_reviews_v2,
@@ -286,7 +287,7 @@ class AudioReviewV2Tests(unittest.TestCase):
             ):
                 resolve_tr_audio_reviews_v2(
                     *paths,
-                    decoder=FakeDecoder([_decoded(), _decoded()]),
+                    decoder=FakeDecoder([_decoded(), _decoded(), _decoded()]),
                     progress=None,
                 )
             self.assertFalse(paths[2].exists())
@@ -312,13 +313,78 @@ class AudioReviewV2Tests(unittest.TestCase):
             self.assertEqual(len(outcome["evidence_prompt_sha256"]), 64)
             self.assertEqual(outcome["blind_target_decode"]["source"], "none")
 
+    def test_exact_target_crop_can_confirm_after_context_decode_is_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), orphan=True)
+            decoder = FakeDecoder([_decoded(), _decoded(), _decoded("Merhaba")])
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+            self.assertEqual(report["status"], "PASS")
+            self.assertEqual(decoder.call_count, 3)
+            outcome = report["outcomes"][0]
+            self.assertEqual(outcome["source"], "secondary_asr_exact_target_crop")
+            self.assertEqual(outcome["exact_target_crop"]["duration_ms"], 400)
+            self.assertEqual(
+                outcome["exact_target_crop_decode"]["transcript"], "Merhaba"
+            )
+
+    def test_exact_target_crop_alone_cannot_close_a_speech_hole(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), include_hole=True)
+            decoder = FakeDecoder(
+                [
+                    _decoded("Merhaba"),
+                    _decoded(),
+                    _decoded(),
+                    _decoded("Duydum"),
+                ]
+            )
+            with self.assertRaisesRegex(AudioReviewV2Error, "pending_count=1"):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    decoder=decoder,
+                    progress=None,
+                )
+            report = json.loads(paths[3].read_text(encoding="utf-8"))
+            self.assertEqual(report["pending_utterance_uids"], ["hole-1"])
+
+    def test_exact_target_crop_uses_only_declared_sample_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.wav"
+            destination = root / "target.wav"
+            samples = list(range(1000))
+            with wave.open(str(source), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(1000)
+                handle.writeframes(b"".join(value.to_bytes(2, "little") for value in samples))
+            evidence = {
+                "clip_start_ms": 800,
+                "start_ms": 1000,
+                "end_ms": 1400,
+            }
+            crop = _write_exact_target_crop(source, destination, evidence)
+            with wave.open(str(destination), "rb") as handle:
+                frames = handle.readframes(handle.getnframes())
+            values = [
+                int.from_bytes(frames[offset : offset + 2], "little")
+                for offset in range(0, len(frames), 2)
+            ]
+            self.assertEqual(values, samples[200:600])
+            self.assertEqual(crop["start_frame"], 200)
+            self.assertEqual(crop["end_frame"], 600)
+
     def test_checkpoint_is_reused_when_manual_override_closes_ambiguity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = _make_files(Path(directory), orphan=True)
             with self.assertRaises(AudioReviewV2Error):
                 resolve_tr_audio_reviews_v2(
                     *paths,
-                    decoder=FakeDecoder([_decoded(), _decoded()]),
+                    decoder=FakeDecoder([_decoded(), _decoded(), _decoded()]),
                     progress=None,
                 )
             resumed_decoder = FakeDecoder([])

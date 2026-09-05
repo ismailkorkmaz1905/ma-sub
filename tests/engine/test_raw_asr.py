@@ -1412,10 +1412,17 @@ class RawASRV2RuntimeTests(unittest.TestCase):
             with patch.object(
                 raw_asr_v2_module,
                 "_import_whisper",
-                side_effect=TranscriptionError("rerun-required"),
+                side_effect=AssertionError("model inference must not run"),
             ):
-                with self.assertRaisesRegex(TranscriptionError, "rerun-required"):
-                    transcribe_raw_audio_v2(audio, prepare, episode=12)
+                recovered = transcribe_raw_audio_v2(audio, prepare, episode=12)
+            self.assertTrue(recovered["resumed"])
+            marker = json.loads(
+                (prepare / "raw_asr_v2.done.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                Path(marker["outputs"]["raw_asr_v2"]["path"]).resolve(),
+                (prepare / "raw_asr_v2.json").resolve(),
+            )
 
     def test_valid_marker_hash_cannot_hide_internal_input_identity_mismatch(self) -> None:
         class Model:
@@ -1455,12 +1462,11 @@ class RawASRV2RuntimeTests(unittest.TestCase):
             with patch.object(
                 raw_asr_v2_module,
                 "_import_whisper",
-                side_effect=TranscriptionError("identity-mismatch-rerun"),
+                side_effect=AssertionError("model inference must not run"),
             ):
-                with self.assertRaisesRegex(
-                    TranscriptionError, "identity-mismatch-rerun"
-                ):
-                    transcribe_raw_audio_v2(audio, prepare, episode=12)
+                recovered = transcribe_raw_audio_v2(audio, prepare, episode=12)
+            self.assertTrue(recovered["resumed"])
+            self.assertEqual(recovered["input_sha256"], data["input_sha256"])
 
     def test_missing_caption_fails_before_model_import(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

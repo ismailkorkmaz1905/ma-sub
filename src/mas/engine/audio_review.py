@@ -20,6 +20,7 @@ import os
 import re
 import tempfile
 import unicodedata
+import wave
 import zipfile
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
@@ -477,6 +478,83 @@ def _target_decode(
     }
 
 
+def _write_exact_target_crop(
+    source_path: Path,
+    destination_path: Path,
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    target_start_ms = int(evidence["start_ms"]) - int(evidence["clip_start_ms"])
+    target_end_ms = int(evidence["end_ms"]) - int(evidence["clip_start_ms"])
+    if target_start_ms < 0 or target_end_ms <= target_start_ms:
+        raise AudioReviewV2Error("review target interval is invalid")
+    try:
+        with wave.open(str(source_path), "rb") as source:
+            channels = source.getnchannels()
+            sample_width = source.getsampwidth()
+            sample_rate = source.getframerate()
+            compression = source.getcomptype()
+            frame_count = source.getnframes()
+            if channels < 1 or sample_width < 1 or sample_rate < 1:
+                raise AudioReviewV2Error("review WAV format is invalid")
+            if compression != "NONE":
+                raise AudioReviewV2Error("review WAV must be uncompressed PCM")
+            start_frame = round(target_start_ms * sample_rate / 1000)
+            end_frame = round(target_end_ms * sample_rate / 1000)
+            if start_frame < 0 or end_frame <= start_frame or end_frame > frame_count:
+                raise AudioReviewV2Error("review target crop exceeds WAV bounds")
+            source.setpos(start_frame)
+            frames = source.readframes(end_frame - start_frame)
+        if len(frames) != (end_frame - start_frame) * channels * sample_width:
+            raise AudioReviewV2Error("review target crop is truncated")
+        with wave.open(str(destination_path), "wb") as destination:
+            destination.setnchannels(channels)
+            destination.setsampwidth(sample_width)
+            destination.setframerate(sample_rate)
+            destination.writeframes(frames)
+    except (OSError, EOFError, wave.Error) as exc:
+        raise AudioReviewV2Error(f"Could not create exact review crop: {exc}") from exc
+    return {
+        "audio_sha256": sha256_file(destination_path),
+        "sample_rate_hz": sample_rate,
+        "start_frame": start_frame,
+        "end_frame": end_frame,
+        "duration_ms": round((end_frame - start_frame) * 1000 / sample_rate),
+    }
+
+
+def _whole_clip_target_decode(
+    decoded: Mapping[str, Any], *, duration_ms: int
+) -> dict[str, Any]:
+    return _target_decode(
+        decoded,
+        {"start_ms": 0, "end_ms": duration_ms, "clip_start_ms": 0},
+        tolerance_ms=0,
+    )
+
+
+def _exact_target_crop_confirms(
+    kind: str,
+    evidence: Mapping[str, Any],
+    provisional_record: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> bool:
+    if kind == "speech_hole" or decision.get("decision") != "confirmed_dialogue":
+        return False
+    transcript = _normalized_text(
+        decision.get("target_decode", {}).get("transcript", "")
+    )
+    references = (
+        provisional_record.get("tr_corrected", ""),
+        evidence.get("asr_text", ""),
+        evidence.get("youtube_text", ""),
+    )
+    return bool(transcript) and any(
+        transcript == _normalized_text(reference)
+        for reference in references
+        if str(reference).strip()
+    )
+
+
 def _machine_decision(
     kind: str,
     evidence: Mapping[str, Any],
@@ -734,6 +812,13 @@ def _outcome(
         outcome["evidence_prompt_sha256"] = decision.get(
             "evidence_prompt_sha256"
         )
+    if "exact_target_crop_decode" in decision:
+        outcome["exact_target_crop_decode"] = copy.deepcopy(
+            dict(decision["exact_target_crop_decode"])
+        )
+        outcome["exact_target_crop"] = copy.deepcopy(
+            dict(decision["exact_target_crop"])
+        )
     return outcome
 
 
@@ -980,7 +1065,38 @@ def resolve_tr_audio_reviews_v2(
                             cached_target_decode,
                             settings,
                         )
-                        if "blind_target_decode" in cached_decision:
+                        if "exact_target_crop_decode" in cached_decision:
+                            recomputed = _machine_decision(
+                                kind,
+                                evidence,
+                                provisional_by_uid[uid],
+                                cached_decision["exact_target_crop_decode"],
+                                settings,
+                            )
+                            if not _exact_target_crop_confirms(
+                                kind,
+                                evidence,
+                                provisional_by_uid[uid],
+                                recomputed,
+                            ):
+                                raise AudioReviewV2Error(
+                                    "cached exact target crop no longer satisfies policy"
+                                )
+                            recomputed["source"] = "secondary_asr_exact_target_crop"
+                            recomputed["reason"] = (
+                                "blind secondary ASR on the exact target-only crop "
+                                "satisfied the existing acoustic decision policy"
+                            )
+                            recomputed["blind_target_decode"] = copy.deepcopy(
+                                cached_decision["blind_target_decode"]
+                            )
+                            recomputed["exact_target_crop_decode"] = copy.deepcopy(
+                                cached_decision["exact_target_crop_decode"]
+                            )
+                            recomputed["exact_target_crop"] = copy.deepcopy(
+                                cached_decision["exact_target_crop"]
+                            )
+                        elif "blind_target_decode" in cached_decision:
                             expected_prompt = _evidence_prompt(
                                 evidence, provisional_by_uid[uid]
                             )
@@ -1072,6 +1188,37 @@ def resolve_tr_audio_reviews_v2(
                                 evidence_prompt.encode("utf-8")
                             ).hexdigest()
                             decision = prompted_decision
+                if decision["decision"] == "pending_audio_review":
+                    crop_path = temporary_root / f"{position:03d}-target.wav"
+                    crop = _write_exact_target_crop(clip_path, crop_path, evidence)
+                    crop_decoded = _normalize_decoder_result(
+                        runtime_decoder.decode(crop_path, initial_prompt=None)
+                    )
+                    crop_target = _whole_clip_target_decode(
+                        crop_decoded, duration_ms=int(crop["duration_ms"])
+                    )
+                    crop_decision = _machine_decision(
+                        kind,
+                        evidence,
+                        provisional_by_uid[uid],
+                        crop_target,
+                        settings,
+                    )
+                    if _exact_target_crop_confirms(
+                        kind,
+                        evidence,
+                        provisional_by_uid[uid],
+                        crop_decision,
+                    ):
+                        crop_decision["source"] = "secondary_asr_exact_target_crop"
+                        crop_decision["reason"] = (
+                            "blind secondary ASR on the exact target-only crop "
+                            "satisfied the existing acoustic decision policy"
+                        )
+                        crop_decision["blind_target_decode"] = target
+                        crop_decision["exact_target_crop_decode"] = crop_target
+                        crop_decision["exact_target_crop"] = crop
+                        decision = crop_decision
                 machine_decisions[uid] = decision
                 if (
                     position % settings.checkpoint_every == 0

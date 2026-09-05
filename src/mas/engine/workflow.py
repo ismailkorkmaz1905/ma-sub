@@ -59,7 +59,7 @@ from .tr_correction import (
 )
 
 
-DEFAULT_ALIGNMENT_PADDING_MS = 900
+DEFAULT_ALIGNMENT_PADDING_MS = 500
 MIN_STRICT_WORD_VAD_OVERLAP_RATIO = 0.25
 MAX_STRICT_WORD_VAD_EDGE_OUTSIDE_MS = 120
 
@@ -157,7 +157,7 @@ def correction_records_to_alignment_inputs(
     """Route exact, validated Turkish corrections to alignment or review.
 
     Coarse ASR boundaries are only search windows, not final cue boundaries.
-    Dialogue windows therefore receive symmetric padding (900 ms by default),
+    Dialogue windows therefore receive symmetric padding (500 ms by default),
     clamped at zero on the left.  Adjacent padded windows may overlap; the
     forced-alignment validator still rejects overlapping *aligned words*.
 

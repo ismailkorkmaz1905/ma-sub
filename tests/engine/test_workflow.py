@@ -488,7 +488,7 @@ class V2CorrectionRoutingTests(unittest.TestCase):
             speech_hole_records=_speech_holes(),
         )
 
-        self.assertEqual(DEFAULT_ALIGNMENT_PADDING_MS, 900)
+        self.assertEqual(DEFAULT_ALIGNMENT_PADDING_MS, 500)
         self.assertEqual(
             [item["utterance_uid"] for item in bundle.alignment_inputs],
             ["utt-1", "utt-3"],
@@ -499,14 +499,14 @@ class V2CorrectionRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             (bundle.alignment_inputs[0]["start_ms"], bundle.alignment_inputs[0]["end_ms"]),
-            (100, 3_400),
+            (500, 3_000),
         )
         self.assertEqual(
             (bundle.alignment_inputs[1]["start_ms"], bundle.alignment_inputs[1]["end_ms"]),
-            (3_600, 6_900),
+            (4_000, 6_500),
         )
         self.assertEqual(bundle.window_audit[0]["coarse_start_ms"], 1_000)
-        self.assertEqual(bundle.window_audit[0]["alignment_start_ms"], 100)
+        self.assertEqual(bundle.window_audit[0]["alignment_start_ms"], 500)
         self.assertEqual(bundle.reviewed_non_dialogue[0]["start_ms"], 3_000)
         self.assertEqual(bundle.reviewed_non_dialogue[0]["end_ms"], 4_000)
         self.assertEqual(inputs, original_inputs)

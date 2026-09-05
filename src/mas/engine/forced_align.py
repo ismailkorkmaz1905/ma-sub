@@ -676,26 +676,6 @@ def _bounded_drift_context(
         word.get("score_context") == "adjacent_unchanged_word" for word in words
     ):
         return "contextual_low_score_alignment_window"
-    if (
-        all(word.get("edit_kind") == "unchanged" for word in words)
-        and int(drift_audit["word_wholly_before_coarse_count"]) == 0
-        and int(drift_audit["word_wholly_after_coarse_count"]) == 0
-        and (
-            early_drift <= max_outward_drift_ms
-            or (
-                int(drift_audit["word_crossing_coarse_start_count"]) == 1
-                and float(words[0]["score"]) >= REVIEW_WORD_SCORE
-            )
-        )
-        and (
-            late_drift <= max_outward_drift_ms
-            or (
-                int(drift_audit["word_crossing_coarse_end_count"]) == 1
-                and float(words[-1]["score"]) >= REVIEW_WORD_SCORE
-            )
-        )
-    ):
-        return "high_confidence_unchanged_boundary_word"
     return None
 
 

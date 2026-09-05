@@ -326,6 +326,10 @@ class DownloadResumeTests(unittest.TestCase):
 
             self.assertEqual(len(state.ydl_options), 2)
             self.assertTrue(
+                all(options.get("remote_components") == {"ejs:github"} for options in state.ydl_options)
+            )
+            self.assertTrue(all(options.get("js_runtimes") for options in state.ydl_options))
+            self.assertTrue(
                 all(options.get("cookiefile") == str(cookie.resolve()) for options in state.ydl_options)
             )
             persisted = result.metadata_path.read_text(encoding="utf-8")
@@ -359,6 +363,9 @@ class DownloadResumeTests(unittest.TestCase):
             self.assertTrue(second.resumed)
             self.assertEqual(state.media_download_calls, 1)
             self.assertEqual(len(retry_options), 2)
+            self.assertTrue(
+                all(options.get("remote_components") == {"ejs:github"} for options in retry_options)
+            )
             self.assertTrue(
                 all(options.get("cookiefile") == str(cookie.resolve()) for options in retry_options)
             )

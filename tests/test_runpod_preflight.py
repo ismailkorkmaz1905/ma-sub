@@ -106,9 +106,15 @@ def test_strict_runpod_doctor_retries_drive_timeouts(tmp_path, monkeypatch, caps
 def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     script = (ROOT / "runpod" / "bootstrap.sh").read_text(encoding="utf-8")
     assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"' in script
+    assert 'MAS_BIN_DIR="${MAS_BIN_DIR:-/workspace/.local/bin}"' in script
+    assert "denoland/deno/releases/download/v2.9.5" in script
+    assert "sha256sum --check --status" in script
     assert 'if [[ ! -x "$VENV/bin/python" ]]; then' in script
     assert (
         'uv pip install --python "$VENV/bin/python" '
         '--index-strategy unsafe-best-match --requirements requirements.lock'
     ) in script
     assert "uv pip sync" not in script
+
+    runner = (ROOT / "runpod" / "run-episode.sh").read_text(encoding="utf-8")
+    assert 'export PATH="${MAS_BIN_DIR:-/workspace/.local/bin}:$PATH"' in runner

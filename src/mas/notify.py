@@ -17,10 +17,10 @@ def send_email(episode, event, details=None):
     message = EmailMessage()
     message["From"] = sender
     message["To"] = recipient
-    subject = f"Muhtemel Ask {episode}. Bolum" if episode is not None else "Muhtemel Ask"
+    subject = f"Muhtemel Aşk {episode}. Bölüm" if episode is not None else "Muhtemel Aşk"
     message["Subject"] = f"{subject} - {event}"
     message.set_content(
-        f"Bolum: {episode if episode is not None else '-'}\nDurum: {event}\nDetay: {details or '-'}\n"
+        f"Bölüm: {episode if episode is not None else '-'}\nDurum: {event}\nDetay: {details or '-'}\n"
     )
 
     last_error = None

@@ -128,7 +128,7 @@ def test():
 
 
 def notify_test():
-    result = send_email(None, "bildirim testi", "MAS e-posta bildirimi calisiyor.")
+    result = send_email(None, "bildirim testi", "MAS e-posta bildirimi çalışıyor.")
     if result.get("status") != "sent":
         raise RuntimeError("MAS_GMAIL_ADDRESS and MAS_GMAIL_APP_PASSWORD are required")
     print(f"Test email sent to {result['recipient']}")

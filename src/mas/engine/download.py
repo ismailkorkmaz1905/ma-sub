@@ -328,6 +328,21 @@ def _import_yt_dlp() -> Any:
     return yt_dlp
 
 
+def _youtube_javascript_options() -> dict[str, Any]:
+    deno = shutil.which("deno")
+    node = shutil.which("node")
+    if deno:
+        runtimes = {"deno": {"path": deno}}
+    elif node:
+        runtimes = {"node": {"path": node}}
+    else:
+        runtimes = {"deno": {"path": "/workspace/.local/bin/deno"}}
+    return {
+        "js_runtimes": runtimes,
+        "remote_components": {"ejs:github"},
+    }
+
+
 def _validated_cookie_file(cookies_file: str | Path | None) -> Path | None:
     """Return a readable Netscape cookie file without exposing its contents."""
 
@@ -485,6 +500,7 @@ def retrieve_turkish_captions(
         cookie_path = _validated_cookie_file(cookies_file)
         if info is None:
             info_options: dict[str, Any] = {
+                **_youtube_javascript_options(),
                 "quiet": True,
                 "no_warnings": False,
                 "noplaylist": True,
@@ -502,6 +518,7 @@ def retrieve_turkish_captions(
         with tempfile.TemporaryDirectory(prefix=".captions-", dir=destination) as tmp_name:
             tmp_dir = Path(tmp_name)
             options = {
+                **_youtube_javascript_options(),
                 "outtmpl": str(tmp_dir / "captions.%(ext)s"),
                 "skip_download": True,
                 "noplaylist": True,
@@ -1080,6 +1097,7 @@ def download_source(
     info: Mapping[str, Any] | None = None
     try:
         options = {
+            **_youtube_javascript_options(),
             "format": format_selector,
             "outtmpl": str(workspace / "source.%(ext)s"),
             "merge_output_format": merge_output_format,
@@ -1094,9 +1112,6 @@ def download_source(
             "file_access_retries": retries,
             "socket_timeout": socket_timeout,
             "concurrent_fragment_downloads": concurrent_fragments,
-            "js_runtimes": {
-                "deno": {"path": shutil.which("deno") or "/usr/local/bin/deno"}
-            },
             "quiet": False,
             "no_warnings": False,
             "progress_hooks": [watchdog],

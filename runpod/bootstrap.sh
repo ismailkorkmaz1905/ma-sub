@@ -3,8 +3,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${MAS_VENV_DIR:-$ROOT/.venv}"
 UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"
+MAS_BIN_DIR="${MAS_BIN_DIR:-/workspace/.local/bin}"
 export UV_CACHE_DIR
+export PATH="$MAS_BIN_DIR:$PATH"
 cd "$ROOT"
+
+mkdir -p "$MAS_BIN_DIR"
+if ! command -v deno >/dev/null 2>&1; then
+  deno_archive="$(mktemp)"
+  deno_extract="$(mktemp -d)"
+  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 15 --max-time 300 --retry 3 \
+    https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-unknown-linux-gnu.zip \
+    --output "$deno_archive"
+  echo "8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530  $deno_archive" \
+    | sha256sum --check --status
+  python3 -m zipfile -e "$deno_archive" "$deno_extract"
+  install -m 755 "$deno_extract/deno" "$MAS_BIN_DIR/deno"
+  rm -f "$deno_archive"
+  rm -rf "$deno_extract"
+fi
 
 if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive

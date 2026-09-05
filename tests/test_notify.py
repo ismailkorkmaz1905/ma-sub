@@ -35,11 +35,12 @@ def test_email_sent_to_self_by_default(monkeypatch):
     monkeypatch.delenv("MAS_NOTIFY_TO", raising=False)
     monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
 
-    result = notify.send_email(13, "bolum hazir", "receipt.json")
+    result = notify.send_email(13, "bölüm hazır", "receipt.json")
 
     assert result == {"status": "sent", "recipient": "sender@gmail.com"}
     assert FakeSMTP.sent["To"] == "sender@gmail.com"
-    assert "13. Bolum" in FakeSMTP.sent["Subject"]
+    assert "Muhtemel Aşk 13. Bölüm" in FakeSMTP.sent["Subject"]
+    assert "Bölüm: 13" in FakeSMTP.sent.get_content()
     assert "receipt.json" in FakeSMTP.sent.get_content()
 
 
@@ -64,5 +65,5 @@ def test_notify_test_command_sends_real_test_message(monkeypatch, capsys):
     )
 
     assert cli.main(["notify-test"]) == 0
-    assert calls == [(None, "bildirim testi", "MAS e-posta bildirimi calisiyor.")]
+    assert calls == [(None, "bildirim testi", "MAS e-posta bildirimi çalışıyor.")]
     assert "Test email sent to sender@gmail.com" in capsys.readouterr().out

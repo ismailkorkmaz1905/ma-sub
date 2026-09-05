@@ -7,6 +7,7 @@ if [[ $# -lt 1 || ! "$1" =~ ^[0-9]+$ ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PATH="${MAS_BIN_DIR:-/workspace/.local/bin}:$PATH"
 EPISODE="$1"
 MAX_RUNTIME_SECONDS="${MAS_MAX_RUNTIME_SECONDS:-14400}"
 IDLE_TIMEOUT_SECONDS="${MAS_IDLE_TIMEOUT_SECONDS:-1800}"

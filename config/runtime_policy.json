@@ -1,0 +1,32 @@
+{
+  "policy_version": "ep12-1",
+  "target_wall_seconds": 14400,
+  "include_chatgpt_handoff_wait": true,
+  "planned_stage_minutes": {
+    "preflight_source_audio": 15,
+    "asr_vad": 40,
+    "tr_correction_and_handoff": 45,
+    "targeted_audio_review": 25,
+    "alignment_and_qa": 20,
+    "id_translation_and_handoff": 55,
+    "finalize_upload_readback": 10,
+    "reserve": 30
+  },
+  "gpu_preflight_timeout_seconds": 60,
+  "allow_automatic_cpu_fallback": false,
+  "network": {
+    "connect_timeout_seconds": 10,
+    "idle_timeout_seconds": 30,
+    "attempts": 3,
+    "retry_total_seconds": 300
+  },
+  "rules": {
+    "no_colab": true,
+    "no_translation_api": true,
+    "no_nllb_fallback": true,
+    "no_silent_hash_rebind": true,
+    "no_jupyter_transport": true,
+    "remote_sha256_readback_required": true,
+    "emergency_output_separate": true
+  }
+}

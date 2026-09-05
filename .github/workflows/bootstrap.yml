@@ -13,37 +13,58 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: {fetch-depth: 0}
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11.13'
-      - name: Find validated bootstrap payload
+        with: {python-version: '3.11.13'}
+      - name: Recover validated bootstrap payload
         shell: bash
         run: |
           set -euo pipefail
-          test -f bootstrap/READY
           python - <<'PY'
           from pathlib import Path
           import base64, subprocess
-          parts = sorted(Path('bootstrap').glob('essential.part-*'))
+          essential = sorted(Path('bootstrap').glob('essential.part-*'))
+          payload = sorted(Path('bootstrap').glob('payload.part-*'))
+          groups = [
+              ('essential', essential),
+              ('essential_payload', essential + payload),
+              ('payload_essential', payload + essential),
+          ]
           chosen = None
-          joined = ''
-          for idx, part in enumerate(parts, 1):
-              joined += ''.join(part.read_text().split())
+          for name, parts in groups:
+              text = ''.join(''.join(p.read_text().split()) for p in parts)
               try:
-                  raw = base64.b64decode(joined, validate=True)
-              except Exception:
+                  raw = base64.b64decode(text)
+              except Exception as exc:
+                  print(name, 'decode-fail', exc)
                   continue
-              candidate = Path(f'/tmp/prefix-{idx:02d}.tar.xz')
+              candidate = Path('/tmp') / f'{name}.tar.xz'
               candidate.write_bytes(raw)
-              if subprocess.run(['xz','-t',str(candidate)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+              rc = subprocess.run(['xz','-t',str(candidate)]).returncode
+              print(name, len(raw), 'xz_rc', rc)
+              if rc == 0:
                   chosen = candidate
+                  break
           if chosen is None:
-              raise SystemExit('NO_VALID_BOOTSTRAP_PREFIX')
+              for name, parts in groups:
+                  raw = b''
+                  ok = True
+                  for p in parts:
+                      try: raw += base64.b64decode(''.join(p.read_text().split()))
+                      except Exception as exc:
+                          print(name, p.name, 'piece-decode-fail', exc); ok=False; break
+                  if not ok: continue
+                  candidate = Path('/tmp') / f'{name}-piecewise.tar.xz'
+                  candidate.write_bytes(raw)
+                  rc = subprocess.run(['xz','-t',str(candidate)]).returncode
+                  print(name+'-piecewise', len(raw), 'xz_rc', rc)
+                  if rc == 0:
+                      chosen = candidate
+                      break
+          if chosen is None:
+              raise SystemExit('NO_VALID_BOOTSTRAP_COMBINATION')
           Path('/tmp/ma-sub.tar.xz').write_bytes(chosen.read_bytes())
           PY
-          xz -t /tmp/ma-sub.tar.xz
       - name: Replace branch with exact baseline
         shell: bash
         run: |

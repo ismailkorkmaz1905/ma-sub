@@ -53,12 +53,12 @@ def test_discovery_returns_canonical_watch_url_and_bounded_command(monkeypatch):
     command, idle_timeout, total_timeout = calls[0]
     assert command[:3] == [source_discovery.sys.executable, "-m", "yt_dlp"]
     assert "--flat-playlist" in command
-    assert command[command.index("--playlist-end") + 1] == "100"
-    assert command[command.index("--socket-timeout") + 1] == "30"
+    assert "--playlist-end" not in command
+    assert command[command.index("--socket-timeout") + 1] == "10"
     assert command[command.index("--retries") + 1] == "3"
     assert command[command.index("--extractor-retries") + 1] == "3"
     assert command[-1] == source_discovery.CHANNEL_VIDEOS_URL
-    assert (idle_timeout, total_timeout) == (45, 180)
+    assert (idle_timeout, total_timeout) == (30, 300)
 
 
 def test_discovery_passes_validated_cookie_path_without_reading_contents(monkeypatch, tmp_path):
@@ -122,3 +122,51 @@ def test_pipeline_discovers_once_and_persists_immutable_source_url(tmp_path, mon
     )
     with pytest.raises(RuntimeError, match="stop"):
         run(13)
+
+
+def test_pipeline_recovers_incomplete_source_url_before_source_initialization(tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    url_path = source_dir / "source.url"
+    url_path.write_bytes(b"")
+    resolved = "https://www.youtube.com/watch?v=episode0013"
+    monkeypatch.setattr("mas.pipeline.discover_episode_source", lambda *args, **kwargs: resolved)
+
+    from mas.pipeline import _resolve_source_url
+
+    assert _resolve_source_url(url_path, {}, 13) == resolved
+    assert url_path.read_bytes() == (resolved + "\n").encode("utf-8")
+
+
+def test_pipeline_rejects_invalid_source_url_after_source_initialization(tmp_path):
+    url_path = tmp_path / "source.url"
+    url_path.write_bytes(b"")
+
+    from mas.pipeline import _resolve_source_url
+
+    with pytest.raises(RuntimeError, match="refusing source identity change"):
+        _resolve_source_url(url_path, {"source_sha256": "0" * 64}, 13)
+
+
+def test_pipeline_never_rewrites_valid_initialized_source_url(tmp_path, monkeypatch):
+    url_path = tmp_path / "source.url"
+    original = "https://www.youtube.com/watch?v=episode0013"
+    url_path.write_text(original + "\n", encoding="utf-8")
+    before = url_path.stat().st_mtime_ns
+    monkeypatch.setattr(
+        "mas.pipeline.discover_episode_source",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not discover")),
+    )
+
+    from mas.pipeline import _resolve_source_url
+
+    assert _resolve_source_url(url_path, {}, 13, original) == original
+    assert url_path.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize("url", ("", "not-a-url", "file:///episode.mkv", "https://user:pass@example.com/x"))
+def test_pipeline_rejects_invalid_source_urls(tmp_path, url):
+    from mas.pipeline import _resolve_source_url
+
+    with pytest.raises(RuntimeError, match="source URL is invalid"):
+        _resolve_source_url(tmp_path / "source.url", {}, 13, url)

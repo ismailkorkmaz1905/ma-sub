@@ -37,6 +37,9 @@ def _utc_now():
 
 
 def _git_commit():
+    configured = os.getenv("MAS_GIT_COMMIT")
+    if configured:
+        return configured
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         capture_output=True,

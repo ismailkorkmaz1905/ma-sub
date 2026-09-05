@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -59,6 +60,56 @@ class YouTubeAuthenticationError(DownloadError):
 
 class MarkerError(RuntimeError):
     """Raised when a stage marker cannot be written safely."""
+
+
+class _DownloadProgressWatchdog:
+    def __init__(self, idle_timeout: float, total_timeout: float, clock=time.monotonic):
+        if idle_timeout <= 0 or total_timeout <= 0:
+            raise ValueError("download watchdog timeouts must be positive")
+        self.idle_timeout = idle_timeout
+        self.total_timeout = total_timeout
+        self.clock = clock
+        self.started = self.last_progress = clock()
+        self.progress_identity = None
+        self.lock = threading.Lock()
+
+    def start_attempt(self) -> None:
+        with self.lock:
+            now = self.clock()
+            if now - self.started > self.total_timeout:
+                raise DownloadError("source download total timeout expired")
+            self.last_progress = now
+            self.progress_identity = None
+
+    def _check(self, now: float) -> None:
+        if now - self.started > self.total_timeout:
+            raise DownloadError("source download total timeout expired")
+        if now - self.last_progress > self.idle_timeout:
+            raise DownloadError("source download no-progress watchdog expired")
+
+    def __call__(self, status: Mapping[str, Any]) -> None:
+        with self.lock:
+            now = self.clock()
+            self._check(now)
+            state = status.get("status")
+            identity = (
+                status.get("fragment_index"),
+                status.get("downloaded_bytes"),
+            )
+            downloaded = status.get("downloaded_bytes")
+            measured_progress = (
+                state == "downloading"
+                and isinstance(downloaded, (int, float))
+                and downloaded > 0
+                and identity != self.progress_identity
+            )
+            if state == "finished" or measured_progress:
+                self.last_progress = now
+                self.progress_identity = identity
+
+    def check(self) -> None:
+        with self.lock:
+            self._check(self.clock())
 
 
 @dataclass(frozen=True)
@@ -945,6 +996,8 @@ def download_source(
     force: bool = False,
     output_stem: str = "source",
     cookies_file: str | Path | None = None,
+    idle_timeout: int = 30,
+    total_timeout: int = 900,
 ) -> DownloadResult:
     """Download one source video and optional Turkish captions, resumably.
 
@@ -956,6 +1009,7 @@ def download_source(
         raise ValueError("A non-empty YouTube/source URL is required")
     if attempts < 1 or retries < 0:
         raise ValueError("attempts must be >= 1 and retries must be >= 0")
+    watchdog = _DownloadProgressWatchdog(idle_timeout, total_timeout)
     published_stem = _validate_output_stem(output_stem)
 
     destination = Path(source_dir).expanduser()
@@ -1045,15 +1099,18 @@ def download_source(
             },
             "quiet": False,
             "no_warnings": False,
+            "progress_hooks": [watchdog],
         }
         if cookie_path is not None:
             options["cookiefile"] = str(cookie_path)
         last_error: BaseException | None = None
         for attempt in range(1, attempts + 1):
             try:
+                watchdog.start_attempt()
                 LOGGER.info("Downloading source (attempt %d/%d)", attempt, attempts)
                 with yt_dlp.YoutubeDL(options) as ydl:
                     extracted = ydl.extract_info(url.strip(), download=True)
+                    watchdog.check()
                     if extracted is None:
                         raise DownloadError("yt-dlp returned no metadata")
                     if extracted.get("_type") == "playlist":

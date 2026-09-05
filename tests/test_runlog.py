@@ -18,12 +18,12 @@ def test_run_log_captures_output_metadata_and_redacts_source_url(tmp_path, monke
     monkeypatch.setenv("MAS_GMAIL_APP_PASSWORD", "secret-app-password")
     monkeypatch.setenv("MAS_YTDLP_COOKIES", "secret-cookie-path")
 
-    assert cli.main(["run", "13", "--source-url", "https://example.invalid/private"]) == 20
+    assert cli.main(["run", "13", "--source-url", "https://example.invalid/private", "--local"]) == 20
 
     content = _latest(tmp_path).read_text(encoding="utf-8")
     records = [json.loads(line) for line in content.splitlines() if line.startswith("{")]
     assert records[0]["event"] == "run_started"
-    assert records[0]["argv"][-1] == "<provided>"
+    assert records[0]["argv"][4] == "<provided>"
     assert records[0]["configured"]["gmail"] is True
     assert records[0]["configured"]["youtube_cookies"] is True
     assert records[-1]["event"] == "run_finished"
@@ -40,7 +40,7 @@ def test_failed_run_records_traceback_and_operator_summary(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "run", lambda *args: (_ for _ in ()).throw(ValueError("broken stage")))
     monkeypatch.setattr(cli, "notify", lambda *args: notifications.append(args))
 
-    assert cli.main(["run", "13"]) == 1
+    assert cli.main(["run", "13", "--local"]) == 1
 
     content = _latest(tmp_path).read_text(encoding="utf-8")
     assert '"event": "run_exception"' in content

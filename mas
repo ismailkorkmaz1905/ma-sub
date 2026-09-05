@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-PYTHON="$ROOT/.venv/bin/python3"
+VENV="${MAS_VENV_DIR:-$ROOT/.venv}"
+PYTHON="$VENV/bin/python3"
 [[ -x "$PYTHON" ]] || PYTHON=python3
 exec "$PYTHON" -m mas.cli "$@"

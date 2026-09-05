@@ -12,7 +12,14 @@ class RemoteVerificationError(RuntimeError):
     pass
 
 
-def _run_watchdog(command, *, idle_timeout=120, total_timeout=3600, stdout_handler=None):
+def _run_watchdog(
+    command,
+    *,
+    idle_timeout=120,
+    total_timeout=3600,
+    stdout_handler=None,
+    stderr_handler=None,
+):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     events = queue.Queue()
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -49,8 +56,9 @@ def _run_watchdog(command, *, idle_timeout=120, total_timeout=3600, stdout_handl
         if chunk is None:
             closed.add(name)
         else:
-            if name == "stdout" and stdout_handler is not None:
-                stdout_handler(chunk)
+            handler = stdout_handler if name == "stdout" else stderr_handler
+            if handler is not None:
+                handler(chunk)
             else:
                 buffers[name].extend(chunk)
             last_progress = time.monotonic()
@@ -111,7 +119,7 @@ def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600):
     )
     if partial_size != expected_size or partial_sha != expected_sha:
         raise RemoteVerificationError("partial Drive byte/SHA-256 readback mismatch")
-    _run_watchdog(["rclone", "moveto", partial, remote, *common],
+    _run_watchdog(["rclone", "moveto", partial, remote, "--immutable", *common],
                   idle_timeout=idle_timeout, total_timeout=total_timeout)
     final_size, final_sha = _remote_signature(
         ["rclone", "cat", remote, "--contimeout", "30s",

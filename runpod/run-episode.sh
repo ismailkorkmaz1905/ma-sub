@@ -32,7 +32,7 @@ stop_on_exit() {
   if [[ -n "$pipeline_pid" ]] && kill -0 "$pipeline_pid" 2>/dev/null; then
     kill -TERM -- "-$pipeline_pid" 2>/dev/null || true
   fi
-  if [[ "$rc" -ne 0 && -n "${RUNPOD_POD_ID:-}" ]]; then
+  if [[ "$rc" -ne 0 && -n "${RUNPOD_POD_ID:-}" && "${MAS_EXTERNAL_RUNPOD_CONTROLLER:-0}" != "1" ]]; then
     "$ROOT/runpod/stop-pod.sh" || {
       echo "RunPod stop request failed. Stop the pod from an external controller now." >&2
       rc=70
@@ -45,7 +45,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-setsid stdbuf -oL -eL ./mas run "$@" > >(tee -a "$LOG_PATH") 2>&1 &
+bash "$ROOT/runpod/preflight.sh" 2>&1 | tee -a "$LOG_PATH"
+
+setsid stdbuf -oL -eL ./mas run "$@" --local > >(tee -a "$LOG_PATH") 2>&1 &
 pipeline_pid=$!
 started="$(date +%s)"
 stop_reason=""

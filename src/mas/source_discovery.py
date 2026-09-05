@@ -46,10 +46,8 @@ def _list_channel_videos(cookies_file, *, idle_timeout, total_timeout):
         "yt_dlp",
         "--flat-playlist",
         "--skip-download",
-        "--playlist-end",
-        "100",
         "--socket-timeout",
-        "30",
+        "10",
         "--retries",
         "3",
         "--extractor-retries",
@@ -85,8 +83,8 @@ def discover_episode_source(
     episode,
     *,
     cookies_file=None,
-    idle_timeout=45,
-    total_timeout=180,
+    idle_timeout=30,
+    total_timeout=300,
 ):
     if not isinstance(episode, int) or isinstance(episode, bool) or episode < 1:
         raise ValueError("episode must be a positive integer")

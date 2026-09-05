@@ -1,6 +1,8 @@
 import json
 import os
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 
@@ -21,7 +23,7 @@ from .engine.api import (
     resolve_tr_audio_reviews,
     transcribe_raw_audio,
 )
-from .engine.download import atomic_write_json, download_source
+from .engine.download import atomic_write_bytes, atomic_write_json, download_source
 from .engine.forced_align import align_corrected_segments, validate_forced_alignment_data
 from .engine.id_translation import (
     load_and_validate_id_translation_zip,
@@ -80,15 +82,30 @@ def _guard_existing_source(state, source_dir):
 
 
 def _stage(path, state, name, action):
+    started = time.monotonic()
     set_stage(path, state, name, "running")
     notify(state["episode"], f"{name} basladi")
     try:
         details = action() or {}
     except Exception as exc:
-        set_stage(path, state, name, "failed", error=f"{type(exc).__name__}: {exc}")
+        set_stage(
+            path,
+            state,
+            name,
+            "failed",
+            error=f"{type(exc).__name__}: {exc}",
+            elapsed_seconds=round(time.monotonic() - started, 3),
+        )
         notify(state["episode"], f"{name} basarisiz", f"{type(exc).__name__}: {exc}")
         raise
-    set_stage(path, state, name, "pass", **details)
+    set_stage(
+        path,
+        state,
+        name,
+        "pass",
+        elapsed_seconds=round(time.monotonic() - started, 3),
+        **details,
+    )
     notify(state["episode"], f"{name} tamamlandi")
     return details
 
@@ -102,6 +119,51 @@ def _load_configs():
     return config_dir, *values
 
 
+def _validated_source_url(value):
+    url = str(value).strip()
+    parsed = urlparse(url)
+    if (
+        not url
+        or any(character.isspace() for character in url)
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise RuntimeError("source URL is invalid")
+    return url
+
+
+def _resolve_source_url(url_path, state, episode, requested_url=None):
+    existing = None
+    invalid_existing = False
+    if url_path.exists() or url_path.is_symlink():
+        if url_path.is_symlink() or not url_path.is_file():
+            raise RuntimeError("source URL path is unsafe")
+        try:
+            existing = _validated_source_url(url_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, RuntimeError):
+            invalid_existing = True
+
+    requested = _validated_source_url(requested_url) if requested_url is not None else None
+    if existing is not None:
+        if requested is not None and requested != existing:
+            raise RuntimeError("source URL cannot change after episode initialization")
+        return existing
+    if invalid_existing and (state.get("source_path") or state.get("source_sha256")):
+        raise RuntimeError("recorded source URL is invalid; refusing source identity change")
+
+    resolved = requested or discover_episode_source(
+        episode,
+        cookies_file=os.getenv("MAS_YTDLP_COOKIES"),
+    )
+    resolved = _validated_source_url(resolved)
+    atomic_write_bytes(url_path, (resolved + "\n").encode("utf-8"))
+    if _validated_source_url(url_path.read_text(encoding="utf-8")) != resolved:
+        raise RuntimeError("source URL atomic readback failed")
+    return resolved
+
+
 def run(episode, source_url=None, fixture=False, stop_after=None):
     if fixture:
         return run_fixture(episode, stop_after=stop_after)
@@ -112,17 +174,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     save(state_path, state)
     notify(episode, "isleme alindi")
     url_path = dirs["source"] / "source.url"
-    if source_url:
-        if url_path.exists() and url_path.read_text(encoding="utf-8").strip() != source_url.strip():
-            raise RuntimeError("source URL cannot change after episode initialization")
-        url_path.write_text(source_url.strip() + "\n", encoding="utf-8")
-    if not url_path.is_file():
-        resolved_url = discover_episode_source(
-            episode,
-            cookies_file=os.getenv("MAS_YTDLP_COOKIES"),
-        )
-        url_path.write_text(resolved_url + "\n", encoding="utf-8")
-    url = url_path.read_text(encoding="utf-8").strip()
+    url = _resolve_source_url(url_path, state, episode, source_url)
     config_dir, series, names, religious = _load_configs()
     holder = {}
     _guard_existing_source(state, dirs["source"])
@@ -305,7 +357,10 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     _stage(state_path, state, "drive_readback", publish)
     notify(episode, "bolum hazir", str(receipt_path))
     set_stage(state_path, state, "compute_shutdown", "running")
-    shutdown = stop_current_pod()
+    if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1":
+        shutdown = {"requested": False, "reason": "external_controller", "delegated": True}
+    else:
+        shutdown = stop_current_pod()
     set_stage(state_path, state, "compute_shutdown", "pass", **shutdown)
     print("STRICT PASS")
     return 0

@@ -6,6 +6,7 @@ import pytest
 
 from mas import pipeline
 from mas.remote import RemoteVerificationError, _run_watchdog, upload_verified
+from mas.pipeline import _stage
 from mas.runpod import RunPodShutdownError, stop_current_pod
 
 
@@ -27,6 +28,21 @@ def test_drive_upload_cannot_target_emergency(tmp_path):
     source.write_text("strict", encoding="utf-8")
     with pytest.raises(RemoteVerificationError, match="strict destination"):
         upload_verified(source, "drive:emergency/strict.srt")
+
+
+def test_stage_records_elapsed_seconds_on_success_and_failure(tmp_path, monkeypatch):
+    state = {"episode": 13}
+    values = iter((10.0, 12.5, 20.0, 23.25))
+    monkeypatch.setattr("mas.pipeline.time.monotonic", lambda: next(values))
+    monkeypatch.setattr("mas.pipeline.notify", lambda *args: None)
+    path = tmp_path / "state.json"
+
+    _stage(path, state, "ok", lambda: {"value": 1})
+    assert state["stages"]["ok"]["elapsed_seconds"] == 2.5
+
+    with pytest.raises(ValueError, match="broken"):
+        _stage(path, state, "failed", lambda: (_ for _ in ()).throw(ValueError("broken")))
+    assert state["stages"]["failed"]["elapsed_seconds"] == 3.25
 
 
 def test_drive_readback_hashes_stream_without_buffering_file(tmp_path, monkeypatch):
@@ -58,6 +74,7 @@ def test_drive_readback_hashes_stream_without_buffering_file(tmp_path, monkeypat
         ("moveto", False),
         ("cat", True),
     ]
+    assert "--immutable" in calls[2][0]
 
 
 def test_network_watchdog_observes_small_progress_chunks():

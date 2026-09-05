@@ -81,6 +81,28 @@ def test_strict_runpod_doctor_fails_before_remote_check(tmp_path, monkeypatch, c
     assert calls == [["rclone", "listremotes"]]
 
 
+def test_strict_runpod_doctor_retries_drive_timeouts(tmp_path, monkeypatch, capsys):
+    _configure(monkeypatch, tmp_path)
+    attempts = []
+    sleeps = []
+
+    def fake_run(command, **kwargs):
+        if command[1] == "listremotes":
+            return subprocess.CompletedProcess(command, 0, stdout="gdrive:\n", stderr="")
+        attempts.append(kwargs["timeout"])
+        if len(attempts) < 3:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert cli.doctor(strict_runpod=True) == 0
+    assert attempts == [60, 60, 60]
+    assert sleeps == [1, 2]
+    assert "rclone_remote: OK" in capsys.readouterr().out
+
+
 def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     script = (ROOT / "runpod" / "bootstrap.sh").read_text(encoding="utf-8")
     assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"' in script

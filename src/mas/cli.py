@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -71,18 +72,29 @@ def _runpod_preflight():
             if remote_name not in names:
                 failures.append("rclone_remote: not configured")
             else:
-                reachable = subprocess.run(
-                    ["rclone", "lsd", remote],
-                    capture_output=True,
-                    timeout=30,
-                    check=False,
-                )
-                if reachable.returncode != 0:
-                    failures.append("rclone_remote: unreachable")
+                failure = "unreachable"
+                for attempt in range(1, 4):
+                    print(f"[PREFLIGHT] Drive check attempt {attempt}/3", flush=True)
+                    try:
+                        reachable = subprocess.run(
+                            ["rclone", "lsd", remote],
+                            capture_output=True,
+                            timeout=60,
+                            check=False,
+                        )
+                    except subprocess.TimeoutExpired:
+                        failure = "timeout"
+                    else:
+                        if reachable.returncode == 0:
+                            print("rclone_remote: OK")
+                            break
+                        failure = "unreachable"
+                    if attempt < 3:
+                        time.sleep(2 ** (attempt - 1))
                 else:
-                    print("rclone_remote: OK")
+                    failures.append(f"rclone_remote: {failure}")
         except subprocess.TimeoutExpired:
-            failures.append("rclone_remote: timeout")
+            failures.append("rclone_remote: listremotes timeout")
 
     for failure in failures:
         print(failure, file=sys.stderr)

@@ -6,6 +6,7 @@
 - Production branch: `main`
 - Consolidation: [PR #1](https://github.com/ismailkorkmaz1905/ma-sub/pull/1) is merged, and the obsolete `engineering/ep12-reliability` branch was deleted locally and remotely.
 - Independent CTC probe baseline commit: `f581fcb59091d026e4f53a825916ba9e7abcf479`. Resolve the current review candidate with `git rev-parse HEAD`; the manual-review/controller implementation is newer than the probe baseline.
+- Hash-bound manual-review UI and verified RunPod override-transfer implementation: `1465c278486ad0f4ec70d85e84c287efdd30abfc`.
 - Recorded implementation worktree: clean and synchronized with `origin/main`
 - Main CI at `c2adfcd6a23512219b0fb41ca176336c53f9bfd6`: test and Dockerfile jobs passed in workflow run `33951396788` on 2026-09-05.
 
@@ -31,13 +32,14 @@ Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr vi
 
 ## Validation recorded
 
-- Current pre-commit worktree: `504 passed, 32 skipped` in `44.10 seconds`.
+- Full local suite for `1465c278486ad0f4ec70d85e84c287efdd30abfc`: `504 passed, 32 skipped` in `44.10 seconds`.
 - Manual-review UI plus RunPod override-transfer focused suite: `33 passed` in `1.72 seconds`.
 - Full local suite at `83f0c9d`: `477 passed, 32 skipped` in `39.09 seconds`.
 - Ported engine suite: `342 passed, 31 skipped`.
 - Cross-speaker focused suite: `82 passed`.
 - Local Python compilation and `git diff --check`: passed.
 - Exact `main` CI at `c2adfcd6a23512219b0fb41ca176336c53f9bfd6`: test and Dockerfile jobs passed. PR #1 checks are historical because the PR is merged.
+- Exact `main` CI at `1465c278486ad0f4ec70d85e84c287efdd30abfc`: test and Dockerfile jobs passed in workflow run `33964604668`.
 - Docker was not available in the local Windows environment, so a local image build was not performed.
 - Gmail SMTP notification was verified by a real test email to the configured recipient. The app password remains outside Git in the Windows user environment.
 - A user-exported Netscape cookie file is stored outside Git at `C:\Users\Ismail\.config\ma-sub\youtube-cookies.txt`, restricted to the current Windows user, and bound through the persistent user-level `MAS_YTDLP_COOKIES` variable. Authenticated source acquisition and the equivalent short-lived RunPod secret-file transfer passed during the Episode 11 run. Cookie values are not logged.

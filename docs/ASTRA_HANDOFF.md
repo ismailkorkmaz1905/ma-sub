@@ -29,6 +29,13 @@ stopped fail-closed with 107 resolved and 138 pending. The full 23-attempt
 controller timeline, including capacity migrations and shutdown observations, is
 in `docs/EP11_FIRST_PRODUCTION_RUN.md`.
 
+Commit `1465c278486ad0f4ec70d85e84c287efdd30abfc` adds the hash-bound local
+manual-review UI and byte/SHA-256-verified RunPod override transfer. Its local
+suite passed with 504 tests and 32 skips in 44.10 seconds; focused UI/controller
+tests passed 33/33 in 1.72 seconds. Main CI workflow run `33964604668` passed both
+the test and Dockerfile jobs. The transfer implementation has not yet been
+exercised in a real resumed Pod run.
+
 Manual acoustic decisions, production forced alignment, live Google Drive
 byte/SHA-256 readback, and the completed final episode have not been verified.
 Review `main` directly. Do not create a stable tag from the partial Episode 11

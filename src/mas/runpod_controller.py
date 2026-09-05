@@ -195,6 +195,22 @@ def _network(command, *, idle_timeout=180, total_timeout=1800):
         raise RunPodControllerError(str(exc)) from exc
 
 
+def _network_retry(command, *, attempts=3, idle_timeout=60, total_timeout=1800):
+    for attempt in range(1, attempts + 1):
+        try:
+            return _network(
+                command,
+                idle_timeout=idle_timeout,
+                total_timeout=total_timeout,
+            )
+        except RunPodControllerError:
+            if attempt == attempts:
+                raise
+            delay = 2 ** (attempt - 1)
+            print(f"[RUNPOD] network command retry {attempt + 1}/{attempts} in {delay}s")
+            time.sleep(delay)
+
+
 def _ssh_args(key, host, port):
     return [
         "ssh",
@@ -208,6 +224,12 @@ def _ssh_args(key, host, port):
         "StrictHostKeyChecking=accept-new",
         "-o",
         "ConnectTimeout=15",
+        "-o",
+        "ConnectionAttempts=2",
+        "-o",
+        "ServerAliveInterval=10",
+        "-o",
+        "ServerAliveCountMax=3",
         f"root@{host}",
     ]
 
@@ -322,11 +344,11 @@ def run_remote_episode(episode, source_url=None):
             _write_runtime_env(runtime_env, values, commit)
             ssh = _ssh_args(key, host, port)
             scp = _scp_args(key, host, port)
-            _network(ssh + ["install -d -m 700 /workspace/.mas-secrets /workspace/.mas-upload"])
-            _network(scp + [str(archive), f"root@{host}:/workspace/.mas-upload/release.tar.gz"])
-            _network(scp + [str(runtime_env), f"root@{host}:/workspace/.mas-secrets/runtime.env"])
-            _network(scp + [str(cookie), f"root@{host}:/workspace/.mas-secrets/youtube-cookies.txt"])
-            _network(scp + [str(rclone_config), f"root@{host}:/workspace/.mas-secrets/rclone.conf"])
+            _network_retry(ssh + ["install -d -m 700 /workspace/.mas-secrets /workspace/.mas-upload"])
+            _network_retry(scp + [str(archive), f"root@{host}:/workspace/.mas-upload/release.tar.gz"])
+            _network_retry(scp + [str(runtime_env), f"root@{host}:/workspace/.mas-secrets/runtime.env"])
+            _network_retry(scp + [str(cookie), f"root@{host}:/workspace/.mas-secrets/youtube-cookies.txt"])
+            _network_retry(scp + [str(rclone_config), f"root@{host}:/workspace/.mas-secrets/rclone.conf"])
 
             deploy_command = (
                 "set -euo pipefail; "
@@ -340,7 +362,11 @@ def run_remote_episode(episode, source_url=None):
                 "source /workspace/.mas-secrets/runtime.env; "
                 "cd \"$release\"; ./runpod/bootstrap.sh"
             )
-            _network(ssh + [deploy_command], idle_timeout=600, total_timeout=3600)
+            _network_retry(
+                ssh + [deploy_command],
+                idle_timeout=600,
+                total_timeout=3600,
+            )
 
             name = f"Muhtemel Ask {episode}.Bolum"
             local_root = episode_dir(episode)
@@ -348,9 +374,9 @@ def run_remote_episode(episode, source_url=None):
             for filename in (f"{name}_TR_TEXT_CORRECTED.zip", f"{name}_ID_TRANSLATED.zip"):
                 local_return = local_root / "translation_output" / filename
                 if local_return.is_file():
-                    _network(scp + [str(local_return), f"root@{host}:/workspace/.mas-upload/return.zip"])
+                    _network_retry(scp + [str(local_return), f"root@{host}:/workspace/.mas-upload/return.zip"])
                     destination = f"{remote_root}/translation_output/{filename}"
-                    _network(
+                    _network_retry(
                         ssh
                         + [
                             "install -D -m 600 /workspace/.mas-upload/return.zip "
@@ -370,7 +396,7 @@ def run_remote_episode(episode, source_url=None):
             )
             _network(ssh + [run_command], idle_timeout=1800, total_timeout=18000)
             exit_file = temporary / "exit-code"
-            _network(scp + [f"root@{host}:/workspace/.mas-upload/exit-code", str(exit_file)])
+            _network_retry(scp + [f"root@{host}:/workspace/.mas-upload/exit-code", str(exit_file)])
             try:
                 exit_code = int(exit_file.read_text(encoding="ascii").strip())
             except (OSError, UnicodeError, ValueError) as exc:
@@ -385,8 +411,8 @@ def run_remote_episode(episode, source_url=None):
                 local_pack = local_root / "translation_input" / handoff
                 local_pack.parent.mkdir(parents=True, exist_ok=True)
                 remote_pack = f"{remote_root}/translation_input/{handoff}"
-                _network(ssh + ["cp -- " + shlex.quote(remote_pack) + " /workspace/.mas-upload/handoff.zip"])
-                _network(scp + [f"root@{host}:/workspace/.mas-upload/handoff.zip", str(local_pack)])
+                _network_retry(ssh + ["cp -- " + shlex.quote(remote_pack) + " /workspace/.mas-upload/handoff.zip"])
+                _network_retry(scp + [f"root@{host}:/workspace/.mas-upload/handoff.zip", str(local_pack)])
                 print(f"[HANDOFF] downloaded {local_pack}")
             if exit_code not in (0, 20, 21):
                 raise RunPodControllerError(f"remote pipeline failed with exit code {exit_code}")

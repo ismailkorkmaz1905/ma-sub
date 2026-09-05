@@ -66,6 +66,31 @@ def test_wait_requires_running_ip_and_ssh_mapping():
     ) == ("192.0.2.4", "10022")
 
 
+def test_safe_network_command_retries_with_backoff(monkeypatch):
+    calls = []
+    sleeps = []
+
+    def network(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) < 3:
+            raise runpod_controller.RunPodControllerError("transient SSH failure")
+        return b"ok"
+
+    monkeypatch.setattr(runpod_controller, "_network", network)
+    monkeypatch.setattr(runpod_controller.time, "sleep", sleeps.append)
+
+    assert runpod_controller._network_retry(["ssh", "host", "true"]) == b"ok"
+    assert len(calls) == 3
+    assert sleeps == [1, 2]
+
+
+def test_ssh_has_bounded_liveness_options(tmp_path):
+    command = runpod_controller._ssh_args(tmp_path / "key", "192.0.2.4", "10022")
+    assert "ConnectionAttempts=2" in command
+    assert "ServerAliveInterval=10" in command
+    assert "ServerAliveCountMax=3" in command
+
+
 def test_running_pod_requires_explicit_one_time_adoption(monkeypatch):
     pod = {"desiredStatus": "RUNNING"}
     monkeypatch.delenv("MAS_RUNPOD_ADOPT_RUNNING", raising=False)

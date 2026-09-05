@@ -10,7 +10,7 @@ source -> audio -> Turkish ASR -> acoustic review -> correction handoff
 
 Production code lives under `src/mas/` and runs through `./mas`. Notebooks and the imported source snapshot under `legacy/` are read-only reference material, not production entrypoints.
 
-> Release status: real full-episode GPU inference has not been performed. Passing local tests do not verify model quality, CUDA compatibility, live Google Drive persistence, or provider shutdown. Do not create a stable tag until the Astra review and a real GPU episode run pass.
+> Release status: Episode 11 completed real RTX 4090 source, audio, and raw-ASR stages and reached the Turkish correction handoff. The final episode, acoustic review, alignment, Indonesian translation, Drive readback, and delivery are not complete. Do not create a stable tag until the Astra review and all real episode gates pass.
 
 ## Start here
 
@@ -20,6 +20,7 @@ Production code lives under `src/mas/` and runs through `./mas`. Notebooks and t
 - [Codex continuation handoff](docs/CODEX_HANDOFF.md)
 - [Astra handoff](docs/ASTRA_HANDOFF.md)
 - [Astra review prompt](docs/ASTRA_REVIEW_PROMPT.md)
+- [Episode 11 first production run record](docs/EP11_FIRST_PRODUCTION_RUN.md)
 
 ## Requirements
 
@@ -170,9 +171,10 @@ export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
 
 The controller, complete channel discovery, source identity guards, download
 watchdogs, strict GPU/Drive preflight, handoff transfer, and external shutdown
-polling are implemented and covered by local tests. Real Pod startup, SSH,
-CUDA inference, Drive upload/readback, and provider shutdown remain unverified
-until the first paid episode run. The controller never starts the Pod during
-setup, `doctor`, tests, status, or fixture runs.
+polling are implemented and covered by local tests. Episode 11 verified real Pod
+startup, SSH, CUDA raw ASR, handoff download, controller shutdown, and external
+`EXITED` polling. Final mux and Drive upload/readback remain unverified. The
+controller never starts the Pod during setup, `doctor`, tests, status, or fixture
+runs.
 
 Keep provider keys and pipeline credentials in environment secrets, never in the repository or command history. Stopping a Pod releases its GPU but may retain billable volume storage. A Pod with a network volume may require termination instead of stop after artifacts are verified.

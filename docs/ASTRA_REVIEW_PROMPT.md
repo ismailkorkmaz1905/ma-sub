@@ -21,8 +21,9 @@ Read completely before evaluating:
 5. docs/EP12_ACCEPTANCE.md
 6. docs/ARCHITECTURE_DECISIONS.md
 7. docs/ASTRA_HANDOFF.md
-8. MIGRATION_NOTES.md
-9. All production code, configuration, tests, Docker, RunPod scripts, workflow files, and the full legacy source snapshot relevant to the port
+8. docs/EP11_FIRST_PRODUCTION_RUN.md
+9. MIGRATION_NOTES.md
+10. All production code, configuration, tests, Docker, RunPod scripts, workflow files, and the full legacy source snapshot relevant to the port
 
 Run at minimum on Windows:
 
@@ -76,6 +77,7 @@ Review every acceptance boundary:
 
 Real GPU truth boundary:
 - Require evidence from one full real episode, including GPU/CUDA/model identities, immutable source hash, stage timings, retries, checkpoint bindings, exact Turkish and Indonesian packs and manifests, strict QA reports, local final hashes, Drive readback receipt, RunPod stop response, external provider-state query, and billing evidence.
+- Reconcile the Episode 11 structured controller logs with `docs/EP11_FIRST_PRODUCTION_RUN.md`; do not treat controller elapsed time as exact provider billing time.
 - Spot-check source audio against representative final cue start/end times, all incident intervals, overlap cases, and semantic-shrink alarms.
 - If any evidence is absent, label that gate NOT VERIFIED. Do not convert it to PASS because code or tests look correct.
 

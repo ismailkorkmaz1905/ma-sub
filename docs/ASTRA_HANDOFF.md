@@ -4,15 +4,28 @@
 
 The maintained package, strict CLI orchestration, historical source archive, runtime policy, Docker definition, and RunPod control scripts are in this branch. Legacy notebooks are reference-only under `legacy/`.
 
-Real GPU inference has not been performed. Live Google Drive byte/SHA-256 readback and provider-side RunPod shutdown have not been verified. Review `main` directly. Do not create a stable tag on local test results alone.
+Episode 11 reached the Turkish correction handoff on a real RTX 4090. Source
+acquisition, audio extraction, raw ASR, correction-pack generation, controller
+shutdown, and external `EXITED` verification passed. The successful controller
+session took `1,168.031 seconds`; raw ASR took `986.5 seconds`. The complete
+attempt and fix timeline is in `docs/EP11_FIRST_PRODUCTION_RUN.md`.
 
-The configured RunPod is `p54vvbyu76eztn` (`muhtemel-ask-ep12`). Its API credentials are stored outside Git in Windows User environment variables. On 2026-09-05, the first Episode 11 attempt exposed and corrected a missing Pod SSH public key. The second attempt completed SSH and dependency installation but failed strict preflight because the Windows-generated `runtime.env` used CRLF, corrupting Linux secret and virtualenv paths. The controller stopped the Pod and REST verified `desiredStatus=EXITED`; the second run log recorded `299.485 seconds`. Runtime environment files are now forced to LF and covered by a regression assertion. Successful strict preflight and GPU execution still require a paid retry. The attached 50 GB network volume is `xgogcmey5o`; its last recorded rate was `$0.07/GB/month`, deriving to `$3.50/month`, but current pricing must be re-queried.
+Live Google Drive byte/SHA-256 readback and the completed final episode have not
+been verified. Review `main` directly. Do not create a stable tag from the
+partial Episode 11 run.
+
+The current stopped RunPod is `snlu4nnmywecfu`. Its credentials are stored
+outside Git in Windows User environment variables. The attached 50 GB network
+volume is `xgogcmey5o` in `EU-RO-1`; its last recorded rate was
+`$0.07/GB/month`, deriving to `$3.50/month`, but current pricing must be
+re-queried.
 
 Episode 12 has retained historical MKV and subtitle material on Drive. Its exact remote sizes and hashes were not recorded. Do not use Episode 12 for the first real run. The local RunPod controller, complete source discovery, source identity checks, download watchdog, strict Pod preflight, handoff transfer, and fail-closed Drive publication are implemented and locally tested. No successful real-environment runtime verification is claimed.
 
-The third Episode 11 attempt verified SSH, cookie and rclone setup but failed before inference because `uv pip sync` omitted Torch transitive dependencies; `typing_extensions` was the observed missing import. The controller verified `EXITED` after `360.016 seconds`. Bootstrap now reuses the persistent `/workspace` environment and caches and uses dependency-resolving `uv pip install`. The corrected bootstrap has not yet been exercised on the paid Pod.
-
-The following automated retry exposed uv's default first-index conflict between the PyTorch wheel index and yt-dlp's `requests` constraint. Bootstrap and Docker now resolve across both required trusted indexes. Linux/Python 3.11 resolution completed with `131 packages`; paid-Pod verification remains required.
+Bootstrap now reuses the persistent `/workspace` environment and caches, uses
+dependency-resolving `uv pip install`, resolves across both trusted indexes, and
+uses bounded download timeouts and retries. These corrections passed on the paid
+Pod.
 
 ## Review commands
 
@@ -63,7 +76,7 @@ export MAS_IDLE_TIMEOUT_SECONDS=1800
 ./runpod/run-episode.sh 11
 ```
 
-The Windows entrypoint `.\mas.ps1 run 11` owns bounded Pod start, API and SSH readiness, deployment, streamed logs, handoff download/upload, secret cleanup, stop, and external EXITED polling. It performs local preflight before startup and refuses a dirty repository or non-EXITED Pod. Startup and controller-driven failure shutdown were exercised against the paid Pod. Deployment, successful SSH, GPU work, handoffs, and pipeline-driven shutdown were not.
+The Windows entrypoint `.\mas.ps1 run 11` owns bounded Pod start, API and SSH readiness, deployment, streamed logs, handoff download/upload, secret cleanup, stop, and external EXITED polling. It performs local preflight before startup and refuses a dirty repository or non-EXITED Pod. Deployment, SSH, strict preflight, real RTX 4090 raw ASR, Turkish handoff download, controller shutdown, and external `EXITED` verification passed. Final pipeline completion and Drive delivery remain unverified.
 
 For each ChatGPT handoff, preserve the returned ZIP exactly and resume with:
 

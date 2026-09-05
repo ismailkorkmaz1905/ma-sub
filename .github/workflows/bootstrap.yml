@@ -1,15 +1,15 @@
-name: bootstrap-ma-sub
+name: expand-v2-production-baseline
 
 on:
   push:
-    branches: [main]
+    branches: [engineering/ep12-reliability]
 
 permissions:
   contents: write
 
 jobs:
-  bootstrap:
-    if: github.event.head_commit.message != 'Expand validated V2 production tree'
+  expand:
+    if: github.event.head_commit.message != 'Expand V2 production baseline'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11.13'
-      - name: Find and expand valid repository payload
+      - name: Find validated bootstrap payload
         shell: bash
         run: |
           set -euo pipefail
@@ -26,7 +26,6 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import base64, subprocess
-
           parts = sorted(Path('bootstrap').glob('essential.part-*'))
           chosen = None
           joined = ''
@@ -34,40 +33,37 @@ jobs:
               joined += ''.join(part.read_text().split())
               try:
                   raw = base64.b64decode(joined, validate=True)
-              except Exception as exc:
-                  print(f'PREFIX {idx:02d}: base64 invalid ({type(exc).__name__})')
+              except Exception:
                   continue
               candidate = Path(f'/tmp/prefix-{idx:02d}.tar.xz')
               candidate.write_bytes(raw)
-              rc = subprocess.run(['xz','-t',str(candidate)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
-              print(f'PREFIX {idx:02d}: decoded={len(raw)} xz_rc={rc}')
-              if rc == 0:
+              if subprocess.run(['xz','-t',str(candidate)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
                   chosen = candidate
           if chosen is None:
               raise SystemExit('NO_VALID_BOOTSTRAP_PREFIX')
-          print(f'VALID_BOOTSTRAP={chosen}')
           Path('/tmp/ma-sub.tar.xz').write_bytes(chosen.read_bytes())
           PY
           xz -t /tmp/ma-sub.tar.xz
+      - name: Replace branch with exact baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
           tar -xJf /tmp/ma-sub.tar.xz -C .
-          test -f tools/run_tests.py || true
-          chmod +x mas 2>/dev/null || true
-          chmod +x runpod/preflight.sh runpod/start.sh runpod/bootstrap.sh 2>/dev/null || true
-          rm -rf bootstrap
-          rm -f .github/workflows/bootstrap.yml
-      - name: Regression test
+          chmod +x mas runpod/*.sh 2>/dev/null || true
+      - name: Regression test baseline
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check PyYAML==6.0.2 openpyxl==3.1.5 pytest==8.3.5
-          python -m compileall -q src tools tests
+          python -m compileall -q src cli tests
           python -m pytest -q
-      - name: Commit expanded tree
+      - name: Commit exact baseline
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'ma-sub bootstrap'
+          git config user.name 'ma-sub engineering'
           git config user.email 'actions@users.noreply.github.com'
           git add -A
-          git commit -m 'Expand validated V2 production tree'
-          git push origin HEAD:main
+          git commit -m 'Expand V2 production baseline'
+          git push origin HEAD:${GITHUB_REF_NAME}

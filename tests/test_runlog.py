@@ -49,9 +49,55 @@ def test_failed_run_records_traceback_and_operator_summary(tmp_path, monkeypatch
     assert "FAILED STAGE: RUN" in content
     assert "SAFE RETRY:" in content
     assert '"exit_code": 1' in content
-    assert notifications[0][:2] == (13, "pipeline basarisiz")
+    assert notifications[0][:2] == (13, "çalıştırma başarısız")
+    assert "Sonuç: çalıştırma tamamlanamadı." in notifications[0][2]
     assert "ValueError: broken stage" in notifications[0][2]
     assert str(_latest(tmp_path)) in notifications[0][2]
+    assert "Sonraki adım:" in notifications[0][2]
+
+
+def test_transient_runpod_capacity_failure_does_not_send_email(tmp_path, monkeypatch):
+    notifications = []
+    monkeypatch.setattr(runlog, "episode_dir", lambda episode: tmp_path / str(episode))
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda *args: (_ for _ in ()).throw(
+            RuntimeError("There are not enough free GPUs on the host machine")
+        ),
+    )
+    monkeypatch.setattr(cli, "notify", lambda *args: notifications.append(args))
+
+    assert cli.main(["run", "13", "--local"]) == 1
+    assert notifications == []
+
+
+def test_stage_failure_marker_suppresses_duplicate_top_level_email(tmp_path, monkeypatch):
+    notifications = []
+    error = ValueError("broken stage")
+    error._mas_notification_sent = True
+    monkeypatch.setattr(runlog, "episode_dir", lambda episode: tmp_path / str(episode))
+    monkeypatch.setattr(cli, "run", lambda *args: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(cli, "notify", lambda *args: notifications.append(args))
+
+    assert cli.main(["run", "13", "--local"]) == 1
+    assert notifications == []
+
+
+def test_remote_stage_failure_does_not_send_duplicate_generic_email(tmp_path, monkeypatch):
+    notifications = []
+    monkeypatch.setattr(runlog, "episode_dir", lambda episode: tmp_path / str(episode))
+    monkeypatch.setattr(
+        cli,
+        "run",
+        lambda *args: (_ for _ in ()).throw(
+            RuntimeError("remote pipeline failed with exit code 1")
+        ),
+    )
+    monkeypatch.setattr(cli, "notify", lambda *args: notifications.append(args))
+
+    assert cli.main(["run", "13", "--local"]) == 1
+    assert notifications == []
 
 
 def test_source_url_equals_form_is_redacted():

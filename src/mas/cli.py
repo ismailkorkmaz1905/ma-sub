@@ -136,6 +136,23 @@ def notify_test():
     return 0
 
 
+def _should_notify_run_failure(exc):
+    if getattr(exc, "_mas_notification_sent", False):
+        return False
+    message = str(exc).lower()
+    if any(
+        text in message
+        for text in (
+            "not enough free gpus",
+            "no free gpu",
+            "capacity-bound",
+            "remote pipeline failed with exit code",
+        )
+    ):
+        return False
+    return True
+
+
 def clean(episode, destroy=False):
     target = episode_dir(episode) / "work"
     print(("DELETE " if destroy else "DRY-RUN ") + str(target))
@@ -191,11 +208,12 @@ def main(argv=None):
         except Exception as exc:
             if run_log:
                 run_log.record_exception()
-            if getattr(args, "episode", None):
-                details = f"{type(exc).__name__}: {exc}"
+            if getattr(args, "episode", None) and _should_notify_run_failure(exc):
+                details = f"Sonuç: çalıştırma tamamlanamadı.\nHata: {type(exc).__name__}: {exc}"
                 if run_log:
                     details += f"\nLog: {run_log.path}"
-                notify(args.episode, "pipeline basarisiz", details)
+                details += f"\nSonraki adım: logu inceleyip ./mas run {args.episode} komutuyla güvenli devam edin."
+                notify(args.episode, "çalıştırma başarısız", details)
             print(f"FAILED STAGE: {args.command.upper()}\nCAUSE: {exc}\nCHECKPOINT PRESERVED: yes", file=sys.stderr)
             if getattr(args, "episode", None):
                 print(f"SAFE RETRY:\n./mas run {args.episode}", file=sys.stderr)

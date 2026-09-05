@@ -172,11 +172,18 @@ def test_stage_notifies_start_and_failure(tmp_path, monkeypatch):
 
     assert state["stages"]["id_return"]["status"] == "failed"
     assert events == [
-        (13, "Endonezce çeviri dönüşü doğrulaması başladı", None),
+        (
+            13,
+            "Endonezce çeviri dönüşü doğrulaması başladı",
+            "Dönen Endonezce çevirinin kimliği, sırası ve değişmez alanları doğrulanacak.",
+        ),
         (
             13,
             "Endonezce çeviri dönüşü doğrulaması başarısız",
-            "ValueError: invalid returned ZIP",
+            "Sonuç: aşama tamamlanamadı.\n"
+            "Süre: 0.0 saniye.\n"
+            "Hata: ValueError: invalid returned ZIP\n"
+            "Sonraki adım: hatayı giderip aynı bölüm komutuyla güvenli devam edin.",
         ),
     ]
 
@@ -195,9 +202,11 @@ def test_download_notification_explains_resume_check(tmp_path, monkeypatch):
     pipeline._stage(tmp_path / "state.json", state, "download", lambda: {})
 
     assert events[0][1] == "kaynak dosyası kontrolü başladı"
-    assert "yeniden indirilmeyecek" in events[0][2]
+    assert "SHA-256 bütünlüğü" in events[0][2]
     assert events[1][1] == "kaynak dosyası kontrolü tamamlandı"
-    assert events[1][2].startswith("Süre: ")
+    assert "Sonuç: kaynak dosyası kontrolü tamamlandı." in events[1][2]
+    assert "Süre: " in events[1][2]
+    assert "Sonraki adım: ses dosyasını hazırlamak." in events[1][2]
 
 
 @pytest.mark.parametrize(

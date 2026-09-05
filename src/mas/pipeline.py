@@ -50,6 +50,49 @@ STAGE_NOTIFICATION_NAMES = {
     "finalize": "final altyazı ve video üretimi",
     "drive_readback": "Google Drive yükleme ve hash doğrulaması",
 }
+STAGE_START_DETAILS = {
+    "download": "Kaynak kimliği ile byte ve SHA-256 bütünlüğü kontrol edilecek; gerekirse indirme başlatılacak.",
+    "audio": "Değişmez kaynak videodan üretim ses dosyası hazırlanacak.",
+    "raw_asr": "GPU üzerinde Türkçe ASR ve inceleme kanıtları hazırlanacak; CPU fallback kullanılmayacak.",
+    "tr_pack": "Türkçe düzeltme için hash bağlı handoff paketi hazırlanacak.",
+    "tr_return": "Dönen Türkçe düzeltme paketinin şeması, kimliği ve değişmez alanları doğrulanacak.",
+    "audio_review": "Bekleyen Türkçe kayıtlar ses kanıtıyla incelenecek.",
+    "forced_alignment": "Düzeltilmiş Türkçe metin CUDA üzerinde akustik olarak hizalanacak.",
+    "id_pack": "Endonezce çeviri için değişmez Türkçe metne bağlı paket hazırlanacak.",
+    "id_return": "Dönen Endonezce çevirinin kimliği, sırası ve değişmez alanları doğrulanacak.",
+    "finalize": "Strict altyazılar ve final video üretilecek, kalite kuralları doğrulanacak.",
+    "drive_readback": "Final dosyaları geçici adla yüklenecek; byte ve SHA-256 readback doğrulanacak.",
+}
+STAGE_NEXT_STEPS = {
+    "download": "ses dosyasını hazırlamak",
+    "audio": "GPU Türkçe ASR aşamasını çalıştırmak",
+    "raw_asr": "Türkçe düzeltme handoff paketini hazırlamak",
+    "tr_pack": "Türkçe düzeltme dönüşünü almak veya mevcut dönüşü doğrulamak",
+    "tr_return": "bekleyen kayıtları ses kanıtıyla incelemek",
+    "audio_review": "Türkçe metni akustik olarak hizalamak",
+    "forced_alignment": "Endonezce çeviri handoff paketini hazırlamak",
+    "id_pack": "Endonezce çeviri dönüşünü almak veya mevcut dönüşü doğrulamak",
+    "id_return": "strict altyazı ve final video üretmek",
+    "finalize": "final dosyaları Drive'a yükleyip readback doğrulamak",
+    "drive_readback": "teslimat makbuzunu kaydedip compute shutdown yapmak",
+}
+
+
+def _stage_result_details(name, details, elapsed):
+    lines = [
+        f"Sonuç: {STAGE_NOTIFICATION_NAMES.get(name, name)} tamamlandı.",
+        f"Süre: {elapsed:.1f} saniye.",
+    ]
+    if "records" in details:
+        lines.append(f"Doğrulanan kayıt: {details['records']}.")
+    if "review_count" in details:
+        lines.append(f"İncelenen kayıt: {details['review_count']}.")
+    if "resumed" in details:
+        lines.append(f"Checkpoint kullanıldı: {'evet' if details['resumed'] else 'hayır'}.")
+    next_step = STAGE_NEXT_STEPS.get(name)
+    if next_step:
+        lines.append(f"Sonraki adım: {next_step}.")
+    return "\n".join(lines)
 
 
 def _paths(episode):
@@ -100,12 +143,10 @@ def _stage(path, state, name, action):
     notification_name = STAGE_NOTIFICATION_NAMES.get(name, name)
     set_stage(path, state, name, "running")
     print(f"[STAGE] {name}: START", flush=True)
-    start_details = None
-    if name == "download":
-        start_details = (
-            "Mevcut immutable kaynak varsa yeniden indirilmeyecek; byte ve "
-            "SHA-256 bütünlüğü doğrulanacak."
-        )
+    start_details = STAGE_START_DETAILS.get(
+        name,
+        f"{notification_name.capitalize()} çalıştırılacak.",
+    )
     notify(state["episode"], f"{notification_name} başladı", start_details)
     heartbeat_stop = threading.Event()
 
@@ -134,8 +175,15 @@ def _stage(path, state, name, action):
         notify(
             state["episode"],
             f"{notification_name} başarısız",
-            f"{type(exc).__name__}: {exc}",
+            f"Sonuç: aşama tamamlanamadı.\n"
+            f"Süre: {elapsed:.1f} saniye.\n"
+            f"Hata: {type(exc).__name__}: {exc}\n"
+            f"Sonraki adım: hatayı giderip aynı bölüm komutuyla güvenli devam edin.",
         )
+        try:
+            exc._mas_notification_sent = True
+        except (AttributeError, TypeError):
+            pass
         raise
     heartbeat_stop.set()
     heartbeat_thread.join()
@@ -152,7 +200,7 @@ def _stage(path, state, name, action):
     notify(
         state["episode"],
         f"{notification_name} tamamlandı",
-        f"Süre: {elapsed:.1f} saniye",
+        _stage_result_details(name, details, elapsed),
     )
     return details
 
@@ -247,7 +295,6 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     state = load(state_path, episode)
     state["mode"] = "strict"
     save(state_path, state)
-    notify(episode, "işleme alındı")
     url_path = dirs["source"] / "source.url"
     url = _resolve_source_url(url_path, state, episode, source_url)
     config_dir, series, names, religious = _load_configs()
@@ -312,7 +359,13 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
 
     if not tr_text.is_file():
         set_stage(state_path, state, "tr_return", "blocked", expected=str(tr_text))
-        notify(episode, "Türkçe düzeltme bekleniyor", str(tr_text))
+        notify(
+            episode,
+            "Türkçe düzeltme bekleniyor",
+            f"Sonuç: Türkçe düzeltme paketi hazır.\n"
+            f"Beklenen dönüş: {tr_text}\n"
+            f"Sonraki adım: düzeltilmiş ZIP'i bu konuma koyup ./mas run {episode} komutunu yeniden çalıştırın.",
+        )
         print(f"[WAIT] TR CORRECTION\nPack: {tr_pack}\nExpected: {tr_text}\nSafe to stop RunPod.")
         return WAIT_TR
     def validate_tr_return():
@@ -394,7 +447,13 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
     if not id_output.is_file():
         set_stage(state_path, state, "id_return", "blocked", expected=str(id_output))
-        notify(episode, "Endonezce çeviri bekleniyor", str(id_output))
+        notify(
+            episode,
+            "Endonezce çeviri bekleniyor",
+            f"Sonuç: Endonezce çeviri paketi hazır.\n"
+            f"Beklenen dönüş: {id_output}\n"
+            f"Sonraki adım: çevrilmiş ZIP'i bu konuma koyup ./mas run {episode} komutunu yeniden çalıştırın.",
+        )
         print(f"[WAIT] ID TRANSLATION\nPack: {id_pack}\nExpected: {id_output}\nSafe to stop RunPod.")
         return WAIT_ID
     def validate_id_return():
@@ -436,7 +495,13 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         atomic_write_json(receipt_path, {"status": "PASS", "mode": "strict", "files": receipts})
         return {"receipt": str(receipt_path), "sha256": sha256_file(receipt_path)}
     _stage(state_path, state, "drive_readback", publish)
-    notify(episode, "bölüm hazır", str(receipt_path))
+    notify(
+        episode,
+        "bölüm hazır",
+        f"Sonuç: strict final dosyalar Drive'a yüklendi ve byte/SHA-256 readback doğrulandı.\n"
+        f"Makbuz: {receipt_path}\n"
+        "Sonraki adım: teslimat makbuzunu arşivleyin.",
+    )
     set_stage(state_path, state, "compute_shutdown", "running")
     if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1":
         shutdown = {"requested": False, "reason": "external_controller", "delegated": True}

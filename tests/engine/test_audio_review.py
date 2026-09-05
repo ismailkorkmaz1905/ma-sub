@@ -80,7 +80,12 @@ def _decoded(text: str = "", start_ms: int = 100, end_ms: int = 500) -> dict:
     }
 
 
-def _candidate(*, orphan: bool = False) -> tuple[dict, dict]:
+def _candidate(
+    *,
+    orphan: bool = False,
+    reason: str | None = None,
+    context_after: str = "Geldim",
+) -> tuple[dict, dict]:
     utterance = {
         "utterance_uid": "candidate-1",
         "utterance_index": 1,
@@ -89,7 +94,7 @@ def _candidate(*, orphan: bool = False) -> tuple[dict, dict]:
         "asr_text": "" if orphan else "Merhaba",
         "youtube_text": "Merhaba" if orphan else "",
         "context_before": "",
-        "context_after": "Geldim",
+        "context_after": context_after,
         "risk_flags": [
             "orphan_youtube_caption" if orphan else "suspected_asr_hallucination",
             "manual_audio_review_required",
@@ -105,7 +110,8 @@ def _candidate(*, orphan: bool = False) -> tuple[dict, dict]:
         "end_ms": utterance["coarse_end_ms"],
         "clip_start_ms": 0,
         "clip_end_ms": 1_000,
-        "reason": (
+        "reason": reason
+        or (
             "orphan_youtube_caption_without_asr_or_vad_overlap"
             if orphan
             else "zero_unpadded_independent_vad_overlap"
@@ -177,8 +183,14 @@ def _make_files(
     *,
     orphan: bool = False,
     include_hole: bool = False,
+    candidate_reason: str | None = None,
+    candidate_context_after: str = "Geldim",
 ) -> tuple[Path, Path, Path, Path, Path]:
-    candidate, candidate_evidence = _candidate(orphan=orphan)
+    candidate, candidate_evidence = _candidate(
+        orphan=orphan,
+        reason=candidate_reason,
+        context_after=candidate_context_after,
+    )
     utterances = [candidate]
     holes: list[dict] = []
     if include_hole:
@@ -297,7 +309,9 @@ class AudioReviewV2Tests(unittest.TestCase):
 
     def test_prompted_second_pass_can_confirm_but_remains_audited(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            paths = _make_files(Path(directory), orphan=True)
+            paths = _make_files(
+                Path(directory), candidate_reason="weak_confidence_candidate"
+            )
             decoder = FakeDecoder([_decoded(), _decoded("Merhaba")])
             report = resolve_tr_audio_reviews_v2(
                 *paths,
@@ -315,7 +329,9 @@ class AudioReviewV2Tests(unittest.TestCase):
 
     def test_exact_target_crop_can_confirm_after_context_decode_is_ambiguous(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            paths = _make_files(Path(directory), orphan=True)
+            paths = _make_files(
+                Path(directory), candidate_reason="weak_confidence_candidate"
+            )
             decoder = FakeDecoder([_decoded(), _decoded(), _decoded("Merhaba")])
             report = resolve_tr_audio_reviews_v2(
                 *paths,
@@ -331,7 +347,91 @@ class AudioReviewV2Tests(unittest.TestCase):
                 outcome["exact_target_crop_decode"]["transcript"], "Merhaba"
             )
 
-    def test_exact_target_crop_alone_cannot_close_a_speech_hole(self) -> None:
+    def test_contextual_policy_retains_non_orphan_asr_boundary_fragment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory), candidate_reason="weak_confidence_candidate"
+            )
+            decoder = FakeDecoder([_decoded(), _decoded(), _decoded()])
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            record = output.records[0]
+            outcome = report["outcomes"][0]
+            self.assertEqual(record["review_disposition"], "confirmed_dialogue")
+            self.assertEqual(record["tr_corrected"], "Merhaba")
+            self.assertEqual(outcome["source"], "contextual_boundary_policy")
+            self.assertTrue(outcome["forced_alignment_required"])
+            self.assertEqual(
+                [item["stage"] for item in outcome["contextual_boundary_audit"]["bounded_decodes"]],
+                ["blind_padded", "prompted_padded", "exact_target_crop"],
+            )
+            self.assertNotIn("manual_audio_review_v2", record["note"])
+            resumed_decoder = FakeDecoder([])
+            resumed = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=resumed_decoder,
+                progress=None,
+            )
+            self.assertEqual(resumed_decoder.call_count, 0)
+            self.assertEqual(
+                resumed["outcomes"][0]["source"], "contextual_boundary_policy"
+            )
+
+    def test_contextual_policy_closes_blank_hole_without_inventing_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory),
+                include_hole=True,
+                candidate_reason="weak_confidence_candidate",
+            )
+            decoder = FakeDecoder(
+                [
+                    _decoded("Merhaba"),
+                    _decoded(),
+                    _decoded(),
+                    _decoded(),
+                ]
+            )
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            hole = output.records[1]
+            outcome = report["outcomes"][1]
+            self.assertEqual(hole["review_disposition"], "reviewed_non_dialogue")
+            self.assertEqual(hole["tr_corrected"], "")
+            self.assertTrue(hole["non_dialogue"])
+            self.assertEqual(outcome["source"], "contextual_boundary_policy")
+            self.assertTrue(outcome["forced_alignment_required"])
+
+    def test_contextual_policy_missing_context_remains_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory),
+                candidate_reason="weak_confidence_candidate",
+                candidate_context_after="",
+            )
+            with self.assertRaisesRegex(AudioReviewV2Error, "pending_count=1"):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    decoder=FakeDecoder([_decoded(), _decoded(), _decoded()]),
+                    progress=None,
+                )
+
+            report = json.loads(paths[3].read_text(encoding="utf-8"))
+            self.assertEqual(report["pending_utterance_uids"], ["candidate-1"])
+
+    def test_contextual_policy_keeps_exact_crop_speech_hole_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = _make_files(Path(directory), include_hole=True)
             decoder = FakeDecoder(
@@ -342,14 +442,17 @@ class AudioReviewV2Tests(unittest.TestCase):
                     _decoded("Duydum"),
                 ]
             )
-            with self.assertRaisesRegex(AudioReviewV2Error, "pending_count=1"):
-                resolve_tr_audio_reviews_v2(
-                    *paths,
-                    decoder=decoder,
-                    progress=None,
-                )
-            report = json.loads(paths[3].read_text(encoding="utf-8"))
-            self.assertEqual(report["pending_utterance_uids"], ["hole-1"])
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+            output = validate_tr_correction_output(paths[0], paths[2])
+            self.assertEqual(output.records[1]["review_disposition"], "confirmed_dialogue")
+            self.assertEqual(output.records[1]["tr_corrected"], "Duydum")
+            self.assertEqual(
+                report["outcomes"][1]["source"], "contextual_boundary_policy"
+            )
 
     def test_exact_target_crop_uses_only_declared_sample_interval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

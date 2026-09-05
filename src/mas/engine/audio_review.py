@@ -48,6 +48,7 @@ AUDIO_REVIEW_V2_VERSION = "1.0"
 AUDIO_REVIEW_V2_RECOVERY_FORMAT = "audio-review-v2-recovery-1"
 MACHINE_NOTE_PREFIX = "machine_audio_review_v2:"
 MANUAL_NOTE_PREFIX = "manual_audio_review_v2:"
+CONTEXTUAL_BOUNDARY_POLICY = "contextual-boundary-policy-1"
 
 
 class AudioReviewV2Error(RuntimeError):
@@ -538,7 +539,15 @@ def _exact_target_crop_confirms(
     provisional_record: Mapping[str, Any],
     decision: Mapping[str, Any],
 ) -> bool:
-    if kind == "speech_hole" or decision.get("decision") != "confirmed_dialogue":
+    if (
+        kind == "speech_hole"
+        or decision.get("decision") != "confirmed_dialogue"
+        or "orphan_youtube_caption" in set(evidence.get("risk_flags", []))
+        or not (
+            str(evidence.get("context_before", "")).strip()
+            or str(evidence.get("context_after", "")).strip()
+        )
+    ):
         return False
     transcript = _normalized_text(
         decision.get("target_decode", {}).get("transcript", "")
@@ -599,6 +608,22 @@ def _machine_decision(
         "required_shared_token_count": required_shared_tokens,
         "source": "secondary_asr",
     }
+    has_adjacent_context = bool(
+        str(evidence.get("context_before", "")).strip()
+        or str(evidence.get("context_after", "")).strip()
+    )
+    is_orphan = "orphan_youtube_caption" in set(
+        evidence.get("risk_flags", [])
+    )
+    if not has_adjacent_context or is_orphan:
+        return {
+            **base,
+            "decision": "pending_audio_review",
+            "tr_corrected": str(provisional_record.get("tr_corrected", "")).strip(),
+            "reason": (
+                "orphan caption or missing adjacent context remains fail-closed"
+            ),
+        }
     if kind == "speech_hole":
         context_matches = max(
             _text_similarity(transcript, evidence.get("context_before", "")),
@@ -641,9 +666,6 @@ def _machine_decision(
     # independent VAD at all, no blind secondary transcript and no agreeing
     # YouTube text. Merely low overlap or a weak confidence flag stays pending.
     structural_silence = "zero_unpadded_independent_vad_overlap" in reason
-    is_orphan = "orphan_youtube_caption" in set(
-        evidence.get("risk_flags", [])
-    )
     if not transcript and structural_silence and not independent_text_agreement and not is_orphan:
         return {
             **base,
@@ -657,6 +679,104 @@ def _machine_decision(
         "tr_corrected": str(provisional_record["tr_corrected"]).strip(),
         "reason": "candidate evidence remains acoustically ambiguous",
     }
+
+
+def _contextual_boundary_decision(
+    kind: str,
+    evidence: Mapping[str, Any],
+    provisional_record: Mapping[str, Any],
+    pending_decision: Mapping[str, Any],
+    staged_decodes: Sequence[tuple[str, Mapping[str, Any]]],
+) -> dict[str, Any]:
+    if pending_decision.get("decision") != "pending_audio_review":
+        return copy.deepcopy(dict(pending_decision))
+    context_before = str(evidence.get("context_before", "")).strip()
+    context_after = str(evidence.get("context_after", "")).strip()
+    if not context_before and not context_after:
+        return copy.deepcopy(dict(pending_decision))
+    is_orphan = "orphan_youtube_caption" in set(evidence.get("risk_flags", []))
+    decode_audit = []
+    has_usable_target_text = False
+    for stage, decoded in staged_decodes:
+        transcript = str(decoded.get("transcript", "")).strip()
+        context_similarity = max(
+            _text_similarity(transcript, context_before),
+            _text_similarity(transcript, context_after),
+        )
+        usable_target_text = bool(transcript) and context_similarity < 0.85
+        has_usable_target_text = has_usable_target_text or usable_target_text
+        decode_audit.append(
+            {
+                "stage": stage,
+                "transcript": transcript,
+                "transcript_sha256": hashlib.sha256(
+                    transcript.encode("utf-8")
+                ).hexdigest(),
+                "transcript_present": bool(transcript),
+                "usable_target_text": usable_target_text,
+            }
+        )
+    audit = {
+        "policy": CONTEXTUAL_BOUNDARY_POLICY,
+        "context_before_present": bool(context_before),
+        "context_after_present": bool(context_after),
+        "context_sha256": sha256_json(
+            {"before": context_before, "after": context_after}
+        ),
+        "orphan_caption": is_orphan,
+        "bounded_decodes": decode_audit,
+    }
+    corrected = str(provisional_record.get("tr_corrected", "")).strip()
+    if (
+        kind == "asr_caption_candidate"
+        and not is_orphan
+        and corrected
+        and str(evidence.get("asr_text", "")).strip()
+    ):
+        return {
+            **copy.deepcopy(dict(pending_decision)),
+            "decision": "confirmed_dialogue",
+            "tr_corrected": corrected,
+            "reason": (
+                "non-orphan ASR boundary fragment retained from corrected text; "
+                "adjacent transcript context is present and final forced alignment "
+                "is required"
+            ),
+            "source": "contextual_boundary_policy",
+            "forced_alignment_required": True,
+            "contextual_boundary_audit": audit,
+        }
+    if kind == "speech_hole" and not corrected and has_usable_target_text:
+        selected = next(
+            item for item in reversed(decode_audit) if item["usable_target_text"]
+        )
+        return {
+            **copy.deepcopy(dict(pending_decision)),
+            "decision": "confirmed_dialogue",
+            "tr_corrected": selected["transcript"],
+            "reason": (
+                "bounded target audio produced usable dialogue in adjacent "
+                "subtitle context; final forced alignment is required"
+            ),
+            "source": "contextual_boundary_policy",
+            "forced_alignment_required": True,
+            "contextual_boundary_audit": audit,
+        }
+    if kind == "speech_hole" and not corrected:
+        return {
+            **copy.deepcopy(dict(pending_decision)),
+            "decision": "reviewed_non_dialogue",
+            "tr_corrected": "",
+            "reason": (
+                "blank bounded speech-hole interval had adjacent transcript context "
+                "but no usable target text; no dialogue text was invented and final "
+                "forced alignment is required"
+            ),
+            "source": "contextual_boundary_policy",
+            "forced_alignment_required": True,
+            "contextual_boundary_audit": audit,
+        }
+    return copy.deepcopy(dict(pending_decision))
 
 
 def _evidence_prompt(
@@ -819,7 +939,111 @@ def _outcome(
         outcome["exact_target_crop"] = copy.deepcopy(
             dict(decision["exact_target_crop"])
         )
+    if decision.get("source") == "contextual_boundary_policy":
+        outcome["forced_alignment_required"] = bool(
+            decision.get("forced_alignment_required")
+        )
+        outcome["contextual_boundary_audit"] = copy.deepcopy(
+            dict(decision["contextual_boundary_audit"])
+        )
     return outcome
+
+
+def _validate_contextual_boundary_outcome(
+    kind: str,
+    evidence: Mapping[str, Any],
+    provisional_record: Mapping[str, Any],
+    final_record: Mapping[str, Any],
+    outcome: Mapping[str, Any],
+) -> None:
+    if outcome.get("forced_alignment_required") is not True:
+        raise AudioReviewV2Error(
+            "contextual boundary outcome must require final forced alignment"
+        )
+    audit = outcome.get("contextual_boundary_audit")
+    if not isinstance(audit, Mapping):
+        raise AudioReviewV2Error("contextual boundary audit is missing")
+    context_before = str(evidence.get("context_before", "")).strip()
+    context_after = str(evidence.get("context_after", "")).strip()
+    expected_context_sha256 = sha256_json(
+        {"before": context_before, "after": context_after}
+    )
+    if (
+        audit.get("policy") != CONTEXTUAL_BOUNDARY_POLICY
+        or audit.get("context_before_present") is not bool(context_before)
+        or audit.get("context_after_present") is not bool(context_after)
+        or audit.get("context_sha256") != expected_context_sha256
+        or not (context_before or context_after)
+    ):
+        raise AudioReviewV2Error("contextual boundary context audit mismatch")
+    bounded_decodes = audit.get("bounded_decodes")
+    if not isinstance(bounded_decodes, list) or not bounded_decodes:
+        raise AudioReviewV2Error("contextual boundary decode audit is missing")
+    stages = []
+    for item in bounded_decodes:
+        if not isinstance(item, Mapping):
+            raise AudioReviewV2Error("contextual boundary decode audit is malformed")
+        stage = item.get("stage")
+        if not isinstance(stage, str) or not stage:
+            raise AudioReviewV2Error("contextual boundary decode stage is invalid")
+        stages.append(stage)
+        digest = item.get("transcript_sha256")
+        transcript = item.get("transcript")
+        if (
+            not isinstance(transcript, str)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or digest != hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+        ):
+            raise AudioReviewV2Error("contextual boundary transcript digest is invalid")
+        if not isinstance(item.get("transcript_present"), bool) or not isinstance(
+            item.get("usable_target_text"), bool
+        ):
+            raise AudioReviewV2Error("contextual boundary decode flags are invalid")
+        context_similarity = max(
+            _text_similarity(transcript, context_before),
+            _text_similarity(transcript, context_after),
+        )
+        if item.get("transcript_present") is not bool(transcript.strip()) or item.get(
+            "usable_target_text"
+        ) is not (bool(transcript.strip()) and context_similarity < 0.85):
+            raise AudioReviewV2Error("contextual boundary decode audit mismatch")
+    if len(stages) != len(set(stages)) or not {
+        "blind_padded",
+        "exact_target_crop",
+    }.issubset(stages):
+        raise AudioReviewV2Error("contextual boundary decode coverage is incomplete")
+    is_orphan = "orphan_youtube_caption" in set(evidence.get("risk_flags", []))
+    if audit.get("orphan_caption") is not is_orphan:
+        raise AudioReviewV2Error("contextual boundary orphan audit mismatch")
+    if kind == "asr_caption_candidate":
+        corrected = str(provisional_record.get("tr_corrected", "")).strip()
+        if (
+            is_orphan
+            or not corrected
+            or not str(evidence.get("asr_text", "")).strip()
+            or outcome.get("decision") != "confirmed_dialogue"
+            or str(final_record.get("tr_corrected", "")).strip() != corrected
+        ):
+            raise AudioReviewV2Error("contextual ASR boundary policy was misapplied")
+    else:
+        if str(provisional_record.get("tr_corrected", "")).strip():
+            raise AudioReviewV2Error("contextual blank-hole policy was misapplied")
+        usable = [
+            item for item in bounded_decodes if item.get("usable_target_text") is True
+        ]
+        if usable:
+            if (
+                outcome.get("decision") != "confirmed_dialogue"
+                or str(final_record.get("tr_corrected", "")).strip()
+                != str(usable[-1]["transcript"]).strip()
+            ):
+                raise AudioReviewV2Error("contextual speech-hole text mismatch")
+        elif (
+            outcome.get("decision") != "reviewed_non_dialogue"
+            or str(final_record.get("tr_corrected", "")).strip()
+        ):
+            raise AudioReviewV2Error("contextual blank-hole policy was misapplied")
 
 
 def validate_audio_review_v2_report(
@@ -870,6 +1094,9 @@ def validate_audio_review_v2_report(
     ]
     if actual_uids != expected_uids:
         raise AudioReviewV2Error("audio-review outcome identity/order mismatch")
+    provisional_by_uid = {
+        str(item["utterance_uid"]): item for item in provisional.records
+    }
     final_by_uid = {str(item["utterance_uid"]): item for item in final.records}
     for (uid, kind, evidence), raw in zip(inventory, outcomes):
         if not isinstance(raw, Mapping):
@@ -909,6 +1136,14 @@ def validate_audio_review_v2_report(
         if record["audio_reviewed"] is not True or record["review_required"] is not False:
             raise AudioReviewV2Error(
                 f"audio-review outcome {uid} did not close the correction gate"
+            )
+        if raw.get("source") == "contextual_boundary_policy":
+            _validate_contextual_boundary_outcome(
+                kind,
+                evidence,
+                provisional_by_uid[uid],
+                record,
+                raw,
             )
     if report.get("review_count") != len(outcomes):
         raise AudioReviewV2Error("audio-review report count mismatch")
@@ -1065,7 +1300,44 @@ def resolve_tr_audio_reviews_v2(
                             cached_target_decode,
                             settings,
                         )
-                        if "exact_target_crop_decode" in cached_decision:
+                        if (
+                            cached_decision.get("source")
+                            == "contextual_boundary_policy"
+                        ):
+                            cached_audit = cached_decision[
+                                "contextual_boundary_audit"
+                            ]
+                            cached_staged_decodes = [
+                                (
+                                    str(item["stage"]),
+                                    {"transcript": str(item["transcript"])},
+                                )
+                                for item in cached_audit["bounded_decodes"]
+                            ]
+                            recomputed = _contextual_boundary_decision(
+                                kind,
+                                evidence,
+                                provisional_by_uid[uid],
+                                recomputed,
+                                cached_staged_decodes,
+                            )
+                            if (
+                                recomputed.get("source")
+                                != "contextual_boundary_policy"
+                            ):
+                                raise AudioReviewV2Error(
+                                    "cached contextual decision no longer satisfies policy"
+                                )
+                            recomputed["blind_target_decode"] = copy.deepcopy(
+                                cached_decision["blind_target_decode"]
+                            )
+                            recomputed["exact_target_crop_decode"] = copy.deepcopy(
+                                cached_decision["exact_target_crop_decode"]
+                            )
+                            recomputed["exact_target_crop"] = copy.deepcopy(
+                                cached_decision["exact_target_crop"]
+                            )
+                        elif "exact_target_crop_decode" in cached_decision:
                             recomputed = _machine_decision(
                                 kind,
                                 evidence,
@@ -1146,6 +1418,7 @@ def resolve_tr_audio_reviews_v2(
                     evidence,
                     tolerance_ms=settings.target_tolerance_ms,
                 )
+                staged_decodes = [("blind_padded", target)]
                 decision = _machine_decision(
                     kind,
                     evidence,
@@ -1168,6 +1441,7 @@ def resolve_tr_audio_reviews_v2(
                             evidence,
                             tolerance_ms=settings.target_tolerance_ms,
                         )
+                        staged_decodes.append(("prompted_padded", prompted_target))
                         prompted_decision = _machine_decision(
                             kind,
                             evidence,
@@ -1197,6 +1471,7 @@ def resolve_tr_audio_reviews_v2(
                     crop_target = _whole_clip_target_decode(
                         crop_decoded, duration_ms=int(crop["duration_ms"])
                     )
+                    staged_decodes.append(("exact_target_crop", crop_target))
                     crop_decision = _machine_decision(
                         kind,
                         evidence,
@@ -1219,6 +1494,22 @@ def resolve_tr_audio_reviews_v2(
                         crop_decision["exact_target_crop_decode"] = crop_target
                         crop_decision["exact_target_crop"] = crop
                         decision = crop_decision
+                    if decision["decision"] == "pending_audio_review":
+                        contextual_decision = _contextual_boundary_decision(
+                            kind,
+                            evidence,
+                            provisional_by_uid[uid],
+                            decision,
+                            staged_decodes,
+                        )
+                        if (
+                            contextual_decision.get("source")
+                            == "contextual_boundary_policy"
+                        ):
+                            contextual_decision["blind_target_decode"] = target
+                            contextual_decision["exact_target_crop_decode"] = crop_target
+                            contextual_decision["exact_target_crop"] = crop
+                        decision = contextual_decision
                 machine_decisions[uid] = decision
                 if (
                     position % settings.checkpoint_every == 0

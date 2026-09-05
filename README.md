@@ -10,7 +10,7 @@ source -> audio -> Turkish ASR -> acoustic review -> correction handoff
 
 Production code lives under `src/mas/` and runs through `./mas`. Notebooks and the imported source snapshot under `legacy/` are read-only reference material, not production entrypoints.
 
-> Release status: Episode 11 completed real RTX 4090 source, audio, and raw-ASR stages. The Turkish correction return was accepted, and bounded audio review resolved 107 of 245 records while leaving 138 pending. A separate revision-pinned CUDA CTC probe processed all 138 pending records, but produced 0 normalized exact reference matches and closed 0 strict decisions. This is diagnostic evidence, not an acoustic PASS. Manual acoustic decisions, production forced alignment, Indonesian translation, strict mux, Drive readback, and delivery remain incomplete. Do not create a stable tag until the Astra review and all real episode gates pass.
+> Release status: Episode 11 completed real RTX 4090 source, audio, and raw-ASR stages. The Turkish correction return was accepted, and the previous bounded audio-review policy resolved 107 of 245 records while leaving 138 pending. A contextual machine-review policy now keeps non-orphan boundary speech, does not invent text for blank boundary intervals, records hash-bound decision evidence, and requires production forced alignment. Its local suite passed, but a real resumed GPU run has not yet verified the 138 decisions. Indonesian translation, strict mux, Drive readback, and delivery remain incomplete. Do not create a stable tag until the Astra review and all real episode gates pass.
 
 ## Start here
 
@@ -101,13 +101,22 @@ IDs, block order, Turkish text in the Indonesian return, or timing in a
 translation return.
 
 Episode 11's returned Turkish correction ZIP has passed the return gate. Its
-bounded audio review processed 245 records, resolving 107 and leaving 138 for
-manual acoustic decisions. An independent pinned-model CUDA CTC probe executed
-for all 138 pending records, but its 0 normalized exact reference matches and 0
-strict closures do not replace listening-based review or prove production forced
-alignment.
+previous bounded audio review processed 245 records, resolving 107 and leaving
+138 pending. An independent pinned-model CUDA CTC probe executed for all 138
+pending records, but its 0 normalized exact reference matches and 0 strict
+closures remain diagnostic evidence. The current contextual policy resolves
+non-orphan boundary fragments only after all bounded acoustic passes, records
+the adjacent-context and decode audit, and keeps final forced alignment
+mandatory. Real GPU verification of that policy is still pending.
 
-Review the pending WAVs locally without starting RunPod:
+Resume the production run without manually reviewing 138 clips:
+
+```powershell
+.\mas.ps1 run 11
+```
+
+The local review UI remains an operator fallback for orphan captions or records
+without adjacent context, and does not start RunPod:
 
 ```powershell
 .\mas.ps1 review-audio 11
@@ -116,9 +125,9 @@ Review the pending WAVs locally without starting RunPod:
 The command opens a localhost-only browser page. Each save verifies the current
 report, correction input/output bindings, and WAV SHA-256 before atomically
 updating `review/audio_review_overrides.json`. Stop the local server with
-`Ctrl+C`. After all pending records are saved, resume once with
-`.\mas.ps1 run 11`; the controller verifies the override file by byte count and
-SHA-256 on the Pod before the pipeline starts.
+`Ctrl+C`. If fallback decisions are needed, resume with `.\mas.ps1 run 11`; the
+controller verifies the override file by byte count and SHA-256 on the Pod
+before the pipeline starts.
 
 Useful operator commands:
 

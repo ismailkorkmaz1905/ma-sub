@@ -11,7 +11,8 @@ session took `1,168.031 seconds`; raw ASR took `986.5 seconds`. The complete
 attempt and fix timeline is in `docs/EP11_FIRST_PRODUCTION_RUN.md`.
 
 The Turkish correction return subsequently passed. Bounded audio review covered
-245 records, resolved 107, and left 138 pending. After commit
+245 records, resolved 107, and left 138 pending under the policy used by that
+run. After commit
 `f581fcb59091d026e4f53a825916ba9e7abcf479`, an independent pinned-model CUDA
 CTC probe processed 138/138 pending records with
 `samil24/wav2vec-xlsr-53-turkish-v4` pinned to revision
@@ -36,10 +37,21 @@ tests passed 33/33 in 1.72 seconds. Main CI workflow run `33964604668` passed bo
 the test and Dockerfile jobs. The transfer implementation has not yet been
 exercised in a real resumed Pod run.
 
-Manual acoustic decisions, production forced alignment, live Google Drive
+The current operating decision is to replace a 138-clip manual-listening task
+with a contextual machine-review policy using target audio and adjacent context.
+The user will not manually listen to 138 clips. The new policy is not verified
+until its code, focused/full tests, and a real resumed RunPod execution are
+retained as evidence. Production forced alignment, live Google Drive
 byte/SHA-256 readback, and the completed final episode have not been verified.
 Review `main` directly. Do not create a stable tag from the partial Episode 11
 run.
+
+## Continuous execution rule
+
+Answering status or operator questions must not terminate the active production
+task. Continue until strict delivery or a genuine external blocker. If blocked,
+record the exact blocker and retained evidence here, and record the exact resume
+command for Astra. The current resume command is `.\mas.ps1 run 11`.
 
 The latest independently observed probe Pod is `tccsb8991x84ua`; it was
 externally verified `EXITED`. Credentials are stored outside Git in Windows User
@@ -104,7 +116,7 @@ export MAS_IDLE_TIMEOUT_SECONDS=1800
 ./runpod/run-episode.sh 11
 ```
 
-The Windows entrypoint `.\mas.ps1 run 11` owns bounded Pod start, API and SSH readiness, deployment, streamed logs, handoff download/upload, secret cleanup, stop, and external EXITED polling. It performs local preflight before startup and refuses a dirty repository or non-EXITED Pod. Deployment, SSH, strict preflight, real RTX 4090 raw ASR, Turkish handoff download, controller shutdown, and external `EXITED` verification passed. The later pinned-model CUDA CTC probe also completed 138/138 and its Pod was externally verified `EXITED`, but it closed 0 strict decisions and is not an acoustic PASS. `.\mas.ps1 review-audio 11` now provides a localhost-only, hash-bound manual review UI without starting RunPod; the controller's byte/SHA-256-verified override upload is locally tested but has not yet been exercised in a real resumed Pod run. Manual acoustic decisions, production forced alignment, final pipeline completion, and Drive delivery remain unverified.
+The Windows entrypoint `.\mas.ps1 run 11` owns bounded Pod start, API and SSH readiness, deployment, streamed logs, handoff download/upload, secret cleanup, stop, and external EXITED polling. It performs local preflight before startup and refuses a dirty repository or non-EXITED Pod. Deployment, SSH, strict preflight, real RTX 4090 raw ASR, Turkish handoff download, controller shutdown, and external `EXITED` verification passed. The later pinned-model CUDA CTC probe also completed 138/138 and its Pod was externally verified `EXITED`, but it closed 0 strict decisions and is not an acoustic PASS. The contextual machine-review replacement for manual review is the current plan, not a verified result; retain its code/test evidence and real resumed RunPod outcome before accepting it. Production forced alignment, final pipeline completion, and Drive delivery remain unverified.
 
 For each ChatGPT handoff, preserve the returned ZIP exactly and resume with:
 

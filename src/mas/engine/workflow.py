@@ -215,6 +215,7 @@ def correction_records_to_alignment_inputs(
                     {
                         "suspected_asr_hallucination",
                         "orphan_youtube_caption",
+                        "speech_hole_rescue_asr",
                     }.intersection(input_flags)
                 )
             )

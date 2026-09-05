@@ -80,6 +80,21 @@ def _decoded(text: str = "", start_ms: int = 100, end_ms: int = 500) -> dict:
     }
 
 
+def _decoded_words(*words: tuple[str, int, int]) -> dict:
+    return {
+        "segments": [],
+        "words": [
+            {
+                "text": text,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "probability": 0.95,
+            }
+            for text, start_ms, end_ms in words
+        ],
+    }
+
+
 def _candidate(
     *,
     orphan: bool = False,
@@ -416,6 +431,108 @@ class AudioReviewV2Tests(unittest.TestCase):
             self.assertTrue(hole["non_dialogue"])
             self.assertEqual(outcome["source"], "contextual_boundary_policy")
             self.assertTrue(outcome["forced_alignment_required"])
+
+    def test_prompted_hole_word_outside_exact_target_is_not_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), include_hole=True)
+            decoder = FakeDecoder(
+                [
+                    _decoded("Merhaba"),
+                    _decoded(),
+                    _decoded("Geldim", 620, 700),
+                    _decoded(),
+                ]
+            )
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            hole = output.records[1]
+            outcome = report["outcomes"][1]
+            self.assertEqual(hole["review_disposition"], "reviewed_non_dialogue")
+            self.assertEqual(hole["tr_corrected"], "")
+            prompted = outcome["contextual_boundary_audit"]["bounded_decodes"][1]
+            self.assertEqual(prompted["stage"], "prompted_padded")
+            self.assertEqual(prompted["exact_word_overlap_ms"], 0)
+            self.assertFalse(prompted["usable_target_text"])
+
+    def test_overlapping_rescue_word_is_deduplicated_and_restores_parent_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate, candidate_evidence = _candidate(
+                asr_text="Sen sabah eve geldim"
+            )
+            candidate.update({"coarse_start_ms": 100, "coarse_end_ms": 900})
+            candidate_evidence.update({"start_ms": 100, "end_ms": 900})
+            hole, hole_evidence = _hole()
+            hole.update({"coarse_start_ms": 300, "coarse_end_ms": 500})
+            hole_evidence.update(
+                {
+                    "start_ms": 300,
+                    "end_ms": 500,
+                    "clip_start_ms": 0,
+                    "clip_end_ms": 1_000,
+                }
+            )
+            for evidence in (candidate_evidence, hole_evidence):
+                path = root / evidence["audio_member"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(_wav())
+            paths = (
+                root / "input.zip",
+                root / "provisional.zip",
+                root / "final.zip",
+                root / "audio_review_v2.json",
+                root / "audio_review_v2.recovery.json",
+            )
+            create_tr_correction_pack(
+                [candidate, hole],
+                [hole_evidence],
+                paths[0],
+                episode=12,
+                speech_hole_audio_root=root,
+                asr_hallucination_records=[candidate_evidence],
+                asr_hallucination_audio_root=root,
+            )
+            create_tr_correction_output(
+                paths[0], _pending_output([candidate, hole]), paths[1]
+            )
+            decoder = FakeDecoder(
+                [
+                    _decoded_words(
+                        ("Sen", 100, 250),
+                        ("beni", 300, 500),
+                        ("sabah", 510, 600),
+                        ("eve", 610, 680),
+                        ("geldim", 690, 800),
+                    ),
+                    _decoded_words(("bence", 300, 500)),
+                ]
+            )
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            self.assertEqual(
+                output.records[0]["tr_corrected"], "Sen beni sabah eve geldim"
+            )
+            self.assertTrue(output.records[1]["non_dialogue"])
+            self.assertEqual(
+                output.records[1]["review_disposition"], "reviewed_non_dialogue"
+            )
+            self.assertEqual(report["duplicate_resolution_count"], 1)
+            self.assertEqual(
+                report["duplicate_resolutions"][0]["duplicate_of_utterance_uid"],
+                "candidate-1",
+            )
 
     def test_contextual_policy_missing_context_remains_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

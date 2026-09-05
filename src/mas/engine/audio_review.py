@@ -49,6 +49,7 @@ AUDIO_REVIEW_V2_RECOVERY_FORMAT = "audio-review-v2-recovery-1"
 MACHINE_NOTE_PREFIX = "machine_audio_review_v2:"
 MANUAL_NOTE_PREFIX = "manual_audio_review_v2:"
 CONTEXTUAL_BOUNDARY_POLICY = "contextual-boundary-policy-1"
+ACOUSTIC_DUPLICATE_POLICY = "acoustic-duplicate-policy-1"
 
 
 class AudioReviewV2Error(RuntimeError):
@@ -642,7 +643,11 @@ def _machine_decision(
                 acoustic_transcript, evidence.get("context_after", "")
             ),
         )
-        if acoustic_transcript and context_matches < 0.85:
+        if (
+            acoustic_transcript
+            and int(target_decode.get("exact_word_overlap_ms", 0)) > 0
+            and context_matches < 0.85
+        ):
             return {
                 **base,
                 "decision": "confirmed_dialogue",
@@ -717,6 +722,7 @@ def _contextual_boundary_decision(
     has_usable_target_text = False
     for stage, decoded in staged_decodes:
         transcript = str(decoded.get("transcript", "")).strip()
+        exact_word_overlap_ms = int(decoded.get("exact_word_overlap_ms", 0))
         known_short_clip_hallucination = _is_known_short_clip_hallucination(
             transcript
         )
@@ -728,6 +734,7 @@ def _contextual_boundary_decision(
             bool(transcript)
             and not known_short_clip_hallucination
             and context_similarity < 0.85
+            and (stage != "prompted_padded" or exact_word_overlap_ms > 0)
         )
         has_usable_target_text = has_usable_target_text or usable_target_text
         decode_audit.append(
@@ -740,6 +747,7 @@ def _contextual_boundary_decision(
                 "transcript_present": bool(transcript),
                 "usable_target_text": usable_target_text,
                 "known_short_clip_hallucination": known_short_clip_hallucination,
+                "exact_word_overlap_ms": exact_word_overlap_ms,
             }
         )
     audit = {
@@ -1004,7 +1012,245 @@ def _outcome(
         outcome["contextual_boundary_audit"] = copy.deepcopy(
             dict(decision["contextual_boundary_audit"])
         )
+    for field in (
+        "duplicate_of_utterance_uid",
+        "duplicate_evidence",
+        "acoustic_correction_evidence",
+    ):
+        if field in decision:
+            outcome[field] = copy.deepcopy(decision[field])
     return outcome
+
+
+def _exact_target_words(
+    decision: Mapping[str, Any], evidence: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    if decision.get("decision") != "confirmed_dialogue":
+        return []
+    if decision.get("source") == "secondary_asr_exact_target_crop":
+        decode = decision.get("exact_target_crop_decode")
+        offset_ms = int(evidence["start_ms"])
+    elif decision.get("source") == "contextual_boundary_policy":
+        return []
+    else:
+        decode = decision.get("target_decode")
+        offset_ms = int(evidence["clip_start_ms"])
+    if not isinstance(decode, Mapping):
+        return []
+    raw_words = decode.get("words")
+    if not isinstance(raw_words, list):
+        return []
+    target_start = int(evidence["start_ms"])
+    target_end = int(evidence["end_ms"])
+    words = []
+    for raw in raw_words:
+        if not isinstance(raw, Mapping):
+            continue
+        start_ms = offset_ms + int(raw["start_ms"])
+        end_ms = offset_ms + int(raw["end_ms"])
+        overlap_ms = max(
+            0,
+            min(target_end, end_ms) - max(target_start, start_ms),
+        )
+        normalized = _normalized_text(raw.get("text", ""))
+        if overlap_ms > 0 and normalized:
+            words.append(
+                {
+                    "text": str(raw["text"]),
+                    "normalized": normalized,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "target_overlap_ms": overlap_ms,
+                }
+            )
+    return words
+
+
+def _contiguous_token_match(child: Sequence[str], parent: Sequence[str]) -> int | None:
+    if not child or len(child) > len(parent):
+        return None
+    for offset in range(len(parent) - len(child) + 1):
+        if list(parent[offset : offset + len(child)]) == list(child):
+            return offset
+    return None
+
+
+def _apply_acoustic_duplicate_policy(
+    inventory: Sequence[tuple[str, str, Mapping[str, Any]]],
+    provisional_by_uid: Mapping[str, Mapping[str, Any]],
+    decisions: Mapping[str, Mapping[str, Any]],
+    *,
+    override_uids: set[str],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    adjusted = {
+        uid: copy.deepcopy(dict(decision)) for uid, decision in decisions.items()
+    }
+    evidence_by_uid = {
+        uid: (kind, evidence) for uid, kind, evidence in inventory
+    }
+    words_by_uid = {
+        uid: _exact_target_words(adjusted[uid], evidence)
+        for uid, _kind, evidence in inventory
+    }
+    resolutions = []
+    for child_uid, child_kind, child_evidence in inventory:
+        if child_uid in override_uids:
+            continue
+        child_record = provisional_by_uid[child_uid]
+        child_flags = set(child_record.get("risk_flags", []))
+        if (
+            child_kind != "speech_hole"
+            and "speech_hole_rescue_asr" not in child_flags
+        ):
+            continue
+        child_words = words_by_uid[child_uid]
+        child_tokens = [word["normalized"] for word in child_words]
+        if not child_tokens or len(child_tokens) > 3:
+            continue
+        child_start = int(child_record["coarse_start_ms"])
+        child_end = int(child_record["coarse_end_ms"])
+        child_duration = child_end - child_start
+        matches = []
+        for parent_uid, _parent_kind, parent_evidence in inventory:
+            if parent_uid == child_uid or parent_uid in override_uids:
+                continue
+            parent_record = provisional_by_uid[parent_uid]
+            parent_start = int(parent_record["coarse_start_ms"])
+            parent_end = int(parent_record["coarse_end_ms"])
+            if (
+                parent_start > child_start
+                or parent_end < child_end
+                or parent_end - parent_start < child_duration * 2
+            ):
+                continue
+            parent_words = words_by_uid[parent_uid]
+            parent_tokens = [word["normalized"] for word in parent_words]
+            match_offset = _contiguous_token_match(child_tokens, parent_tokens)
+            match_kind = "exact_contiguous"
+            similarity = 1.0
+            if match_offset is None and len(child_tokens) == 1:
+                scored = [
+                    (
+                        SequenceMatcher(None, child_tokens[0], token).ratio(),
+                        index,
+                    )
+                    for index, token in enumerate(parent_tokens)
+                ]
+                if not scored:
+                    continue
+                similarity, match_offset = max(scored)
+                if similarity < 0.65:
+                    continue
+                match_kind = "single_token_acoustic_fuzzy"
+            if match_offset is None:
+                continue
+            matched_parent_words = parent_words[
+                match_offset : match_offset + len(child_words)
+            ]
+            acoustic_overlap_ms = sum(
+                max(
+                    0,
+                    min(child_word["end_ms"], parent_word["end_ms"])
+                    - max(child_word["start_ms"], parent_word["start_ms"]),
+                )
+                for child_word, parent_word in zip(
+                    child_words, matched_parent_words
+                )
+            )
+            if acoustic_overlap_ms <= 0:
+                continue
+            matches.append(
+                (
+                    parent_end - parent_start,
+                    acoustic_overlap_ms,
+                    similarity,
+                    parent_uid,
+                    match_kind,
+                    match_offset,
+                )
+            )
+        if not matches:
+            continue
+        (
+            _parent_duration,
+            acoustic_overlap_ms,
+            similarity,
+            parent_uid,
+            match_kind,
+            match_offset,
+        ) = max(matches)
+        parent_kind, parent_evidence = evidence_by_uid[parent_uid]
+        parent_words = words_by_uid[parent_uid]
+        evidence = {
+            "policy": ACOUSTIC_DUPLICATE_POLICY,
+            "duplicate_of_utterance_uid": parent_uid,
+            "match_kind": match_kind,
+            "token_similarity": round(similarity, 6),
+            "acoustic_word_overlap_ms": acoustic_overlap_ms,
+            "child_audio_sha256": str(child_evidence["audio_sha256"]),
+            "parent_audio_sha256": str(parent_evidence["audio_sha256"]),
+            "child_target_transcript_sha256": hashlib.sha256(
+                str(adjusted[child_uid]["target_decode"]["transcript"]).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+            "parent_target_transcript_sha256": hashlib.sha256(
+                str(adjusted[parent_uid]["target_decode"]["transcript"]).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        }
+        child_decision = adjusted[child_uid]
+        child_decision["decision"] = (
+            "reviewed_non_dialogue"
+            if child_kind == "speech_hole"
+            else "discarded_asr_hallucination"
+        )
+        child_decision["tr_corrected"] = ""
+        child_decision["source"] = "acoustic_duplicate_policy"
+        child_decision["reason"] = (
+            f"target words duplicate acoustically overlapping record {parent_uid}"
+        )
+        child_decision["duplicate_of_utterance_uid"] = parent_uid
+        child_decision["duplicate_evidence"] = evidence
+        resolutions.append(
+            {
+                "utterance_uid": child_uid,
+                "evidence_kind": child_kind,
+                **copy.deepcopy(evidence),
+            }
+        )
+
+        if match_kind != "single_token_acoustic_fuzzy":
+            continue
+        parent_decision = adjusted[parent_uid]
+        parent_target = str(
+            parent_decision.get("target_decode", {}).get("transcript", "")
+        ).strip()
+        corrected = str(provisional_by_uid[parent_uid]["tr_corrected"]).strip()
+        target_tokens = _tokens(parent_target)
+        corrected_tokens = _tokens(corrected)
+        matched_token = parent_words[match_offset]["normalized"]
+        if (
+            parent_target
+            and len(corrected_tokens) >= 4
+            and len(target_tokens) == len(corrected_tokens) + 1
+            and matched_token not in corrected_tokens
+            and _text_similarity(parent_target, corrected) >= 0.85
+        ):
+            parent_decision["tr_corrected"] = parent_target
+            parent_decision["source"] = "acoustic_duplicate_parent_correction"
+            parent_decision["reason"] = (
+                f"target-only word corroborated by overlapping record {child_uid}"
+            )
+            parent_decision["acoustic_correction_evidence"] = {
+                "policy": ACOUSTIC_DUPLICATE_POLICY,
+                "corroborating_utterance_uid": child_uid,
+                "inserted_token": matched_token,
+                "token_similarity": round(similarity, 6),
+                "acoustic_word_overlap_ms": acoustic_overlap_ms,
+            }
+    return adjusted, resolutions
 
 
 def _validate_contextual_boundary_outcome(
@@ -1058,6 +1304,9 @@ def _validate_contextual_boundary_outcome(
             not isinstance(item.get("transcript_present"), bool)
             or not isinstance(item.get("usable_target_text"), bool)
             or not isinstance(item.get("known_short_clip_hallucination"), bool)
+            or isinstance(item.get("exact_word_overlap_ms"), bool)
+            or not isinstance(item.get("exact_word_overlap_ms"), int)
+            or item.get("exact_word_overlap_ms") < 0
         ):
             raise AudioReviewV2Error("contextual boundary decode flags are invalid")
         context_similarity = max(
@@ -1076,6 +1325,10 @@ def _validate_contextual_boundary_outcome(
                 bool(transcript.strip())
                 and not known_short_clip_hallucination
                 and context_similarity < 0.85
+                and (
+                    stage != "prompted_padded"
+                    or item.get("exact_word_overlap_ms") > 0
+                )
             )
         ):
             raise AudioReviewV2Error("contextual boundary decode audit mismatch")
@@ -1192,6 +1445,12 @@ def validate_audio_review_v2_report(
         str(item["utterance_uid"]): item for item in provisional.records
     }
     final_by_uid = {str(item["utterance_uid"]): item for item in final.records}
+    outcome_by_uid = {
+        str(item["utterance_uid"]): item
+        for item in outcomes
+        if isinstance(item, Mapping)
+        and isinstance(item.get("utterance_uid"), str)
+    }
     for (uid, kind, evidence), raw in zip(inventory, outcomes):
         if not isinstance(raw, Mapping):
             raise AudioReviewV2Error(f"audio-review outcome {uid} is malformed")
@@ -1239,6 +1498,68 @@ def validate_audio_review_v2_report(
                 record,
                 raw,
             )
+    duplicate_resolutions = report.get("duplicate_resolutions")
+    if not isinstance(duplicate_resolutions, list):
+        raise AudioReviewV2Error("audio-review duplicate resolutions must be a list")
+    if report.get("duplicate_resolution_count") != len(duplicate_resolutions):
+        raise AudioReviewV2Error("audio-review duplicate resolution count mismatch")
+    duplicate_uids = []
+    for resolution in duplicate_resolutions:
+        if not isinstance(resolution, Mapping):
+            raise AudioReviewV2Error("audio-review duplicate resolution is malformed")
+        uid = resolution.get("utterance_uid")
+        parent_uid = resolution.get("duplicate_of_utterance_uid")
+        if (
+            not isinstance(uid, str)
+            or not isinstance(parent_uid, str)
+            or uid == parent_uid
+            or resolution.get("policy") != ACOUSTIC_DUPLICATE_POLICY
+            or uid not in outcome_by_uid
+            or parent_uid not in outcome_by_uid
+        ):
+            raise AudioReviewV2Error("audio-review duplicate identity is invalid")
+        raw = outcome_by_uid[uid]
+        parent = outcome_by_uid[parent_uid]
+        if (
+            raw.get("source") != "acoustic_duplicate_policy"
+            or raw.get("duplicate_of_utterance_uid") != parent_uid
+            or raw.get("duplicate_evidence") != {
+                key: value
+                for key, value in resolution.items()
+                if key not in {"utterance_uid", "evidence_kind"}
+            }
+            or parent.get("decision") != "confirmed_dialogue"
+            or resolution.get("child_audio_sha256") != raw.get("audio_sha256")
+            or resolution.get("parent_audio_sha256") != parent.get("audio_sha256")
+            or not isinstance(resolution.get("acoustic_word_overlap_ms"), int)
+            or resolution.get("acoustic_word_overlap_ms") <= 0
+        ):
+            raise AudioReviewV2Error("audio-review duplicate evidence mismatch")
+        duplicate_uids.append(uid)
+    expected_duplicate_uids = [
+        str(item["utterance_uid"])
+        for item in outcomes
+        if isinstance(item, Mapping)
+        and item.get("source") == "acoustic_duplicate_policy"
+    ]
+    if duplicate_uids != expected_duplicate_uids:
+        raise AudioReviewV2Error("audio-review duplicate outcome coverage mismatch")
+    for uid, raw in outcome_by_uid.items():
+        if raw.get("source") != "acoustic_duplicate_parent_correction":
+            continue
+        evidence = raw.get("acoustic_correction_evidence")
+        if not isinstance(evidence, Mapping):
+            raise AudioReviewV2Error("audio-review acoustic correction evidence is missing")
+        child_uid = evidence.get("corroborating_utterance_uid")
+        if (
+            evidence.get("policy") != ACOUSTIC_DUPLICATE_POLICY
+            or not isinstance(child_uid, str)
+            or child_uid not in duplicate_uids
+            or outcome_by_uid[child_uid].get("duplicate_of_utterance_uid") != uid
+            or str(final_by_uid[uid]["tr_corrected"]).strip()
+            != str(raw.get("target_decode", {}).get("transcript", "")).strip()
+        ):
+            raise AudioReviewV2Error("audio-review acoustic correction mismatch")
     if report.get("review_count") != len(outcomes):
         raise AudioReviewV2Error("audio-review report count mismatch")
     return copy.deepcopy(dict(report))
@@ -1404,7 +1725,12 @@ def resolve_tr_audio_reviews_v2(
                             cached_staged_decodes = [
                                 (
                                     str(item["stage"]),
-                                    {"transcript": str(item["transcript"])},
+                                    {
+                                        "transcript": str(item["transcript"]),
+                                        "exact_word_overlap_ms": int(
+                                            item["exact_word_overlap_ms"]
+                                        ),
+                                    },
                                 )
                                 for item in cached_audit["bounded_decodes"]
                             ]
@@ -1619,6 +1945,20 @@ def resolve_tr_audio_reviews_v2(
         if owns_decoder and runtime_decoder is not None:
             runtime_decoder.close()
 
+    final_decisions = {
+        uid: copy.deepcopy(decision) for uid, decision in machine_decisions.items()
+    }
+    for uid, kind, _evidence in inventory:
+        if uid in overrides:
+            final_decisions[uid] = _manual_decision(
+                uid, kind, overrides[uid], provisional_by_uid[uid]
+            )
+    final_decisions, duplicate_resolutions = _apply_acoustic_duplicate_policy(
+        inventory,
+        provisional_by_uid,
+        final_decisions,
+        override_uids=set(overrides),
+    )
     outcomes: list[dict[str, Any]] = []
     resolved_records = [copy.deepcopy(dict(record)) for record in provisional.records]
     resolved_by_uid = {
@@ -1626,11 +1966,7 @@ def resolve_tr_audio_reviews_v2(
     }
     pending_uids: list[str] = []
     for uid, kind, evidence in inventory:
-        decision = machine_decisions[uid]
-        if uid in overrides:
-            decision = _manual_decision(
-                uid, kind, overrides[uid], provisional_by_uid[uid]
-            )
+        decision = final_decisions[uid]
         record = resolved_by_uid[uid]
         disposition = str(decision["decision"])
         if disposition == "pending_audio_review":
@@ -1679,6 +2015,8 @@ def resolve_tr_audio_reviews_v2(
         "resolved_count": len(outcomes) - len(pending_uids),
         "pending_count": len(pending_uids),
         "pending_utterance_uids": pending_uids,
+        "duplicate_resolution_count": len(duplicate_resolutions),
+        "duplicate_resolutions": duplicate_resolutions,
         "outcomes": outcomes,
     }
     report_file = Path(report_path)

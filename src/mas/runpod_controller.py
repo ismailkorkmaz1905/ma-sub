@@ -234,14 +234,32 @@ def _persist_windows_user_pod_id(pod_id):
     os.environ["RUNPOD_POD_ID"] = pod_id
 
 
+def _configured_gpu_type_ids():
+    pool = os.getenv("MAS_RUNPOD_GPU_TYPE_IDS")
+    values = (
+        [value.strip() for value in pool.split("|")]
+        if pool
+        else [str(os.getenv("MAS_RUNPOD_GPU_TYPE_ID") or "").strip()]
+    )
+    if (
+        not 1 <= len(values) <= 8
+        or any(not value or not re.fullmatch(r"[A-Za-z0-9 ._-]+", value) for value in values)
+        or len(set(values)) != len(values)
+    ):
+        raise RunPodControllerError(
+            "MAS_RUNPOD_GPU_TYPE_IDS must contain 1-8 unique GPU IDs separated by |"
+        )
+    return values
+
+
 def _migrate_capacity_bound_pod(client, pod):
     volume_id = os.getenv("MAS_RUNPOD_NETWORK_VOLUME_ID")
     data_center_id = os.getenv("MAS_RUNPOD_DATA_CENTER_ID")
-    gpu_type_id = os.getenv("MAS_RUNPOD_GPU_TYPE_ID")
-    if not volume_id or not data_center_id or not gpu_type_id:
+    gpu_type_ids = _configured_gpu_type_ids()
+    if not volume_id or not data_center_id:
         raise RunPodControllerError(
             "automatic Pod migration requires MAS_RUNPOD_NETWORK_VOLUME_ID, "
-            "MAS_RUNPOD_DATA_CENTER_ID and MAS_RUNPOD_GPU_TYPE_ID"
+            "MAS_RUNPOD_DATA_CENTER_ID and a configured GPU type"
         )
     if pod.get("desiredStatus") != "EXITED":
         raise RunPodControllerError("refusing migration because the old Pod is not EXITED")
@@ -264,7 +282,7 @@ def _migrate_capacity_bound_pod(client, pod):
         "dockerStartCmd": [],
         "env": dict(pod.get("env") or {}),
         "gpuCount": 1,
-        "gpuTypeIds": [gpu_type_id],
+        "gpuTypeIds": gpu_type_ids,
         "gpuTypePriority": "availability",
         "imageName": pod.get("imageName"),
         "interruptible": False,

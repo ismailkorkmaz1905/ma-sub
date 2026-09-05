@@ -82,6 +82,7 @@ def test_client_create_pod_uses_single_json_request(monkeypatch):
 
 
 def test_capacity_migration_preserves_exact_network_volume(monkeypatch):
+    monkeypatch.delenv("MAS_RUNPOD_GPU_TYPE_IDS", raising=False)
     for name, value in {
         "MAS_RUNPOD_NETWORK_VOLUME_ID": "volume123",
         "MAS_RUNPOD_DATA_CENTER_ID": "EU-RO-1",
@@ -140,6 +141,58 @@ def test_capacity_migration_preserves_exact_network_volume(monkeypatch):
     assert client.payload["dataCenterIds"] == ["EU-RO-1"]
     assert replacement.pod_id == "newpod"
     assert persisted == ["newpod"]
+
+
+def test_capacity_migration_can_select_from_bounded_gpu_pool(monkeypatch):
+    monkeypatch.setenv("MAS_RUNPOD_NETWORK_VOLUME_ID", "volume123")
+    monkeypatch.setenv("MAS_RUNPOD_DATA_CENTER_ID", "EU-RO-1")
+    monkeypatch.setenv(
+        "MAS_RUNPOD_GPU_TYPE_IDS",
+        "NVIDIA RTX A5000|NVIDIA A40|NVIDIA GeForce RTX 4090",
+    )
+    monkeypatch.setenv("MAS_RUNPOD_MAX_COST_PER_HR", "0.75")
+    monkeypatch.setattr(
+        runpod_controller, "_persist_windows_user_pod_id", lambda _pod_id: None
+    )
+
+    class Client:
+        pod_id = "oldpod"
+        api_key = "secret"
+        timeout = 15
+        attempts = 3
+        sleep = staticmethod(lambda _seconds: None)
+
+        def get_network_volume(self, _volume_id):
+            return {"id": "volume123", "dataCenterId": "EU-RO-1"}
+
+        def terminate(self):
+            pass
+
+        def create_pod(self, payload):
+            self.payload = payload
+            return {
+                "id": "newpod",
+                "networkVolumeId": "volume123",
+                "costPerHr": 0.44,
+            }
+
+    client = Client()
+    pod = {
+        "desiredStatus": "EXITED",
+        "networkVolumeId": "volume123",
+        "volumeInGb": 0,
+        "imageName": "runpod/image",
+        "ports": ["22/tcp"],
+    }
+
+    runpod_controller._migrate_capacity_bound_pod(client, pod)
+
+    assert client.payload["gpuTypeIds"] == [
+        "NVIDIA RTX A5000",
+        "NVIDIA A40",
+        "NVIDIA GeForce RTX 4090",
+    ]
+    assert client.payload["gpuTypePriority"] == "availability"
 
 
 def test_wait_requires_running_ip_and_ssh_mapping():

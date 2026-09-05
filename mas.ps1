@@ -17,6 +17,7 @@ $userEnvironmentNames = @(
     "MAS_RUNPOD_NETWORK_VOLUME_ID",
     "MAS_RUNPOD_DATA_CENTER_ID",
     "MAS_RUNPOD_GPU_TYPE_ID",
+    "MAS_RUNPOD_GPU_TYPE_IDS",
     "MAS_RUNPOD_MAX_COST_PER_HR"
 )
 foreach ($name in $userEnvironmentNames) {

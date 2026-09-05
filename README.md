@@ -23,10 +23,9 @@ Production code lives under `src/mas/` and runs through `./mas`. Notebooks and t
 ## Requirements
 
 - Python 3.11
-- NVIDIA GPU with a working CUDA runtime for ASR, acoustic review, and forced alignment
-- `ffmpeg`, `ffprobe`, Git, and `rclone`
-- A configured `rclone` Google Drive remote
-- A RunPod Pod ID and API key when automatic provider shutdown is expected
+- Git, OpenSSH, and the generated RunPod SSH private key on the Windows controller
+- A configured local `rclone` Google Drive remote; its config is copied to the Pod only for the run
+- A RunPod Pod ID and API key for automatic start and externally verified stop
 - A Gmail app password when email stage notifications are expected
 - A Netscape-format YouTube cookies file when authenticated source download is required
 
@@ -62,17 +61,18 @@ export MAS_NOTIFY_TO='your.account@gmail.com'
 export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
 ```
 
-Start a new strict run:
+Start a new strict run. Episode 11 is the first non-EP12 test candidate:
 
 ```bash
-./mas run 13
+./mas run 11
 ```
 
-On Windows PowerShell, use `.\mas.ps1 run 13`. No RunPod credentials are
-required for `doctor`, tests, source discovery, or an offline fixture. A full
-episode run requires a CUDA-capable environment. `RUNPOD_POD_ID` and
-`RUNPOD_API_KEY` are needed only when the run is executing on a RunPod Pod and
-automatic shutdown is expected.
+On Windows PowerShell, use `.\mas.ps1 run 11`. This production command validates
+all local secrets and files before spending money, starts the configured EXITED
+RunPod, waits for API and SSH readiness, uploads the clean Git commit and
+short-lived secrets, streams output into the local run log, and externally stops
+and polls the Pod to EXITED on every exit path. It refuses a dirty repository or
+an already-running Pod. Offline fixture runs stay local.
 
 For a new episode, MAS searches the official `@muhtemelaskdizi` videos page and
 accepts only the exact full-episode title equivalent to `Muhtemel Ask 13. Bolum`.
@@ -84,10 +84,16 @@ explicit operator override before the episode is initialized.
 Resume the same run after a Turkish correction or Indonesian translation handoff:
 
 ```bash
-./mas run 13
+./mas run 11
 ```
 
-The CLI prints the exact ZIP path it expects when a handoff blocks progress. Put only that returned ZIP in `translation_output/`, then run the same resume command. Never edit source media, pack manifests, immutable IDs, block order, Turkish text in the Indonesian return, or timing in a translation return.
+When a handoff blocks progress, the controller downloads the exact input ZIP to
+the local episode `translation_input/` directory and stops the Pod. Put only the
+returned ZIP at the exact printed path under local `translation_output/`, then
+run the same command. The controller uploads that return ZIP and resumes the
+persistent remote checkpoint. Never edit source media, pack manifests, immutable
+IDs, block order, Turkish text in the Indonesian return, or timing in a
+translation return.
 
 Useful operator commands:
 
@@ -140,6 +146,7 @@ a no-progress watchdog.
 - Strict outputs live under `final/`. Emergency outputs live under `emergency/` and cannot create or replace strict markers.
 - Local file existence is not delivery. Drive publication passes only after remote byte count and SHA-256 readback match.
 - Drive is a delivery target, not a repository mirror. Only the final MKV, Turkish SRT, and Indonesian SRT files are uploaded into each episode folder. Source media, logs, reports, code, and intermediate artifacts stay out of Drive.
+- Episode 12 already contains retained historical deliverables. Before a real run publishes an existing exact filename, preflight must inventory the prior remote object and preserve auditable byte-count and SHA-256 evidence. Do not silently overwrite or delete it.
 - A RunPod stop response is a request, not proof of zero billing. Verify provider state from outside the pod.
 
 ## RunPod
@@ -155,11 +162,16 @@ export MAS_GMAIL_ADDRESS='your.account@gmail.com'
 export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
 export MAS_NOTIFY_TO='your.account@gmail.com'
 export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
-./runpod/run-episode.sh 13
+./runpod/run-episode.sh 11
 ```
 
-`run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. On completion, failure, handoff wait, or watchdog termination, it requests a provider-side stop through RunPod's REST API.
+`run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. Under the local controller, the controller owns secret cleanup and externally verified shutdown. A standalone in-Pod run retains its provider-side failure-stop fallback.
 
-The current local CLI does not start a stopped RunPod or open a remote shell. Until the local controller is implemented, Pod startup and remote command launch remain explicit operator steps. Do not start paid compute until the repository, secrets, cookies, and Drive remote are ready.
+The controller, complete channel discovery, source identity guards, download
+watchdogs, strict GPU/Drive preflight, handoff transfer, and external shutdown
+polling are implemented and covered by local tests. Real Pod startup, SSH,
+CUDA inference, Drive upload/readback, and provider shutdown remain unverified
+until the first paid episode run. The controller never starts the Pod during
+setup, `doctor`, tests, status, or fixture runs.
 
 Keep provider keys and pipeline credentials in environment secrets, never in the repository or command history. Stopping a Pod releases its GPU but may retain billable volume storage. A Pod with a network volume may require termination instead of stop after artifacts are verified.

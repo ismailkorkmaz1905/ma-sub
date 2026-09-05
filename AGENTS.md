@@ -8,7 +8,7 @@ Start by reading `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`
 
 ## Repository boundaries
 
-- Use `main` as the sole maintained production branch. Consolidate pending implementation work into `main` and close obsolete feature branches and pull requests after their commits are preserved.
+- Use `main` as the sole maintained production branch. PR #1 is merged and the obsolete feature branch has been deleted.
 - Do not create a stable tag. A stable release requires Astra review and a real GPU episode run.
 - Preserve user changes in a dirty worktree.
 - Keep source media immutable after its SHA-256 is recorded.
@@ -16,11 +16,12 @@ Start by reading `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`
 - Never weaken schema, hashes, immutable fields, translation authority, timing rules, overlap rules, or subtitle QA to make a test pass.
 - Keep strict and emergency outputs, receipts, markers, and paths completely separate.
 - Do not report Drive delivery as PASS before remote byte-count and SHA-256 readback match.
+- Before publishing an exact Drive filename that already exists, inventory and preserve the prior object with auditable byte-count and SHA-256 evidence. Never silently replace retained Episode 12 artifacts.
 - Different known speakers may overlap, but their text must never be merged. Same-speaker overlap fails. Unknown-speaker overlap remains review evidence.
 - Network work must have finite retries, connection/request timeouts, and a no-progress watchdog.
 - Keep credentials, Gmail app passwords, RunPod keys, rclone configuration, and YouTube cookies out of Git. Use environment variables or provider secrets.
 - Start paid RunPod compute only when an operator starts a real episode run. The controller must use bounded readiness timeouts, stream logs, preserve checkpoints, and verify shutdown from outside the Pod on every exit path.
-- Treat the 50 GB network volume as a fixed `$3.50/month` cost at the observed `$0.07/GB/month` rate. File deletion does not reduce that allocation; permanent volume deletion requires preserved deliverables and explicit user approval.
+- The last recorded 50 GB network-volume rate was `$0.07/GB/month`, deriving to `$3.50/month`; the exact observation time was not retained. Re-query provider state and pricing before cost decisions. File deletion does not reduce the allocation; permanent volume deletion requires preserved deliverables and explicit user approval.
 
 ## Required workflow
 
@@ -39,15 +40,15 @@ Start by reading `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`
 git status --short --branch
 & .\.venv\Scripts\python.exe -m pytest -q tests
 git diff --check
-./mas doctor
-./mas status 13
+.\mas.ps1 doctor
+.\mas.ps1 status 13
 ```
 
 Production entrypoints:
 
 ```bash
-./mas run 13 --source-url 'SOURCE_URL'
-./mas run 13
+./mas run 11 --source-url 'SOURCE_URL'
+./mas run 11
 ```
 
 ## Working style

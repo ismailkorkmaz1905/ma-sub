@@ -1,6 +1,7 @@
 import json
 import hashlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,6 +51,39 @@ def test_stage_records_elapsed_seconds_on_success_and_failure(tmp_path, monkeypa
         "[STAGE] failed: START",
         "[STAGE] failed: FAIL elapsed=3.2s",
     ]
+
+
+def test_pending_extra_audio_review_uids_are_collected_once(tmp_path, monkeypatch):
+    input_pack = tmp_path / "input.zip"
+    output_pack = tmp_path / "output.zip"
+    input_pack.touch()
+    output_pack.touch()
+    monkeypatch.setattr(
+        pipeline,
+        "read_tr_correction_pack",
+        lambda _path: SimpleNamespace(
+            speech_holes=({"hole_uid": "hole"},),
+            asr_hallucination_records=({"utterance_uid": "candidate"},),
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "validate_tr_correction_output",
+        lambda *_paths: SimpleNamespace(
+            records=(
+                {"utterance_uid": "hole", "review_required": True},
+                {"utterance_uid": "candidate", "review_required": True},
+                {"utterance_uid": "extra-1", "review_required": True},
+                {"utterance_uid": "ignored", "review_required": False},
+                {"utterance_uid": "extra-2", "review_required": True},
+            )
+        ),
+    )
+
+    assert pipeline._pending_extra_audio_review_uids(input_pack, output_pack) == (
+        "extra-1",
+        "extra-2",
+    )
 
 
 def test_drive_readback_hashes_stream_without_buffering_file(tmp_path, monkeypatch):

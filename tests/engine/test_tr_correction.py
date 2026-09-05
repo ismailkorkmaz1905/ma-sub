@@ -623,6 +623,20 @@ class TRCorrectionTests(unittest.TestCase):
         punctuation_only[0]["tr_corrected"] = self.inputs[0]["asr_text"].upper() + "!"
         validate_tr_correction_records(self.inputs[:-1], punctuation_only)
 
+    def test_lexical_deletion_reports_all_unsupported_uids(self) -> None:
+        inputs = copy.deepcopy(self.inputs[:-1])
+        outputs = _outputs(inputs)
+        outputs[0]["tr_corrected"] = "cümle 1"
+        outputs[1]["tr_corrected"] = "cümle 2"
+
+        with self.assertRaises(TRCorrectionError) as raised:
+            validate_tr_correction_records(inputs, outputs)
+
+        message = str(raised.exception)
+        self.assertIn(inputs[0]["utterance_uid"], message)
+        self.assertIn(inputs[1]["utterance_uid"], message)
+        self.assertIn("EXTRA_AUDIO_REVIEW_UIDS", message)
+
     def test_review_only_pack_refresh_rebinds_existing_text_output(self) -> None:
         inputs = copy.deepcopy(self.inputs[:-1])
         inputs[0]["coarse_end_ms"] = inputs[0]["coarse_start_ms"] + 19

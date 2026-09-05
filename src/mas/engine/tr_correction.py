@@ -1983,6 +1983,7 @@ def validate_tr_correction_records(
         )
 
     validated: list[dict[str, Any]] = []
+    unsupported_lexical_deletions: list[str] = []
     for position, (trusted, raw) in enumerate(
         zip(trusted_inputs, raw_outputs), start=1
     ):
@@ -2133,13 +2134,16 @@ def validate_tr_correction_records(
                 and not audio_reviewed
                 and review_disposition == "pending_audio_review"
             ):
-                raise TRCorrectionError(
-                    f"Correction {uid} deletes lexical ASR token(s) without an "
-                    "exact hash-bound audio review. Set review_required=true with "
-                    "pending_audio_review, then rerun 01_PREPARE_TR using "
-                    f"EXTRA_AUDIO_REVIEW_UIDS=['{uid}']."
-                )
+                unsupported_lexical_deletions.append(uid)
         validated.append(copy.deepcopy(dict(raw)))
+    if unsupported_lexical_deletions:
+        raise TRCorrectionError(
+            f"Corrections {unsupported_lexical_deletions!r} delete lexical ASR "
+            "token(s) without an exact hash-bound "
+            "audio review. Set review_required=true with pending_audio_review, "
+            "then rerun preparation using EXTRA_AUDIO_REVIEW_UIDS="
+            f"{unsupported_lexical_deletions!r}."
+        )
     return validated
 
 

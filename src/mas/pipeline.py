@@ -153,6 +153,26 @@ def _validated_source_url(value):
     return url
 
 
+def _pending_extra_audio_review_uids(tr_pack, tr_text):
+    pack_path = Path(tr_pack)
+    output_path = Path(tr_text)
+    if not pack_path.is_file() or not output_path.is_file():
+        return ()
+    pack = read_tr_correction_pack(pack_path)
+    output = validate_tr_correction_output(pack_path, output_path)
+    review_uids = {str(item["hole_uid"]) for item in pack.speech_holes}
+    review_uids.update(
+        str(item["utterance_uid"])
+        for item in pack.asr_hallucination_records
+    )
+    return tuple(
+        str(record["utterance_uid"])
+        for record in output.records
+        if record["review_required"] is True
+        and str(record["utterance_uid"]) not in review_uids
+    )
+
+
 def _resolve_source_url(url_path, state, episode, requested_url=None):
     existing = None
     invalid_existing = False
@@ -218,11 +238,19 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     _stage(state_path, state, "audio", prepare_audio)
     audio = holder["audio"]
 
+    tr_pack = dirs["translation_input"] / f"{name}_TR_CORRECTION_PACK.zip"
+    tr_text = dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip"
+    extra_audio_review_uids = _pending_extra_audio_review_uids(tr_pack, tr_text)
+
     def transcribe():
         _source_guard(state, download.video_path)
         data = transcribe_raw_audio(
             audio.audio_path, dirs["prepare"], episode=episode,
-            config=RawASRConfig(model_name=series["whisper_model"], allow_cpu_fallback=False),
+            config=RawASRConfig(
+                model_name=series["whisper_model"],
+                allow_cpu_fallback=False,
+                extra_audio_review_uids=extra_audio_review_uids,
+            ),
             captions_path=download.captions_path,
             canonical_names=tuple(names["canonical_names"]),
             religious_terms=tuple(item["source"] for item in religious["terms"]),
@@ -236,7 +264,6 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     _stage(state_path, state, "raw_asr", transcribe)
     raw = holder["raw"]
 
-    tr_pack = dirs["translation_input"] / f"{name}_TR_CORRECTION_PACK.zip"
     def make_tr_pack():
         manifest = create_tr_correction_pack(
             raw["correction_utterances"], raw["speech_hole_records"], tr_pack,
@@ -247,7 +274,6 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         return {"path": str(tr_pack), "sha256": sha256_file(tr_pack), "input_sha256": manifest["input_sha256"]}
     _stage(state_path, state, "tr_pack", make_tr_pack)
 
-    tr_text = dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip"
     if not tr_text.is_file():
         set_stage(state_path, state, "tr_return", "blocked", expected=str(tr_text))
         notify(episode, "Türkçe düzeltme bekleniyor", str(tr_text))

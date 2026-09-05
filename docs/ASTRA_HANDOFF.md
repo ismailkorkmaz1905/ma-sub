@@ -10,6 +10,8 @@ The configured RunPod is `p54vvbyu76eztn` (`muhtemel-ask-ep12`). Its API credent
 
 Episode 12 has retained historical MKV and subtitle material on Drive. Its exact remote sizes and hashes were not recorded. Do not use Episode 12 for the first real run. The local RunPod controller, complete source discovery, source identity checks, download watchdog, strict Pod preflight, handoff transfer, and fail-closed Drive publication are implemented and locally tested. No successful real-environment runtime verification is claimed.
 
+The third Episode 11 attempt verified SSH, cookie and rclone setup but failed before inference because `uv pip sync` omitted Torch transitive dependencies; `typing_extensions` was the observed missing import. The controller verified `EXITED` after `360.016 seconds`. Bootstrap now reuses the persistent `/workspace` environment and caches and uses dependency-resolving `uv pip install`. The corrected bootstrap has not yet been exercised on the paid Pod.
+
 ## Review commands
 
 Windows:

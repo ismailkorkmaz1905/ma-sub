@@ -36,7 +36,7 @@ Linux, macOS, or RunPod:
 
 ```bash
 uv venv --python 3.11 .venv
-uv pip sync --python .venv/bin/python requirements.lock
+uv pip install --python .venv/bin/python --requirements requirements.lock
 ./mas doctor
 ./mas test
 ```
@@ -45,7 +45,7 @@ Windows PowerShell:
 
 ```powershell
 uv venv --python 3.11 .venv
-uv pip sync --python .venv\Scripts\python.exe requirements.lock
+uv pip install --python .venv\Scripts\python.exe --requirements requirements.lock
 .\mas.ps1 doctor
 .\mas.ps1 test
 ```

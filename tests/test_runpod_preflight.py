@@ -1,8 +1,12 @@
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from mas import cli
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 REQUIRED_ENV = {
@@ -75,3 +79,11 @@ def test_strict_runpod_doctor_fails_before_remote_check(tmp_path, monkeypatch, c
     assert "cuda: UNAVAILABLE" in output.err
     assert "rclone_remote: not configured" in output.err
     assert calls == [["rclone", "listremotes"]]
+
+
+def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
+    script = (ROOT / "runpod" / "bootstrap.sh").read_text(encoding="utf-8")
+    assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"' in script
+    assert 'if [[ ! -x "$VENV/bin/python" ]]; then' in script
+    assert 'uv pip install --python "$VENV/bin/python" --requirements requirements.lock' in script
+    assert "uv pip sync" not in script

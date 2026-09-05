@@ -237,6 +237,9 @@ def _write_runtime_env(path, values, commit):
         "MAS_RCLONE_CONFIG": "/workspace/.mas-secrets/rclone.conf",
         "MAS_GIT_COMMIT": commit,
         "MAS_VENV_DIR": "/workspace/ma-sub/.venv",
+        "UV_CACHE_DIR": "/workspace/.cache/uv",
+        "HF_HOME": "/workspace/.cache/huggingface",
+        "TORCH_HOME": "/workspace/.cache/torch",
         "MAS_EXTERNAL_RUNPOD_CONTROLLER": "1",
     }
     for name in ("MAS_MAX_RUNTIME_SECONDS", "MAS_IDLE_TIMEOUT_SECONDS"):

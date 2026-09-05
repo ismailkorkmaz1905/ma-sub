@@ -2,6 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${MAS_VENV_DIR:-$ROOT/.venv}"
+UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"
+export UV_CACHE_DIR
 cd "$ROOT"
 
 if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
@@ -28,6 +30,9 @@ command -v uv >/dev/null 2>&1 || {
     https://astral.sh/uv/0.8.14/install.sh | sh
 }
 
-uv venv --python 3.11 "$VENV"
-uv pip sync --python "$VENV/bin/python" requirements.lock
+mkdir -p "$UV_CACHE_DIR"
+if [[ ! -x "$VENV/bin/python" ]]; then
+  uv venv --python 3.11 "$VENV"
+fi
+uv pip install --python "$VENV/bin/python" --requirements requirements.lock
 PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod

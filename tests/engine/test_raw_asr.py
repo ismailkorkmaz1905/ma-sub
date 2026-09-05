@@ -93,8 +93,8 @@ class RawASRV2Tests(unittest.TestCase):
     def test_explicit_review_budget_does_not_relax_automatic_detector_bound(self) -> None:
         raw_asr_v2_module._require_asr_hallucination_candidate_budget(
             automatic_count=192,
-            explicit_only_count=704,
-            total_count=896,
+            explicit_only_count=832,
+            total_count=1024,
             reviewable_count=900,
             candidate_reason_counts={},
         )
@@ -107,12 +107,12 @@ class RawASRV2Tests(unittest.TestCase):
                 candidate_reason_counts={},
             )
         with self.assertRaisesRegex(
-            TranscriptionError, "explicit_only_candidates=705"
+            TranscriptionError, "explicit_only_candidates=833"
         ):
             raw_asr_v2_module._require_asr_hallucination_candidate_budget(
                 automatic_count=0,
-                explicit_only_count=705,
-                total_count=705,
+                explicit_only_count=833,
+                total_count=833,
                 reviewable_count=900,
                 candidate_reason_counts={},
             )

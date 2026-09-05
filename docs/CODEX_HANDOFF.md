@@ -4,10 +4,10 @@
 
 - Repository: `ismailkorkmaz1905/ma-sub`
 - Production branch: `main`
-- Pre-consolidation work: `engineering/ep12-reliability` and [PR #1](https://github.com/ismailkorkmaz1905/ma-sub/pull/1), pending consolidation into `main`
-- Implementation baseline HEAD before this handoff-document change: `63bd7bbd353ceb5d30de579c92c6999586f68132`
-- Recorded implementation worktree before this handoff-document change: clean and synchronized with `origin/engineering/ep12-reliability`; re-check after consolidation into `main`
-- Recorded PR checks: both test jobs and both Dockerfile jobs passed on 2026-09-05
+- Consolidation: [PR #1](https://github.com/ismailkorkmaz1905/ma-sub/pull/1) is merged, and the obsolete `engineering/ep12-reliability` branch was deleted locally and remotely.
+- Implementation baseline HEAD before this snapshot update: `538f9ce0c653c9c1c718c54fd85a2d5b6435047e`
+- Recorded implementation worktree: clean and synchronized with `origin/main`
+- Recorded pre-consolidation PR checks: both test jobs and both Dockerfile jobs passed on 2026-09-05
 
 Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr view 1` because this snapshot can become stale.
 
@@ -30,7 +30,7 @@ Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr vi
 
 ## Validation recorded
 
-- Full local suite: `431 passed, 32 skipped` in `35.30 seconds`.
+- Full local suite: `444 passed, 32 skipped` in `33.90 seconds`.
 - Ported engine suite: `342 passed, 31 skipped`.
 - Cross-speaker focused suite: `82 passed`.
 - Local Python compilation and `git diff --check`: passed.
@@ -38,6 +38,7 @@ Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr vi
 - Docker was not available in the local Windows environment, so a local image build was not performed.
 - Gmail SMTP notification was verified by a real test email to the configured recipient. The app password remains outside Git in the Windows user environment.
 - A user-exported 3,225-byte Netscape cookie file was copied byte-for-byte to `C:\Users\Ismail\.config\ma-sub\youtube-cookies.txt`, restricted to the current Windows user, and bound through the persistent user-level `MAS_YTDLP_COOKIES` variable. Its 23 non-comment records and YouTube domain were validated without logging cookie values. Authenticated source acquisition and the equivalent RunPod secret-file mount remain unverified.
+- Official-channel discovery was exercised live with the cookie file and resolved Episode 12 to `https://www.youtube.com/watch?v=yVCzw_dFZA8`. Media download itself remains unverified in the production pipeline.
 - Real full-episode GPU inference was not performed.
 - Live Google Drive upload/readback was not performed.
 - Live RunPod stop and external billing-state verification were not performed.
@@ -55,7 +56,7 @@ Skipped local tests include Windows cases that require symlink privilege. Treat 
 7. Exercise success, failure, handoff wait, maximum-runtime, and idle-watchdog shutdown paths.
 8. From outside the Pod, confirm provider state is `EXITED` and no active GPU compute charge remains.
 9. Run the Astra prompt in `docs/ASTRA_REVIEW_PROMPT.md` against the final commit and retained runtime evidence.
-10. Consolidate the implementation into the sole maintained `main` branch and close obsolete branch/PR state. Do not create a stable tag until all real-environment gates pass and the user decides.
+10. Keep `main` as the sole maintained branch. Do not create a stable tag until all real-environment gates pass and the user decides.
 
 ## Secret handling
 

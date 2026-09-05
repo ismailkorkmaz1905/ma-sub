@@ -52,7 +52,7 @@ docker build -t ma-sub:astra .
 
 Review every acceptance boundary:
 - The public project is MAS, not separate V1/V2 products. Remaining v2 identifiers must be justified only by legacy persisted-contract compatibility.
-- ./mas run EPISODE --source-url URL starts a run; ./mas run EPISODE resumes safely.
+- ./mas run EPISODE discovers the exact full episode on the official channel for a new run and resumes safely after initialization; --source-url remains an explicit pre-initialization operator override.
 - Source bytes and SHA-256 remain immutable across every stage and resume.
 - Checkpoints are atomic and bound to source, inputs, configuration, code identity, outputs, and completed UIDs. Stale bindings fail closed.
 - GPU-required ASR, acoustic review, and forced alignment fail before work when CUDA is unavailable. No silent CPU fallback exists.

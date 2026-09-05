@@ -47,7 +47,7 @@ export RUNPOD_API_KEY='API_KEY'
 export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles'
 export MAS_MAX_RUNTIME_SECONDS=14400
 export MAS_IDLE_TIMEOUT_SECONDS=1800
-./runpod/run-episode.sh 13 --source-url 'SOURCE_URL'
+./runpod/run-episode.sh 13
 ```
 
 For each ChatGPT handoff, preserve the returned ZIP exactly and resume with:

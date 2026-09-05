@@ -46,10 +46,37 @@ DEFAULT_MAX_WORD_DURATION_MS = 2_500
 DEFAULT_MAX_OUTWARD_DRIFT_MS = 500
 EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
+ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
 
 
 class ForcedAlignmentError(RuntimeError):
     """Raised when corrected text cannot be aligned without guessed timing."""
+
+
+def _alignment_model_text(value: str) -> str:
+    mapped = value.translate(
+        str.maketrans(
+            {
+                "Ç": "C",
+                "Ğ": "G",
+                "İ": "I",
+                "Ö": "O",
+                "Ş": "S",
+                "Ü": "U",
+                "ç": "c",
+                "ğ": "g",
+                "ı": "i",
+                "ö": "o",
+                "ş": "s",
+                "ü": "u",
+            }
+        )
+    )
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKD", mapped)
+        if not unicodedata.combining(character)
+    )
 
 
 def _require_integer(value: Any, field: str, *, minimum: int = 0) -> int:
@@ -557,8 +584,12 @@ def _normalize_aligned_words(
         previous_end_ms = end_ms
         accepted.append((text, start_ms, end_ms, score))
 
-    expected_lexemes = [_lexeme(token) for token in expected_tokens]
-    actual_lexemes = [_lexeme(word[0]) for word in accepted]
+    expected_lexemes = [
+        _lexeme(_alignment_model_text(token)) for token in expected_tokens
+    ]
+    actual_lexemes = [
+        _lexeme(_alignment_model_text(word[0])) for word in accepted
+    ]
     if actual_lexemes != expected_lexemes:
         missing_at = next(
             (
@@ -856,6 +887,8 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
         )
     if provenance.get("interpolation") not in ("disabled:none", "disabled:ignore"):
         raise ForcedAlignmentError("forced alignment interpolation was not disabled")
+    if provenance.get("text_normalization") != ALIGNMENT_TEXT_NORMALIZATION:
+        raise ForcedAlignmentError("forced alignment text_normalization is invalid")
     min_word_score = _finite_number(
         provenance.get("min_word_score"), "provenance min_word_score"
     )
@@ -1467,7 +1500,7 @@ def align_corrected_segments(
             {
                 "start": coarse["start_ms"] / 1000.0,
                 "end": coarse["end_ms"] / 1000.0,
-                "text": coarse["text"],
+                "text": _alignment_model_text(str(coarse["text"])),
             }
         ]
         try:
@@ -1585,6 +1618,7 @@ def align_corrected_segments(
             "language": language,
             "device": device,
             "interpolation": interpolation_mode,
+            "text_normalization": ALIGNMENT_TEXT_NORMALIZATION,
             "min_word_score": min_word_score,
             "contextual_unchanged_min_word_score": (
                 CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
@@ -1608,6 +1642,8 @@ def align_corrected_segments(
 
 
 __all__ = [
+    "ALIGNMENT_TEXT_NORMALIZATION",
+    "AUDIO_REVIEW_SCORE_CONTEXT",
     "CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE",
     "DEFAULT_MAX_OUTWARD_DRIFT_MS",
     "DEFAULT_MAX_WORD_DURATION_MS",

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from mas.engine.forced_align import (
+    ALIGNMENT_TEXT_NORMALIZATION,
     AUDIO_REVIEW_SCORE_CONTEXT,
     CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE,
     DEFAULT_MAX_OUTWARD_DRIFT_MS,
@@ -240,6 +241,10 @@ class ForcedAlignmentTests(unittest.TestCase):
         )
         self.assertEqual(data["provenance"]["interpolation"], "disabled:ignore")
         self.assertEqual(
+            data["provenance"]["text_normalization"],
+            ALIGNMENT_TEXT_NORMALIZATION,
+        )
+        self.assertEqual(
             data["provenance"]["min_word_score"], DEFAULT_MIN_WORD_SCORE
         )
         self.assertEqual(
@@ -291,8 +296,17 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertTrue(
             all(call["interpolate_method"] == "ignore" for call in fake.align_calls)
         )
+        self.assertEqual(
+            [call["transcript"][0]["text"] for call in fake.align_calls],
+            ["Merhaba, dunya!", "Nasilsin?"],
+        )
         json.dumps(data, ensure_ascii=False, allow_nan=False)
         self.assertEqual(validate_forced_alignment_data(data)["aligned_word_count"], 3)
+
+        tampered = copy.deepcopy(data)
+        tampered["provenance"].pop("text_normalization")
+        with self.assertRaisesRegex(ForcedAlignmentError, "text_normalization"):
+            validate_forced_alignment_data(tampered)
 
     def test_none_is_used_when_align_api_explicitly_supports_it(self) -> None:
         fake = _NoneInterpolationWhisperX(

@@ -1,4 +1,4 @@
-"""Versioned EP12 evidence checks, deliberately separate from legacy V2 gates.
+"""Versioned EP12 evidence checks for the maintained production engine.
 
 No text is invented from report summaries. Timing changes cannot modify text.
 Cross-speaker overlap is classified, not merged, and requires explicit speaker

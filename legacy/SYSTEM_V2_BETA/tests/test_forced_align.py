@@ -1,0 +1,1044 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import math
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+
+from src.forced_align import (
+    DEFAULT_MAX_OUTWARD_DRIFT_MS,
+    DEFAULT_MAX_WORD_DURATION_MS,
+    DEFAULT_MIN_WORD_SCORE,
+    DEFAULT_TURKISH_ALIGNMENT_MODEL,
+    EDITED_TOKEN_MIN_WORD_SCORE,
+    REVIEW_WORD_SCORE,
+    SUPPORTED_WHISPERX_VERSION,
+    TIMING_SOURCE,
+    ForcedAlignmentError,
+    align_corrected_segments,
+    validate_coarse_segments,
+    validate_forced_alignment_data,
+)
+from src.segment_v2 import build_blocks
+
+
+class _FakeWhisperX:
+    __version__ = "3.8.6"
+
+    def __init__(self, results: list[dict[str, Any]]) -> None:
+        self.results = list(results)
+        self.audio_calls: list[str] = []
+        self.model_calls: list[dict[str, Any]] = []
+        self.align_calls: list[dict[str, Any]] = []
+
+    def load_audio(self, path: str) -> object:
+        self.audio_calls.append(path)
+        return object()
+
+    def load_align_model(
+        self, *, language_code: str, device: str, model_name: str
+    ) -> tuple[object, dict[str, str]]:
+        self.model_calls.append(
+            {
+                "language_code": language_code,
+                "device": device,
+                "model_name": model_name,
+            }
+        )
+        return object(), {"language": language_code, "type": "huggingface"}
+
+    def align(
+        self,
+        transcript: list[dict[str, Any]],
+        model: object,
+        metadata: dict[str, str],
+        audio: object,
+        device: str,
+        interpolate_method: str = "nearest",
+        return_char_alignments: bool = False,
+        print_progress: bool = False,
+    ) -> dict[str, Any]:
+        self.align_calls.append(
+            {
+                "transcript": transcript,
+                "interpolate_method": interpolate_method,
+                "return_char_alignments": return_char_alignments,
+                "print_progress": print_progress,
+            }
+        )
+        return self.results.pop(0)
+
+
+class _NoneInterpolationWhisperX(_FakeWhisperX):
+    def align(
+        self,
+        transcript: list[dict[str, Any]],
+        model: object,
+        metadata: dict[str, str],
+        audio: object,
+        device: str,
+        interpolate_method: str | None = None,
+        return_char_alignments: bool = False,
+        print_progress: bool = False,
+    ) -> dict[str, Any]:
+        return super().align(
+            transcript,
+            model,
+            metadata,
+            audio,
+            device,
+            interpolate_method=interpolate_method,  # type: ignore[arg-type]
+            return_char_alignments=return_char_alignments,
+            print_progress=print_progress,
+        )
+
+
+class _MutatingWhisperX(_FakeWhisperX):
+    def align(
+        self,
+        transcript: list[dict[str, Any]],
+        model: object,
+        metadata: dict[str, str],
+        audio: object,
+        device: str,
+        interpolate_method: str = "nearest",
+        return_char_alignments: bool = False,
+        print_progress: bool = False,
+    ) -> dict[str, Any]:
+        Path(self.audio_calls[-1]).write_bytes(b"changed-during-alignment")
+        return super().align(
+            transcript,
+            model,
+            metadata,
+            audio,
+            device,
+            interpolate_method=interpolate_method,
+            return_char_alignments=return_char_alignments,
+            print_progress=print_progress,
+        )
+
+
+def _result(
+    words: list[dict[str, Any]], *, add_default_scores: bool = True
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(words)
+    if add_default_scores:
+        for word in normalized:
+            word.setdefault("score", 0.90)
+    return {
+        "segments": [{"text": "unused", "words": normalized}],
+        "word_segments": normalized,
+    }
+
+
+def _coarse() -> list[dict[str, Any]]:
+    return [
+        {
+            "start_ms": 1_000,
+            "end_ms": 3_000,
+            "text": "Merhaba, dünya!",
+            "asr_text": "Merhaba dünya",
+            "deletion_audio_reviewed": False,
+            "utterance_uid": "utt-1",
+        },
+        {
+            "start_ms": 4_000,
+            "end_ms": 5_500,
+            "text": "Nasılsın?",
+            "asr_text": "Nasılsın",
+            "deletion_audio_reviewed": False,
+            "utterance_uid": "utt-2",
+        },
+    ]
+
+
+class ForcedAlignmentTests(unittest.TestCase):
+    def _audio(self, directory: str) -> Path:
+        path = Path(directory, "audio.flac")
+        path.write_bytes(b"synthetic-audio-placeholder")
+        return path
+
+    def test_success_is_json_ready_and_preserves_provenance(self) -> None:
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba,", "start": 1.12, "end": 1.55, "score": 0.94},
+                        {"word": "dünya!", "start": 1.60, "end": 2.08, "score": 0.91},
+                    ]
+                ),
+                _result(
+                    [{"word": "Nasılsın?", "start": 4.18, "end": 4.77, "score": 0.93}]
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), _coarse(), whisperx_module=fake
+            )
+
+        self.assertEqual(data["timing_source"], TIMING_SOURCE)
+        self.assertEqual(
+            data["audio_sha256"],
+            hashlib.sha256(b"synthetic-audio-placeholder").hexdigest(),
+        )
+        self.assertEqual(data["provenance"]["whisperx_version"], "3.8.6")
+        self.assertEqual(
+            data["provenance"]["whisperx_version"], SUPPORTED_WHISPERX_VERSION
+        )
+        self.assertEqual(
+            data["provenance"]["model_name"], DEFAULT_TURKISH_ALIGNMENT_MODEL
+        )
+        self.assertEqual(data["provenance"]["interpolation"], "disabled:ignore")
+        self.assertEqual(
+            data["provenance"]["min_word_score"], DEFAULT_MIN_WORD_SCORE
+        )
+        self.assertEqual(
+            data["provenance"]["review_word_score"], REVIEW_WORD_SCORE
+        )
+        self.assertEqual(
+            data["provenance"]["edited_token_min_word_score"],
+            EDITED_TOKEN_MIN_WORD_SCORE,
+        )
+        self.assertEqual(
+            data["provenance"]["max_word_duration_ms"],
+            DEFAULT_MAX_WORD_DURATION_MS,
+        )
+        self.assertEqual(
+            data["provenance"]["max_outward_drift_ms"],
+            DEFAULT_MAX_OUTWARD_DRIFT_MS,
+        )
+        self.assertEqual([segment["utterance_uid"] for segment in data["segments"]], ["utt-1", "utt-2"])
+        self.assertEqual([word["word_index"] for word in data["words"]], [1, 2, 3])
+        self.assertRegex(data["alignment_sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(
+            all(
+                word["alignment_sha256"] == data["alignment_sha256"]
+                for word in data["words"]
+            )
+        )
+        self.assertEqual(data["segments"][0]["start_ms"], 1_120)
+        self.assertEqual(data["segments"][0]["end_ms"], 2_080)
+        self.assertEqual(data["report"]["unaligned_lexical_token_count"], 0)
+        self.assertEqual(data["report"]["unaligned_word_count"], 0)
+        self.assertEqual(data["report"]["negative_word_gap_count"], 0)
+        self.assertEqual(
+            data["report"]["alignment_sha256"], data["alignment_sha256"]
+        )
+        self.assertEqual(data["report"]["synthetic_timing_count"], 0)
+        self.assertEqual(data["report"]["missing_alignment_score_count"], 0)
+        self.assertEqual(data["report"]["low_alignment_score_count"], 0)
+        self.assertEqual(data["report"]["overlong_alignment_word_count"], 0)
+        self.assertEqual(data["report"]["outward_drift_violation_count"], 0)
+        self.assertEqual(data["report"]["low_score_edited_token_count"], 0)
+        self.assertEqual(data["report"]["unreviewed_deleted_token_count"], 0)
+        self.assertEqual(data["report"]["edited_token_count"], 0)
+        self.assertEqual(data["report"]["edited_token_ratio"], 0.0)
+        self.assertEqual(data["report"]["review_alignment_score_count"], 0)
+        self.assertEqual(data["report"]["minimum_alignment_score"], 0.91)
+        self.assertEqual(len(fake.audio_calls), 1)
+        self.assertEqual(len(fake.model_calls), 1)
+        self.assertEqual(len(fake.align_calls), 2)
+        self.assertTrue(
+            all(call["interpolate_method"] == "ignore" for call in fake.align_calls)
+        )
+        json.dumps(data, ensure_ascii=False, allow_nan=False)
+        self.assertEqual(validate_forced_alignment_data(data)["aligned_word_count"], 3)
+
+    def test_none_is_used_when_align_api_explicitly_supports_it(self) -> None:
+        fake = _NoneInterpolationWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                        {"word": "dünya!", "start": 1.5, "end": 1.9},
+                    ]
+                )
+            ]
+        )
+        coarse = [_coarse()[0]]
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+
+        self.assertIsNone(fake.align_calls[0]["interpolate_method"])
+        self.assertEqual(data["provenance"]["interpolation"], "disabled:none")
+
+    def test_audio_mutation_during_alignment_hard_fails(self) -> None:
+        fake = _MutatingWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                        {"word": "dünya!", "start": 1.5, "end": 1.9},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "audio changed while forced alignment"
+            ):
+                align_corrected_segments(
+                    self._audio(directory), [_coarse()[0]], whisperx_module=fake
+                )
+
+    def test_missing_low_and_out_of_range_scores_hard_fail(self) -> None:
+        cases = (
+            (
+                _result(
+                    [{"word": "Nasılsın?", "start": 4.1, "end": 4.7}],
+                    add_default_scores=False,
+                ),
+                "alignment score is required",
+            ),
+            (
+                _result(
+                    [
+                        {
+                            "word": "Nasılsın?",
+                            "start": 4.1,
+                            "end": 4.7,
+                            "score": 0.149,
+                        }
+                    ]
+                ),
+                "below the required minimum",
+            ),
+            (
+                _result(
+                    [
+                        {
+                            "word": "Nasılsın?",
+                            "start": 4.1,
+                            "end": 4.7,
+                            "score": 1.01,
+                        }
+                    ]
+                ),
+                "within \\[0, 1\\]",
+            ),
+        )
+        for raw_result, message in cases:
+            with self.subTest(message=message):
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaisesRegex(ForcedAlignmentError, message):
+                        align_corrected_segments(
+                            self._audio(directory),
+                            [_coarse()[1]],
+                            whisperx_module=_FakeWhisperX([raw_result]),
+                        )
+
+    def test_configurable_minimum_score_is_digest_bound(self) -> None:
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {
+                            "word": "Nasılsın?",
+                            "start": 4.1,
+                            "end": 4.7,
+                            "score": 0.40,
+                        }
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory),
+                [_coarse()[1]],
+                min_word_score=0.35,
+                whisperx_module=fake,
+            )
+        self.assertEqual(data["provenance"]["min_word_score"], 0.35)
+        self.assertEqual(data["report"]["minimum_alignment_score"], 0.40)
+        self.assertEqual(data["report"]["review_alignment_score_count"], 1)
+
+        tampered = copy.deepcopy(data)
+        tampered["provenance"]["min_word_score"] = 0.41
+        with self.assertRaisesRegex(ForcedAlignmentError, "below provenance"):
+            validate_forced_alignment_data(tampered)
+
+    def test_canonical_score_floor_cannot_be_lowered(self) -> None:
+        fake = _FakeWhisperX(
+            [_result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}])]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "min_word_score must be within"
+            ):
+                align_corrected_segments(
+                    self._audio(directory),
+                    [_coarse()[1]],
+                    min_word_score=0.20,
+                    whisperx_module=fake,
+                )
+
+        valid = _FakeWhisperX(
+            [_result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}])]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), [_coarse()[1]], whisperx_module=valid
+            )
+        tampered = copy.deepcopy(data)
+        tampered["provenance"]["min_word_score"] = 0.20
+        with self.assertRaisesRegex(
+            ForcedAlignmentError, "provenance min_word_score must be within"
+        ):
+            validate_forced_alignment_data(tampered)
+
+    def test_score_below_beta_floor_hard_fails(self) -> None:
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {
+                            "word": "Nasılsın?",
+                            "start": 4.1,
+                            "end": 4.7,
+                            "score": 0.20,
+                        }
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "below the required minimum"
+            ):
+                align_corrected_segments(
+                    self._audio(directory), [_coarse()[1]], whisperx_module=fake
+                )
+
+    def test_inserted_token_requires_edited_token_acoustic_floor(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "Merhaba dünya",
+                "asr_text": "Merhaba",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-inserted",
+            }
+        ]
+        low_insert = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 1.1, "end": 1.4, "score": 0.9},
+                        {"word": "dünya", "start": 1.5, "end": 1.9, "score": 0.549},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "edited token 'dünya'.*edited-token minimum"
+            ):
+                align_corrected_segments(
+                    self._audio(directory), coarse, whisperx_module=low_insert
+                )
+
+        accepted = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 1.1, "end": 1.4, "score": 0.9},
+                        {"word": "dünya", "start": 1.5, "end": 1.9, "score": 0.55},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=accepted
+            )
+        self.assertEqual(
+            [word["edit_kind"] for word in data["words"]],
+            ["unchanged", "inserted"],
+        )
+        self.assertEqual(data["segments"][0]["edit_audit"]["inserted_token_count"], 1)
+        self.assertEqual(data["segments"][0]["edit_audit"]["edited_token_ratio"], 0.5)
+        self.assertEqual(data["report"]["edited_token_count"], 1)
+        self.assertEqual(data["report"]["low_score_edited_token_count"], 0)
+
+    def test_replaced_token_requires_edited_token_acoustic_floor(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "Merhaba dünya",
+                "asr_text": "Meraba dünya",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-replaced",
+            }
+        ]
+        low_replacement = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 1.1, "end": 1.4, "score": 0.549},
+                        {"word": "dünya", "start": 1.5, "end": 1.9, "score": 0.90},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ForcedAlignmentError, "edited token"):
+                align_corrected_segments(
+                    self._audio(directory), coarse, whisperx_module=low_replacement
+                )
+
+        accepted = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 1.1, "end": 1.4, "score": 0.55},
+                        {"word": "dünya", "start": 1.5, "end": 1.9, "score": 0.90},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=accepted
+            )
+        self.assertEqual(
+            [word["edit_kind"] for word in data["words"]],
+            ["replaced", "unchanged"],
+        )
+        self.assertEqual(data["segments"][0]["edit_audit"]["replaced_token_count"], 1)
+
+    def test_empty_asr_evidence_marks_every_corrected_token_inserted(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "Duydum seni",
+                "asr_text": "",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-audio-review-only",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Duydum", "start": 1.1, "end": 1.4, "score": 0.55},
+                        {"word": "seni", "start": 1.5, "end": 1.9, "score": 0.55},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+        self.assertEqual(
+            [word["edit_kind"] for word in data["words"]],
+            ["inserted", "inserted"],
+        )
+        self.assertEqual(data["segments"][0]["edit_audit"]["edited_token_ratio"], 1.0)
+
+    def test_punctuation_and_case_only_change_is_not_lexical_edit(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "Merhaba, DÜNYA!",
+                "asr_text": "merhaba dünya",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-surface-only",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "merhaba", "start": 1.1, "end": 1.4, "score": 0.30},
+                        {"word": "dünya", "start": 1.5, "end": 1.9, "score": 0.30},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+        self.assertEqual(
+            [word["edit_kind"] for word in data["words"]],
+            ["unchanged", "unchanged"],
+        )
+        self.assertEqual(data["report"]["edited_token_count"], 0)
+        self.assertEqual(data["report"]["review_alignment_score_count"], 2)
+
+    def test_turkish_dotted_and_dotless_i_case_changes_are_unchanged(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "ışık için",
+                "asr_text": "IŞIK İÇİN",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-turkish-case",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "ışık", "start": 1.1, "end": 1.4, "score": 0.30},
+                        {"word": "için", "start": 1.5, "end": 1.9, "score": 0.30},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+        self.assertEqual(
+            [word["edit_kind"] for word in data["words"]],
+            ["unchanged", "unchanged"],
+        )
+
+    def test_repeated_token_edits_are_conservative_and_deterministic(self) -> None:
+        insertion = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "evet evet",
+                "asr_text": "evet",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-repeat-insert",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "evet", "start": 1.1, "end": 1.3, "score": 0.40},
+                        {"word": "evet", "start": 1.4, "end": 1.6, "score": 0.90},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ForcedAlignmentError, "edited token"):
+                align_corrected_segments(
+                    self._audio(directory), insertion, whisperx_module=fake
+                )
+
+        deletion = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "evet",
+                "asr_text": "evet evet",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-repeat-delete",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "lexical deletions without exact audio-reviewed"
+            ):
+                align_corrected_segments(
+                    self._audio(directory),
+                    deletion,
+                    whisperx_module=_FakeWhisperX(
+                        [_result([{"word": "evet", "start": 1.1, "end": 1.4}])]
+                    ),
+                )
+
+    def test_deleted_token_requires_exact_audio_review_flag(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "Merhaba dünya",
+                "asr_text": "Merhaba güzel dünya",
+                "deletion_audio_reviewed": True,
+                "utterance_uid": "utt-reviewed-delete",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 1.1, "end": 1.4},
+                        {"word": "dünya", "start": 1.5, "end": 1.9},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+        audit = data["segments"][0]["edit_audit"]
+        self.assertEqual(audit["deleted_asr_token_count"], 1)
+        self.assertEqual(audit["unreviewed_deleted_token_count"], 0)
+        self.assertEqual(data["report"]["deleted_asr_token_count"], 1)
+
+        tampered = copy.deepcopy(data)
+        tampered["segments"][0]["deletion_audio_reviewed"] = False
+        with self.assertRaisesRegex(ForcedAlignmentError, "unreviewed deleted"):
+            validate_forced_alignment_data(tampered)
+
+    def test_word_duration_policy_is_hard_and_cannot_be_weakened(self) -> None:
+        long_coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 5_000,
+                "text": "Merhaba",
+                "asr_text": "Merhaba",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-long",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [_result([{"word": "Merhaba", "start": 1.1, "end": 3.601}])]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ForcedAlignmentError, "exceeds the maximum"):
+                align_corrected_segments(
+                    self._audio(directory), long_coarse, whisperx_module=fake
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "max_word_duration_ms cannot exceed"
+            ):
+                align_corrected_segments(
+                    self._audio(directory),
+                    [_coarse()[1]],
+                    max_word_duration_ms=2_501,
+                    whisperx_module=_FakeWhisperX(
+                        [_result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}])]
+                    ),
+                )
+
+    def test_unpadded_coarse_bounds_and_outward_drift_are_hard_bound(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_100,
+                "end_ms": 4_900,
+                "coarse_start_ms": 2_000,
+                "coarse_end_ms": 4_000,
+                "text": "Merhaba dünya",
+                "asr_text": "Merhaba dünya",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-drift",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 1.5, "end": 2.0},
+                        {"word": "dünya", "start": 4.0, "end": 4.5},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+        segment = data["segments"][0]
+        self.assertEqual(segment["coarse_start_ms"], 2_000)
+        self.assertEqual(segment["coarse_end_ms"], 4_000)
+        self.assertEqual(segment["drift_audit"]["early_outward_drift_ms"], 500)
+        self.assertEqual(segment["drift_audit"]["late_outward_drift_ms"], 500)
+        self.assertEqual(data["report"]["maximum_early_outward_drift_ms"], 500)
+        self.assertEqual(data["report"]["maximum_late_outward_drift_ms"], 500)
+
+        too_early = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 1.499, "end": 2.0},
+                        {"word": "dünya", "start": 4.0, "end": 4.5},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "exceeds max_outward_drift_ms"
+            ):
+                align_corrected_segments(
+                    self._audio(directory), coarse, whisperx_module=too_early
+                )
+
+        tampered = copy.deepcopy(data)
+        tampered["provenance"]["max_outward_drift_ms"] = 501
+        with self.assertRaisesRegex(
+            ForcedAlignmentError, "max_outward_drift_ms cannot exceed"
+        ):
+            validate_forced_alignment_data(tampered)
+
+    def test_missing_lexical_timestamp_hard_fails(self) -> None:
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                        {"word": "dünya!"},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ForcedAlignmentError, "finite number"):
+                align_corrected_segments(
+                    self._audio(directory), [_coarse()[0]], whisperx_module=fake
+                )
+
+    def test_missing_or_changed_lexical_token_hard_fails(self) -> None:
+        fake = _FakeWhisperX(
+            [_result([{"word": "Merhaba,", "start": 1.1, "end": 1.4}])]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ForcedAlignmentError, "coverage failed"):
+                align_corrected_segments(
+                    self._audio(directory), [_coarse()[0]], whisperx_module=fake
+                )
+
+    def test_punctuation_only_word_does_not_need_timestamp(self) -> None:
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                        {"word": "--"},
+                        {"word": "dünya!", "start": 1.5, "end": 1.9},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), [_coarse()[0]], whisperx_module=fake
+            )
+
+        self.assertEqual([word["text"] for word in data["words"]], ["Merhaba,", "dünya!"])
+        self.assertEqual(data["report"]["raw_punctuation_only_word_count"], 1)
+
+    def test_corrected_surface_not_whisperx_surface_is_canonical(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 3_000,
+                "text": "— Allah'ım, Dünya!",
+                "asr_text": "allahım dünya",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-canonical-surface",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "allahım", "start": 1.1, "end": 1.5},
+                        {"word": "dünya", "start": 1.6, "end": 2.0},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+
+        self.assertEqual(
+            [word["text"] for word in data["words"]],
+            ["— Allah'ım,", "Dünya!"],
+        )
+        self.assertEqual(data["segments"][0]["text"], coarse[0]["text"])
+        self.assertEqual(validate_forced_alignment_data(data)["aligned_word_count"], 2)
+        blocks = build_blocks(
+            {
+                "words": data["words"],
+                "vad_regions": [
+                    {
+                        "vad_region_index": 1,
+                        "start_ms": 1_000,
+                        "end_ms": 3_000,
+                        "source": "silero_vad",
+                    }
+                ],
+            },
+            episode=12,
+        )
+        self.assertEqual(
+            " ".join(block["primary_text"] for block in blocks), coarse[0]["text"]
+        )
+
+        noncanonical = copy.deepcopy(data)
+        noncanonical["segments"][0]["words"][0]["text"] = "allahım"
+        noncanonical["words"][0]["text"] = "allahım"
+        with self.assertRaisesRegex(ForcedAlignmentError, "preserve corrected"):
+            validate_forced_alignment_data(noncanonical)
+
+    def test_overlapping_word_interval_hard_fails(self) -> None:
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba,", "start": 1.1, "end": 1.7},
+                        {"word": "dünya!", "start": 1.6, "end": 1.9},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ForcedAlignmentError, "overlapping/backward"):
+                align_corrected_segments(
+                    self._audio(directory), [_coarse()[0]], whisperx_module=fake
+                )
+
+    def test_nonfinite_and_synthetic_timing_hard_fail(self) -> None:
+        bad_words = (
+            [{"word": "Nasılsın?", "start": math.nan, "end": 4.7}],
+            [
+                {
+                    "word": "Nasılsın?",
+                    "start": 4.1,
+                    "end": 4.7,
+                    "interpolated": True,
+                }
+            ],
+            [
+                {
+                    "word": "Nasılsın?",
+                    "start": 4.1,
+                    "end": 4.7,
+                    "timing_source": "synthetic_segment_word_repair",
+                }
+            ],
+        )
+        for words in bad_words:
+            with self.subTest(words=words):
+                fake = _FakeWhisperX([_result(words)])
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(ForcedAlignmentError):
+                        align_corrected_segments(
+                            self._audio(directory), [_coarse()[1]], whisperx_module=fake
+                        )
+
+    def test_cross_segment_overlap_hard_fails_in_pure_validator(self) -> None:
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                        {"word": "dünya!", "start": 1.5, "end": 1.9},
+                    ]
+                ),
+                _result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}]),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), _coarse(), whisperx_module=fake
+            )
+        corrupt = copy.deepcopy(data)
+        corrupt["segments"][1]["alignment_window_start_ms"] = 1_800
+        corrupt["segments"][1]["start_ms"] = 1_850
+        corrupt["segments"][1]["end_ms"] = 2_250
+        corrupt["segments"][1]["words"][0]["start_ms"] = 1_850
+        corrupt["segments"][1]["words"][0]["end_ms"] = 2_250
+        corrupt["words"][2]["start_ms"] = 1_850
+        corrupt["words"][2]["end_ms"] = 2_250
+
+        with self.assertRaisesRegex(ForcedAlignmentError, "overlapping/backward"):
+            validate_forced_alignment_data(corrupt)
+
+    def test_unsupported_language_and_bad_coarse_input_fail_early(self) -> None:
+        with self.assertRaisesRegex(ForcedAlignmentError, "only 'tr'"):
+            align_corrected_segments(
+                "/does/not/matter.flac", _coarse(), language="id", whisperx_module=object()
+            )
+        with self.assertRaisesRegex(ForcedAlignmentError, "duplicate utterance_uid"):
+            validate_coarse_segments([_coarse()[0], {**_coarse()[1], "utterance_uid": "utt-1"}])
+        with self.assertRaisesRegex(ForcedAlignmentError, "preceding segment"):
+            validate_coarse_segments([_coarse()[1], _coarse()[0]])
+
+    def test_unpinned_whisperx_version_hard_fails(self) -> None:
+        fake = _FakeWhisperX(
+            [_result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}])]
+        )
+        fake.__version__ = "3.8.5"
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "WhisperX 3.8.6 is required"
+            ):
+                align_corrected_segments(
+                    self._audio(directory), [_coarse()[1]], whisperx_module=fake
+                )
+
+    def test_pure_validator_rejects_report_and_provenance_tampering(self) -> None:
+        fake = _FakeWhisperX(
+            [_result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}])]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), [_coarse()[1]], whisperx_module=fake
+            )
+
+        bad_report = copy.deepcopy(data)
+        bad_report["report"]["aligned_word_count"] = 2
+        with self.assertRaisesRegex(ForcedAlignmentError, "report aligned_word_count"):
+            validate_forced_alignment_data(bad_report)
+        bad_source = copy.deepcopy(data)
+        bad_source["provenance"]["interpolation"] = "nearest"
+        with self.assertRaisesRegex(ForcedAlignmentError, "not disabled"):
+            validate_forced_alignment_data(bad_source)
+        bad_digest = copy.deepcopy(data)
+        bad_digest["alignment_sha256"] = "0" * 64
+        for word in bad_digest["words"]:
+            word["alignment_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ForcedAlignmentError, "alignment_sha256 mismatch"):
+            validate_forced_alignment_data(bad_digest)
+        bad_audio = copy.deepcopy(data)
+        bad_audio["audio_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ForcedAlignmentError, "alignment_sha256 mismatch"):
+            validate_forced_alignment_data(bad_audio)
+
+        bad_edit_kind = copy.deepcopy(data)
+        bad_edit_kind["segments"][0]["words"][0]["edit_kind"] = "inserted"
+        bad_edit_kind["words"][0]["edit_kind"] = "inserted"
+        with self.assertRaisesRegex(ForcedAlignmentError, "edit_kind mismatch"):
+            validate_forced_alignment_data(bad_edit_kind)
+
+        bad_asr_index = copy.deepcopy(data)
+        bad_asr_index["segments"][0]["words"][0]["asr_token_index"] = None
+        bad_asr_index["words"][0]["asr_token_index"] = None
+        with self.assertRaisesRegex(ForcedAlignmentError, "asr_token_index mismatch"):
+            validate_forced_alignment_data(bad_asr_index)
+
+        bad_edit_audit = copy.deepcopy(data)
+        bad_edit_audit["segments"][0]["edit_audit"]["edited_token_count"] = 1
+        with self.assertRaisesRegex(ForcedAlignmentError, "edit audit mismatch"):
+            validate_forced_alignment_data(bad_edit_audit)
+
+        bad_edited_threshold = copy.deepcopy(data)
+        bad_edited_threshold["provenance"]["edited_token_min_word_score"] = 0.54
+        with self.assertRaisesRegex(
+            ForcedAlignmentError, "edited_token_min_word_score must equal"
+        ):
+            validate_forced_alignment_data(bad_edited_threshold)
+
+
+if __name__ == "__main__":
+    unittest.main()
+

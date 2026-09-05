@@ -13,11 +13,11 @@ authors = [{name = "Ismail Korkmaz"}]
 dependencies = []
 
 [project.scripts]
-mas = "src.mas.cli:main"
+mas = "mas.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["src", "src.*"]
+where = ["src"]
+include = ["mas", "mas.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

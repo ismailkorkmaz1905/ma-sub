@@ -225,4 +225,3 @@ def build_aligned_turkish_schema(
 
 
 __all__ = ["SchemaV2Error", "build_aligned_turkish_schema"]
-

@@ -443,4 +443,3 @@ __all__ = [
     "wrap_text",
     "write_srt",
 ]
-

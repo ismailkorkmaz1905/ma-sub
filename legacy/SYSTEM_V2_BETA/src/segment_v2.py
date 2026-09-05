@@ -1233,4 +1233,3 @@ __all__ = [
     "validate_segmentation",
     "validate_segmentation_marker",
 ]
-

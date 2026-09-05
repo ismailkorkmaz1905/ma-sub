@@ -211,4 +211,3 @@ def write_translated_zip(
             ),
         )
     return path
-

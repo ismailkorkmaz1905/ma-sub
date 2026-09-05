@@ -718,4 +718,3 @@ __all__ = [
     "validate_translation_pack",
     "validate_translation_pack_marker",
 ]
-

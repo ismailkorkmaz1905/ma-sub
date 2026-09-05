@@ -660,4 +660,3 @@ __all__ = [
     "validate_audio_marker",
     "verify_media_readable",
 ]
-

@@ -166,4 +166,3 @@ Before creating the ZIP, verify:
 
 If any check fails, fix the output before returning it. Do not claim completion
 for a partial ZIP.
-

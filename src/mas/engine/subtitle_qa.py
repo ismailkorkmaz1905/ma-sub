@@ -1115,4 +1115,3 @@ __all__ = [
     "extract_number_anchors",
     "run_subtitle_qa",
 ]
-

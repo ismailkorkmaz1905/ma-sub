@@ -1,7 +1,7 @@
 # Muhtemel Aşk Bölüm 12 — Pipeline Olay ve İyileştirme Raporu
 
-**Kapsam:** 4–5 Eylül 2026 Bölüm 12 altyazı üretimi  
-**Saat dilimi:** Tüm saatler Singapore Time — SGT (UTC+8)  
+**Kapsam:** 4–5 Eylül 2026 Bölüm 12 altyazı üretimi
+**Saat dilimi:** Tüm saatler Singapore Time — SGT (UTC+8)
 **Amaç:** Astra'nın kalıcı, tek komutla çalışan altyazı pipeline'ını inşa ederken Bölüm 12'de yaşanan gecikmeleri ve veri bütünlüğü hatalarını tekrar etmemesi
 
 ## 1. Yönetici özeti
@@ -429,5 +429,3 @@ Gecikmenin ana sebebi Whisper veya Endonezce çeviri hızı değildi. Son çevir
 6. otomatik watchdog ve shutdown olmamasıydı.
 
 Yeni pipeline bu altı noktayı çözmeden “tek tuş” deneyimi sağlamış sayılmamalıdır.
-
-

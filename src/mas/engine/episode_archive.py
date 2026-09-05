@@ -872,4 +872,3 @@ __all__ = [
     "verify_recorded_file",
     "write_archive_receipt",
 ]
-

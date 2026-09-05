@@ -1359,4 +1359,3 @@ __all__ = [
     "validate_coarse_segments",
     "validate_forced_alignment_data",
 ]
-

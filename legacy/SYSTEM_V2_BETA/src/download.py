@@ -1271,4 +1271,3 @@ __all__ = [
     "validate_download",
     "write_stage_marker",
 ]
-

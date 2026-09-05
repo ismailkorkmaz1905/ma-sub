@@ -37,7 +37,7 @@ Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr vi
 - Current PR test and Dockerfile checks: passed.
 - Docker was not available in the local Windows environment, so a local image build was not performed.
 - Gmail SMTP notification was verified by a real test email to the configured recipient. The app password remains outside Git in the Windows user environment.
-- Drive contains a private 2,987-byte `youtube-cookies.txt`, but the connector could not materialize it to the local filesystem. Fresh Chrome and Edge export also failed after both browsers were closed because Chromium App-Bound Encryption prevented `yt-dlp` DPAPI decryption. `MAS_YTDLP_COOKIES` remains unset and authenticated YouTube source acquisition remains unverified.
+- A user-exported 3,225-byte Netscape cookie file was copied byte-for-byte to `C:\Users\Ismail\.config\ma-sub\youtube-cookies.txt`, restricted to the current Windows user, and bound through the persistent user-level `MAS_YTDLP_COOKIES` variable. Its 23 non-comment records and YouTube domain were validated without logging cookie values. Authenticated source acquisition and the equivalent RunPod secret-file mount remain unverified.
 - Real full-episode GPU inference was not performed.
 - Live Google Drive upload/readback was not performed.
 - Live RunPod stop and external billing-state verification were not performed.
@@ -46,7 +46,7 @@ Skipped local tests include Windows cases that require symlink privilege. Treat 
 
 ## Open release work
 
-1. Export or manually download a fresh Netscape-format YouTube cookie file to `C:\Users\Ismail\.config\ma-sub\youtube-cookies.txt`, restrict it to the current Windows user, and set `MAS_YTDLP_COOKIES`. Never commit the file.
+1. Mount or copy the validated YouTube cookie file into RunPod outside the repository, set `MAS_YTDLP_COOKIES` to that Pod-local path, and verify authenticated source acquisition. Never commit the file.
 2. Build the Docker image from a clean Linux or RunPod checkout.
 3. Run `./mas doctor` on the selected GPU and record GPU, CUDA, PyTorch, WhisperX, and model versions.
 4. Run one complete real episode through both ChatGPT handoffs.

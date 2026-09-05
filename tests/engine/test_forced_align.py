@@ -867,6 +867,58 @@ class ForcedAlignmentTests(unittest.TestCase):
                     self._audio(directory), coarse, whisperx_module=too_early
                 )
 
+        boundary_coarse = [
+            {
+                **coarse[0],
+                "text": "Merhaba dunya",
+                "asr_text": "Merhaba dunya",
+            }
+        ]
+        supported_boundary = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 2.1, "end": 2.6, "score": 0.9},
+                        {"word": "dunya", "start": 3.8, "end": 4.739, "score": 0.608},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            supported = align_corrected_segments(
+                self._audio(directory),
+                boundary_coarse,
+                whisperx_module=supported_boundary,
+            )
+        self.assertEqual(
+            supported["segments"][0]["drift_context"],
+            "high_confidence_unchanged_boundary_word",
+        )
+        self.assertEqual(
+            supported["segments"][0]["drift_audit"]["late_outward_drift_ms"],
+            739,
+        )
+
+        low_score_boundary = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Merhaba", "start": 2.1, "end": 2.6, "score": 0.9},
+                        {"word": "dunya", "start": 3.8, "end": 4.739, "score": 0.549},
+                    ]
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "exceeds max_outward_drift_ms"
+            ):
+                align_corrected_segments(
+                    self._audio(directory),
+                    boundary_coarse,
+                    whisperx_module=low_score_boundary,
+                )
+
         tampered = copy.deepcopy(data)
         tampered["provenance"]["max_outward_drift_ms"] = 501
         with self.assertRaisesRegex(

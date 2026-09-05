@@ -85,13 +85,14 @@ def _candidate(
     orphan: bool = False,
     reason: str | None = None,
     context_after: str = "Geldim",
+    asr_text: str = "Merhaba",
 ) -> tuple[dict, dict]:
     utterance = {
         "utterance_uid": "candidate-1",
         "utterance_index": 1,
         "coarse_start_ms": 100,
         "coarse_end_ms": 500,
-        "asr_text": "" if orphan else "Merhaba",
+        "asr_text": "" if orphan else asr_text,
         "youtube_text": "Merhaba" if orphan else "",
         "context_before": "",
         "context_after": context_after,
@@ -185,11 +186,13 @@ def _make_files(
     include_hole: bool = False,
     candidate_reason: str | None = None,
     candidate_context_after: str = "Geldim",
+    candidate_asr_text: str = "Merhaba",
 ) -> tuple[Path, Path, Path, Path, Path]:
     candidate, candidate_evidence = _candidate(
         orphan=orphan,
         reason=candidate_reason,
         context_after=candidate_context_after,
+        asr_text=candidate_asr_text,
     )
     utterances = [candidate]
     holes: list[dict] = []
@@ -452,6 +455,66 @@ class AudioReviewV2Tests(unittest.TestCase):
             self.assertEqual(output.records[1]["tr_corrected"], "Duydum")
             self.assertEqual(
                 report["outcomes"][1]["source"], "contextual_boundary_policy"
+            )
+
+    def test_contextual_policy_rejects_known_short_clip_hallucination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), include_hole=True)
+            decoder = FakeDecoder(
+                [
+                    _decoded("Merhaba"),
+                    _decoded(),
+                    _decoded(),
+                    _decoded("Altyazı M.K."),
+                ]
+            )
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            hole = output.records[1]
+            outcome = report["outcomes"][1]
+            self.assertEqual(hole["review_disposition"], "reviewed_non_dialogue")
+            self.assertEqual(hole["tr_corrected"], "")
+            self.assertTrue(hole["non_dialogue"])
+            exact_audit = outcome["contextual_boundary_audit"]["bounded_decodes"][-1]
+            self.assertTrue(exact_audit["known_short_clip_hallucination"])
+            self.assertFalse(exact_audit["usable_target_text"])
+
+    def test_known_source_hallucination_is_discarded_without_acoustic_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory),
+                candidate_reason="known_subtitle_hallucination_signature",
+                candidate_asr_text="Altyazı M.K.",
+            )
+            decoder = FakeDecoder(
+                [
+                    _decoded(),
+                    _decoded(),
+                    _decoded("Altyazı M .K."),
+                ]
+            )
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            record = output.records[0]
+            self.assertEqual(
+                record["review_disposition"], "discarded_asr_hallucination"
+            )
+            self.assertEqual(record["tr_corrected"], "")
+            self.assertTrue(record["non_dialogue"])
+            self.assertEqual(
+                report["outcomes"][0]["source"], "contextual_boundary_policy"
             )
 
     def test_exact_target_crop_uses_only_declared_sample_interval(self) -> None:

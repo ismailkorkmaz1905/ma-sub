@@ -128,6 +128,10 @@ def _normalized_text(value: Any) -> str:
     return " ".join(re.findall(r"[^\W_]+", normalized, flags=re.UNICODE))
 
 
+def _is_known_short_clip_hallucination(value: Any) -> bool:
+    return _normalized_text(value) == "altyazı m k"
+
+
 def _tokens(value: Any) -> list[str]:
     normalized = _normalized_text(value)
     return normalized.split() if normalized else []
@@ -572,24 +576,28 @@ def _machine_decision(
     config: AudioReviewV2Config,
 ) -> dict[str, Any]:
     transcript = str(target_decode["transcript"]).strip()
+    known_short_clip_hallucination = _is_known_short_clip_hallucination(
+        transcript
+    )
+    acoustic_transcript = "" if known_short_clip_hallucination else transcript
     references = {
         "tr_corrected": str(provisional_record.get("tr_corrected", "")),
         "asr_text": str(evidence.get("asr_text", "")),
         "youtube_text": str(evidence.get("youtube_text", "")),
     }
     scores = {
-        name: _text_similarity(transcript, text)
+        name: _text_similarity(acoustic_transcript, text)
         for name, text in references.items()
         if text.strip()
     }
     shared = {
-        name: _shared_token_count(transcript, text)
+        name: _shared_token_count(acoustic_transcript, text)
         for name, text in references.items()
         if text.strip()
     }
     best_similarity = max(scores.values(), default=0.0)
     best_shared = max(shared.values(), default=0)
-    target_token_count = len(_tokens(transcript))
+    target_token_count = len(_tokens(acoustic_transcript))
     longest_reference_token_count = max(
         (len(_tokens(text)) for text in references.values() if text.strip()),
         default=0,
@@ -607,6 +615,7 @@ def _machine_decision(
         "best_shared_token_count": best_shared,
         "required_shared_token_count": required_shared_tokens,
         "source": "secondary_asr",
+        "known_short_clip_hallucination": known_short_clip_hallucination,
     }
     has_adjacent_context = bool(
         str(evidence.get("context_before", "")).strip()
@@ -626,14 +635,18 @@ def _machine_decision(
         }
     if kind == "speech_hole":
         context_matches = max(
-            _text_similarity(transcript, evidence.get("context_before", "")),
-            _text_similarity(transcript, evidence.get("context_after", "")),
+            _text_similarity(
+                acoustic_transcript, evidence.get("context_before", "")
+            ),
+            _text_similarity(
+                acoustic_transcript, evidence.get("context_after", "")
+            ),
         )
-        if transcript and context_matches < 0.85:
+        if acoustic_transcript and context_matches < 0.85:
             return {
                 **base,
                 "decision": "confirmed_dialogue",
-                "tr_corrected": transcript,
+                "tr_corrected": acoustic_transcript,
                 "reason": "blind secondary ASR found target dialogue",
             }
         return {
@@ -643,7 +656,7 @@ def _machine_decision(
             "reason": "speech hole has no reliable target transcript",
         }
 
-    confirmed = transcript and (
+    confirmed = acoustic_transcript and (
         best_similarity >= float(config.min_reference_similarity)
         or best_shared >= required_shared_tokens
     )
@@ -666,7 +679,12 @@ def _machine_decision(
     # independent VAD at all, no blind secondary transcript and no agreeing
     # YouTube text. Merely low overlap or a weak confidence flag stays pending.
     structural_silence = "zero_unpadded_independent_vad_overlap" in reason
-    if not transcript and structural_silence and not independent_text_agreement and not is_orphan:
+    if (
+        not acoustic_transcript
+        and structural_silence
+        and not independent_text_agreement
+        and not is_orphan
+    ):
         return {
             **base,
             "decision": "discarded_asr_hallucination",
@@ -699,11 +717,18 @@ def _contextual_boundary_decision(
     has_usable_target_text = False
     for stage, decoded in staged_decodes:
         transcript = str(decoded.get("transcript", "")).strip()
+        known_short_clip_hallucination = _is_known_short_clip_hallucination(
+            transcript
+        )
         context_similarity = max(
             _text_similarity(transcript, context_before),
             _text_similarity(transcript, context_after),
         )
-        usable_target_text = bool(transcript) and context_similarity < 0.85
+        usable_target_text = (
+            bool(transcript)
+            and not known_short_clip_hallucination
+            and context_similarity < 0.85
+        )
         has_usable_target_text = has_usable_target_text or usable_target_text
         decode_audit.append(
             {
@@ -714,6 +739,7 @@ def _contextual_boundary_decision(
                 ).hexdigest(),
                 "transcript_present": bool(transcript),
                 "usable_target_text": usable_target_text,
+                "known_short_clip_hallucination": known_short_clip_hallucination,
             }
         )
     audit = {
@@ -727,6 +753,38 @@ def _contextual_boundary_decision(
         "bounded_decodes": decode_audit,
     }
     corrected = str(provisional_record.get("tr_corrected", "")).strip()
+    known_source_hallucination = _is_known_short_clip_hallucination(
+        evidence.get("asr_text", "")
+    )
+    usable_decodes = [
+        item for item in decode_audit if item["usable_target_text"] is True
+    ]
+    if kind == "asr_caption_candidate" and known_source_hallucination:
+        if usable_decodes:
+            selected = usable_decodes[-1]
+            return {
+                **copy.deepcopy(dict(pending_decision)),
+                "decision": "confirmed_dialogue",
+                "tr_corrected": selected["transcript"],
+                "reason": (
+                    "known subtitle hallucination was replaced by bounded target "
+                    "audio; final forced alignment is required"
+                ),
+                "source": "contextual_boundary_policy",
+                "forced_alignment_required": True,
+                "contextual_boundary_audit": audit,
+            }
+        return {
+            **copy.deepcopy(dict(pending_decision)),
+            "decision": "discarded_asr_hallucination",
+            "tr_corrected": "",
+            "reason": (
+                "known subtitle hallucination had no usable bounded target audio"
+            ),
+            "source": "contextual_boundary_policy",
+            "forced_alignment_required": True,
+            "contextual_boundary_audit": audit,
+        }
     if (
         kind == "asr_caption_candidate"
         and not is_orphan
@@ -996,17 +1054,30 @@ def _validate_contextual_boundary_outcome(
             or digest != hashlib.sha256(transcript.encode("utf-8")).hexdigest()
         ):
             raise AudioReviewV2Error("contextual boundary transcript digest is invalid")
-        if not isinstance(item.get("transcript_present"), bool) or not isinstance(
-            item.get("usable_target_text"), bool
+        if (
+            not isinstance(item.get("transcript_present"), bool)
+            or not isinstance(item.get("usable_target_text"), bool)
+            or not isinstance(item.get("known_short_clip_hallucination"), bool)
         ):
             raise AudioReviewV2Error("contextual boundary decode flags are invalid")
         context_similarity = max(
             _text_similarity(transcript, context_before),
             _text_similarity(transcript, context_after),
         )
-        if item.get("transcript_present") is not bool(transcript.strip()) or item.get(
-            "usable_target_text"
-        ) is not (bool(transcript.strip()) and context_similarity < 0.85):
+        known_short_clip_hallucination = _is_known_short_clip_hallucination(
+            transcript
+        )
+        if (
+            item.get("transcript_present") is not bool(transcript.strip())
+            or item.get("known_short_clip_hallucination")
+            is not known_short_clip_hallucination
+            or item.get("usable_target_text")
+            is not (
+                bool(transcript.strip())
+                and not known_short_clip_hallucination
+                and context_similarity < 0.85
+            )
+        ):
             raise AudioReviewV2Error("contextual boundary decode audit mismatch")
     if len(stages) != len(set(stages)) or not {
         "blind_padded",
@@ -1018,6 +1089,29 @@ def _validate_contextual_boundary_outcome(
         raise AudioReviewV2Error("contextual boundary orphan audit mismatch")
     if kind == "asr_caption_candidate":
         corrected = str(provisional_record.get("tr_corrected", "")).strip()
+        known_source_hallucination = _is_known_short_clip_hallucination(
+            evidence.get("asr_text", "")
+        )
+        usable = [
+            item for item in bounded_decodes if item.get("usable_target_text") is True
+        ]
+        if known_source_hallucination:
+            if usable:
+                valid = (
+                    outcome.get("decision") == "confirmed_dialogue"
+                    and str(final_record.get("tr_corrected", "")).strip()
+                    == str(usable[-1]["transcript"]).strip()
+                )
+            else:
+                valid = (
+                    outcome.get("decision") == "discarded_asr_hallucination"
+                    and not str(final_record.get("tr_corrected", "")).strip()
+                )
+            if is_orphan or not valid:
+                raise AudioReviewV2Error(
+                    "known subtitle hallucination policy was misapplied"
+                )
+            return
         if (
             is_orphan
             or not corrected

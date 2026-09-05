@@ -746,6 +746,10 @@ def _normalized_lexical_text(text: Any) -> str:
     )
 
 
+def _is_known_subtitle_hallucination(text: Any) -> bool:
+    return _normalized_lexical_text(text) == "altyazı m k"
+
+
 def _split_segment_for_correction(
     segment: Mapping[str, Any], *, max_internal_word_gap_ms: int
 ) -> list[dict[str, Any]]:
@@ -1282,13 +1286,17 @@ def build_asr_hallucination_records(
             and float(temperature) > settings.hallucination_temperature_threshold
         ):
             confidence_reasons.append("nonzero_asr_sampling_temperature")
-        normalized_text = str(utterance["asr_text"]).casefold()
+        asr_text = str(utterance["asr_text"])
+        normalized_text = asr_text.casefold()
         has_text_marker = any(
             marker.casefold() in normalized_text
             for marker in settings.hallucination_text_markers
         )
+        known_subtitle_hallucination = _is_known_subtitle_hallucination(asr_text)
         if has_text_marker:
             confidence_reasons.append("music_or_subtitle_text_marker")
+        if known_subtitle_hallucination:
+            confidence_reasons.append("known_subtitle_hallucination_signature")
         explicitly_requested = utterance_uid in requested
         # One weak confidence signal is common in real dialogue and must not
         # create a mandatory WAV by itself. Automatic review requires either
@@ -1296,8 +1304,10 @@ def build_asr_hallucination_records(
         # or at least two independent weak signals. This keeps the detector
         # sensitive to speech-in-silence hallucinations without turning every
         # low-confidence but audible line into a false candidate.
-        automatic_candidate = bool(structural_reasons) or (
-            "high_asr_compression_ratio" in confidence_reasons
+        automatic_candidate = (
+            known_subtitle_hallucination
+            or bool(structural_reasons)
+            or "high_asr_compression_ratio" in confidence_reasons
             or len(confidence_reasons) >= 2
         )
         reasons = structural_reasons + confidence_reasons

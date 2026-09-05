@@ -404,6 +404,55 @@ class RawASRV2Tests(unittest.TestCase):
         self.assertEqual(list(reopened.utterances), updated)
         self.assertEqual(list(reopened.asr_hallucination_records), candidates)
 
+    def test_known_subtitle_hallucination_is_reviewed_even_inside_vad(self) -> None:
+        utterances = build_correction_utterances(
+            [
+                {
+                    "start_ms": 1_000,
+                    "end_ms": 1_900,
+                    "text": "Altyazı M.K.",
+                    "source": "main",
+                    "word_timing_complete": True,
+                    "asr_audit": {
+                        "avg_logprob": -0.10,
+                        "no_speech_prob": 0.05,
+                        "compression_ratio": 1.10,
+                        "temperature": 0.0,
+                    },
+                }
+            ],
+            episode=12,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_audio = root / "audio.flac"
+            source_audio.write_bytes(b"synthetic-audio-source")
+            with patch(
+                "mas.engine.raw_asr._extract_clip",
+                side_effect=_fake_extract_clip,
+            ):
+                updated, candidates = build_asr_hallucination_records(
+                    utterances,
+                    [
+                        {
+                            "vad_region_index": 1,
+                            "start_ms": 900,
+                            "end_ms": 2_000,
+                            "source": "silero_vad",
+                        }
+                    ],
+                    episode=12,
+                    audio_path=source_audio,
+                    audio_output_root=root,
+                )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("music_or_subtitle_text_marker", candidates[0]["reason"])
+        self.assertIn(
+            "known_subtitle_hallucination_signature", candidates[0]["reason"]
+        )
+        self.assertIn("suspected_asr_hallucination", updated[0]["risk_flags"])
+
     def test_one_ms_caption_touch_still_becomes_orphan_review_candidate(self) -> None:
         utterances = build_correction_utterances(
             [

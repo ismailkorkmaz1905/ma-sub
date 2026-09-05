@@ -10,7 +10,7 @@ source -> audio -> Turkish ASR -> acoustic review -> correction handoff
 
 Production code lives under `src/mas/` and runs through `./mas`. Notebooks and the imported source snapshot under `legacy/` are read-only reference material, not production entrypoints.
 
-> Release status: Episode 11 completed real RTX 4090 source, audio, and raw-ASR stages and reached the Turkish correction handoff. The final episode, acoustic review, alignment, Indonesian translation, Drive readback, and delivery are not complete. Do not create a stable tag until the Astra review and all real episode gates pass.
+> Release status: Episode 11 completed real RTX 4090 source, audio, and raw-ASR stages. The Turkish correction return was accepted, and bounded audio review resolved 107 of 245 records while leaving 138 pending. A separate revision-pinned CUDA CTC probe processed all 138 pending records, but produced 0 normalized exact reference matches and closed 0 strict decisions. This is diagnostic evidence, not an acoustic PASS. Manual acoustic decisions, production forced alignment, Indonesian translation, strict mux, Drive readback, and delivery remain incomplete. Do not create a stable tag until the Astra review and all real episode gates pass.
 
 ## Start here
 
@@ -100,12 +100,33 @@ persistent remote checkpoint. Never edit source media, pack manifests, immutable
 IDs, block order, Turkish text in the Indonesian return, or timing in a
 translation return.
 
+Episode 11's returned Turkish correction ZIP has passed the return gate. Its
+bounded audio review processed 245 records, resolving 107 and leaving 138 for
+manual acoustic decisions. An independent pinned-model CUDA CTC probe executed
+for all 138 pending records, but its 0 normalized exact reference matches and 0
+strict closures do not replace listening-based review or prove production forced
+alignment.
+
+Review the pending WAVs locally without starting RunPod:
+
+```powershell
+.\mas.ps1 review-audio 11
+```
+
+The command opens a localhost-only browser page. Each save verifies the current
+report, correction input/output bindings, and WAV SHA-256 before atomically
+updating `review/audio_review_overrides.json`. Stop the local server with
+`Ctrl+C`. After all pending records are saved, resume once with
+`.\mas.ps1 run 11`; the controller verifies the override file by byte count and
+SHA-256 on the Pod before the pipeline starts.
+
 Useful operator commands:
 
 ```bash
 ./mas status 13
 ./mas doctor
 ./mas test
+./mas review-audio 11
 ./mas clean 13
 ./mas clean 13 --destroy
 ```
@@ -185,7 +206,11 @@ The controller, complete channel discovery, source identity guards, download
 watchdogs, strict GPU/Drive preflight, handoff transfer, and external shutdown
 polling are implemented and covered by local tests. Episode 11 verified real Pod
 startup, SSH, CUDA raw ASR, handoff download, controller shutdown, and external
-`EXITED` polling. Final mux and Drive upload/readback remain unverified. The
+`EXITED` polling. A later independent pinned-model CUDA CTC probe processed
+138/138 pending review records on Pod `tccsb8991x84ua`; the Pod was externally
+verified `EXITED`. The probe closed 0 strict decisions and is not an acoustic
+PASS. Production forced alignment, final mux, and Drive upload/readback remain
+unverified. The
 controller never starts the Pod during setup, `doctor`, tests, status, or fixture
 runs.
 

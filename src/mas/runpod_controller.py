@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -341,26 +342,29 @@ def _stream(chunk, target):
     target.flush()
 
 
-def _network(command, *, idle_timeout=180, total_timeout=1800):
+def _network(command, *, idle_timeout=180, total_timeout=1800, capture=False):
     try:
         return _run_watchdog(
             command,
             idle_timeout=idle_timeout,
             total_timeout=total_timeout,
-            stdout_handler=lambda chunk: _stream(chunk, sys.stdout),
-            stderr_handler=lambda chunk: _stream(chunk, sys.stderr),
+            stdout_handler=None if capture else lambda chunk: _stream(chunk, sys.stdout),
+            stderr_handler=None if capture else lambda chunk: _stream(chunk, sys.stderr),
         )
     except RemoteVerificationError as exc:
         raise RunPodControllerError(str(exc)) from exc
 
 
-def _network_retry(command, *, attempts=3, idle_timeout=60, total_timeout=1800):
+def _network_retry(
+    command, *, attempts=3, idle_timeout=60, total_timeout=1800, capture=False
+):
     for attempt in range(1, attempts + 1):
         try:
             return _network(
                 command,
                 idle_timeout=idle_timeout,
                 total_timeout=total_timeout,
+                capture=capture,
             )
         except RunPodControllerError:
             if attempt == attempts:
@@ -368,6 +372,87 @@ def _network_retry(command, *, attempts=3, idle_timeout=60, total_timeout=1800):
             delay = 2 ** (attempt - 1)
             print(f"[RUNPOD] network command retry {attempt + 1}/{attempts} in {delay}s")
             time.sleep(delay)
+
+
+def _remote_file_signature(ssh, remote_path):
+    quoted = shlex.quote(remote_path)
+    output = _network_retry(
+        ssh
+        + [
+            "set -euo pipefail; "
+            f"stat -c %s -- {quoted}; "
+            f"sha256sum -- {quoted}"
+        ],
+        idle_timeout=60,
+        total_timeout=300,
+        capture=True,
+    )
+    match = re.fullmatch(
+        rb"\s*(\d+)\s*\r?\n([0-9a-f]{64})\s+[^\r\n]+\s*",
+        output,
+    )
+    if not match:
+        raise RunPodControllerError("remote file byte/SHA-256 readback is invalid")
+    return int(match.group(1)), match.group(2).decode("ascii")
+
+
+def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host):
+    source = Path(source)
+    expected_size = source.stat().st_size
+    digest = hashlib.sha256()
+    with source.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    expected_sha256 = digest.hexdigest()
+    partial = (
+        "/workspace/.mas-upload/audio-review-overrides-"
+        f"{expected_sha256[:16]}.partial"
+    )
+    remote_parent = str(Path(remote_path).parent).replace("\\", "/")
+    _network_retry(
+        ssh + ["install -d -m 700 -- " + shlex.quote(remote_parent)],
+        idle_timeout=60,
+        total_timeout=300,
+    )
+    _network_retry(
+        scp + [str(source), f"root@{host}:{partial}"],
+        idle_timeout=60,
+        total_timeout=300,
+    )
+    partial_size, partial_sha256 = _remote_file_signature(ssh, partial)
+    if (partial_size, partial_sha256) != (expected_size, expected_sha256):
+        raise RunPodControllerError(
+            "uploaded episode file byte/SHA-256 readback mismatch"
+        )
+    _network_retry(
+        ssh
+        + [
+            "set -euo pipefail; "
+            f"chmod 600 -- {shlex.quote(partial)}; "
+            f"mv -f -- {shlex.quote(partial)} {shlex.quote(remote_path)}"
+        ],
+        idle_timeout=60,
+        total_timeout=300,
+    )
+    final_size, final_sha256 = _remote_file_signature(ssh, remote_path)
+    if (final_size, final_sha256) != (expected_size, expected_sha256):
+        raise RunPodControllerError(
+            "installed episode file byte/SHA-256 readback mismatch"
+        )
+    return {"bytes": expected_size, "sha256": expected_sha256}
+
+
+def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host):
+    source = Path(local_root) / "review" / "audio_review_overrides.json"
+    if not source.is_file():
+        return None
+    return _upload_episode_file_verified(
+        source,
+        f"{remote_root}/review/audio_review_overrides.json",
+        ssh=ssh,
+        scp=scp,
+        host=host,
+    )
 
 
 def _ssh_args(key, host, port):
@@ -585,6 +670,20 @@ def run_remote_episode(episode, source_url=None):
                             + shlex.quote(destination)
                         ]
                     )
+
+            override_receipt = _upload_audio_review_overrides(
+                local_root,
+                remote_root,
+                ssh=ssh,
+                scp=scp,
+                host=host,
+            )
+            if override_receipt is not None:
+                print(
+                    "[RUNPOD] audio review overrides upload verified: "
+                    f"bytes={override_receipt['bytes']} "
+                    f"sha256={override_receipt['sha256']}"
+                )
 
             arguments = [str(episode)]
             if source_url:

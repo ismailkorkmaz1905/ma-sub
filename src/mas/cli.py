@@ -7,6 +7,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
+from .audio_review_ui import run_audio_review_ui
 from .config import episode_dir
 from .engine.download import DownloadError, _validated_cookie_file
 from .notify import notify, send_email
@@ -158,6 +159,8 @@ def main(argv=None):
     doctor_parser.add_argument("--strict-runpod", action="store_true")
     commands.add_parser("test")
     commands.add_parser("notify-test")
+    review_audio_parser = commands.add_parser("review-audio")
+    review_audio_parser.add_argument("episode", type=int)
     clean_parser = commands.add_parser("clean")
     clean_parser.add_argument("episode", type=int)
     clean_parser.add_argument("--destroy", action="store_true")
@@ -178,6 +181,8 @@ def main(argv=None):
                 result = test()
             elif args.command == "notify-test":
                 result = notify_test()
+            elif args.command == "review-audio":
+                result = run_audio_review_ui(args.episode)
             else:
                 result = clean(args.episode, args.destroy)
             if run_log:

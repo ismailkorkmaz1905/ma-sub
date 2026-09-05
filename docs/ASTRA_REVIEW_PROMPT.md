@@ -24,6 +24,7 @@ Read completely before evaluating:
 8. docs/EP11_FIRST_PRODUCTION_RUN.md
 9. MIGRATION_NOTES.md
 10. All production code, configuration, tests, Docker, RunPod scripts, workflow files, and the full legacy source snapshot relevant to the port
+11. `EPISODES/Muhtemel Ask 11.Bolum/prepare/independent_audio_probe.json`, verified against self SHA-256 `6081ddb6670ca0893bd94a704dd7eb94a6865785c0a9dea58698239bd48e65a6` and file SHA-256 `8312910ddd11065a321362cab253c1033833829bcba2f73b3f04ef3174c996d2`
 
 Run at minimum on Windows:
 
@@ -36,6 +37,7 @@ git branch --all
 & .\.venv\Scripts\python.exe -m pytest -q tests
 & .\.venv\Scripts\python.exe -m pytest -q tests/regression/test_ep12_reliability.py
 & .\.venv\Scripts\python.exe -m pytest -q tests/test_pipeline_runtime.py
+& .\.venv\Scripts\python.exe -m pytest -q tests/test_audio_review_ui.py tests/test_runpod_controller.py
 git diff --check
 .\mas.ps1 doctor
 
@@ -57,6 +59,7 @@ Review every acceptance boundary:
 - Source bytes and SHA-256 remain immutable across every stage and resume.
 - Checkpoints are atomic and bound to source, inputs, configuration, code identity, outputs, and completed UIDs. Stale bindings fail closed.
 - GPU-required ASR, acoustic review, and forced alignment fail before work when CUDA is unavailable. No silent CPU fallback exists.
+- Distinguish bounded CTC diagnostic execution from acoustic acceptance and production forced alignment. Episode 11's pinned-model CUDA probe processed 138/138 pending records but produced 0 normalized exact reference matches and closed 0 strict decisions; it is not an acoustic PASS.
 - Network retries, connection/request timeouts, total retry budget, and no-progress watchdog are finite.
 - Timing overrides cannot change text and require fresh preconditions.
 - Different known speakers can overlap but remain separate. Same-speaker overlap fails. Unknown-speaker overlap is unresolved evidence. Text is never merged across speakers.
@@ -79,6 +82,7 @@ Review every acceptance boundary:
 Real GPU truth boundary:
 - Require evidence from one full real episode, including GPU/CUDA/model identities, immutable source hash, stage timings, retries, checkpoint bindings, exact Turkish and Indonesian packs and manifests, strict QA reports, local final hashes, Drive readback receipt, RunPod stop response, external provider-state query, and billing evidence.
 - Reconcile the Episode 11 structured controller logs with `docs/EP11_FIRST_PRODUCTION_RUN.md`; do not treat controller elapsed time as exact provider billing time.
+- Reconcile the post-`f581fcb59091d026e4f53a825916ba9e7abcf479` CTC report with its two recorded hashes, model `samil24/wav2vec-xlsr-53-turkish-v4` pinned to revision `07d79597b78c56758045e3a2cd1c44bc1a19b1e8`, CUDA evidence, 138/138 coverage, 0 normalized exact reference matches, and 0 strict closures. Verify that Pod `tccsb8991x84ua` was externally `EXITED` without converting that shutdown evidence into acoustic success.
 - Spot-check source audio against representative final cue start/end times, all incident intervals, overlap cases, and semantic-shrink alarms.
 - If any evidence is absent, label that gate NOT VERIFIED. Do not convert it to PASS because code or tests look correct.
 

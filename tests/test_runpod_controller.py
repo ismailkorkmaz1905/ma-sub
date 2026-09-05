@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -218,6 +219,152 @@ def test_safe_network_command_retries_with_backoff(monkeypatch):
     assert runpod_controller._network_retry(["ssh", "host", "true"]) == b"ok"
     assert len(calls) == 3
     assert sleeps == [1, 2]
+
+
+def test_network_capture_returns_readback_without_streaming(monkeypatch):
+    captured = {}
+
+    def watchdog(command, **kwargs):
+        captured.update(kwargs)
+        return b"readback"
+
+    monkeypatch.setattr(runpod_controller, "_run_watchdog", watchdog)
+
+    assert runpod_controller._network(["ssh", "host"], capture=True) == b"readback"
+    assert captured["stdout_handler"] is None
+    assert captured["stderr_handler"] is None
+
+
+def test_audio_review_overrides_upload_requires_partial_and_final_readback(
+    monkeypatch, tmp_path
+):
+    local_root = tmp_path / "Muhtemel Ask 11.Bolum"
+    source = local_root / "review" / "audio_review_overrides.json"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b'{"override":true}\n')
+    expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    calls = []
+
+    def network_retry(command, **kwargs):
+        calls.append((command, kwargs))
+        remote_command = command[-1]
+        if command[0] == "ssh" and remote_command.startswith("set -euo pipefail; stat"):
+            remote_path = remote_command.split("sha256sum -- ", 1)[1].strip("'")
+            return f"18\n{expected_sha256}  {remote_path}\n".encode()
+        return b""
+
+    monkeypatch.setattr(runpod_controller, "_network_retry", network_retry)
+    receipt = runpod_controller._upload_audio_review_overrides(
+        local_root,
+        "/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum",
+        ssh=["ssh", "root@host"],
+        scp=["scp"],
+        host="host",
+    )
+
+    assert receipt == {"bytes": 18, "sha256": expected_sha256}
+    assert len(calls) == 5
+    assert calls[1][0][0] == "scp"
+    assert calls[1][0][1] == str(source)
+    assert calls[1][0][2].startswith(
+        "root@host:/workspace/.mas-upload/audio-review-overrides-"
+    )
+    assert "mv -f --" in calls[3][0][-1]
+    assert (
+        "'/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum/"
+        "review/audio_review_overrides.json'"
+    ) in calls[3][0][-1]
+    assert all(
+        kwargs
+        == {
+            "idle_timeout": 60,
+            "total_timeout": 300,
+            **({"capture": True} if _command[-1].startswith("set -euo pipefail; stat") else {}),
+        }
+        for _command, kwargs in calls
+    )
+
+
+def test_audio_review_overrides_upload_fails_before_install_on_readback_mismatch(
+    monkeypatch, tmp_path
+):
+    local_root = tmp_path / "11"
+    source = local_root / "review" / "audio_review_overrides.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("{}", encoding="utf-8")
+    calls = []
+
+    def network_retry(command, **kwargs):
+        calls.append(command)
+        if command[0] == "ssh" and command[-1].startswith("set -euo pipefail; stat"):
+            return b"1\n" + b"0" * 64 + b"  /remote/partial\n"
+        return b""
+
+    monkeypatch.setattr(runpod_controller, "_network_retry", network_retry)
+    with pytest.raises(
+        runpod_controller.RunPodControllerError,
+        match="uploaded episode file byte/SHA-256 readback mismatch",
+    ):
+        runpod_controller._upload_audio_review_overrides(
+            local_root,
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum",
+            ssh=["ssh", "root@host"],
+            scp=["scp"],
+            host="host",
+        )
+
+    assert len(calls) == 3
+    assert not any("mv -f --" in command[-1] for command in calls)
+
+
+def test_audio_review_overrides_upload_rejects_final_readback_mismatch(
+    monkeypatch, tmp_path
+):
+    local_root = tmp_path / "11"
+    source = local_root / "review" / "audio_review_overrides.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("{}", encoding="utf-8")
+    expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    signature_reads = 0
+
+    def network_retry(command, **kwargs):
+        nonlocal signature_reads
+        if command[0] == "ssh" and command[-1].startswith("set -euo pipefail; stat"):
+            signature_reads += 1
+            sha256 = expected_sha256 if signature_reads == 1 else "0" * 64
+            return f"2\n{sha256}  /remote/file\n".encode()
+        return b""
+
+    monkeypatch.setattr(runpod_controller, "_network_retry", network_retry)
+    with pytest.raises(
+        runpod_controller.RunPodControllerError,
+        match="installed episode file byte/SHA-256 readback mismatch",
+    ):
+        runpod_controller._upload_audio_review_overrides(
+            local_root,
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum",
+            ssh=["ssh", "root@host"],
+            scp=["scp"],
+            host="host",
+        )
+
+    assert signature_reads == 2
+
+
+def test_missing_audio_review_overrides_does_not_touch_remote(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        runpod_controller,
+        "_upload_episode_file_verified",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upload")),
+    )
+
+    assert runpod_controller._upload_audio_review_overrides(
+        tmp_path,
+        "/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum",
+        ssh=["ssh", "root@host"],
+        scp=["scp"],
+        host="host",
+    ) is None
 
 
 def test_ssh_has_bounded_liveness_options(tmp_path):

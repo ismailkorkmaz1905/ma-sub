@@ -46,7 +46,19 @@ DEFAULT_MAX_WORD_DURATION_MS = 2_500
 DEFAULT_MAX_OUTWARD_DRIFT_MS = 500
 EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
+DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
+DURATION_VAD_FIELDS = frozenset(
+    {
+        "duration_context",
+        "raw_start_ms",
+        "raw_end_ms",
+        "vad_region_index",
+        "vad_start_ms",
+        "vad_end_ms",
+        "vad_source",
+    }
+)
 
 
 class ForcedAlignmentError(RuntimeError):
@@ -429,7 +441,6 @@ def _validate_word_record(
     raw_index: int,
     window_start_ms: int,
     window_end_ms: int,
-    max_word_duration_ms: int,
 ) -> tuple[str, int, int, float] | None:
     text_value = raw.get("word", raw.get("text"))
     if not isinstance(text_value, str) or not text_value.strip():
@@ -474,12 +485,6 @@ def _validate_word_record(
         raise ForcedAlignmentError(
             f"{utterance_uid} word {text!r} lies outside its coarse alignment window"
         )
-    if end_ms - start_ms > max_word_duration_ms:
-        raise ForcedAlignmentError(
-            f"{utterance_uid} word {text!r} duration {end_ms - start_ms} ms "
-            f"exceeds the maximum {max_word_duration_ms} ms"
-        )
-
     score_value = raw.get("score")
     if score_value is None:
         raise ForcedAlignmentError(
@@ -493,6 +498,51 @@ def _validate_word_record(
             f"{utterance_uid} word {text!r} alignment score must be within [0, 1]"
         )
     return text, start_ms, end_ms, score
+
+
+def _trusted_vad_regions(
+    vad_regions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if isinstance(vad_regions, (str, bytes)) or not isinstance(vad_regions, Sequence):
+        raise ForcedAlignmentError("vad_regions must be a sequence")
+    trusted: list[dict[str, Any]] = []
+    seen_indices: set[int] = set()
+    previous_end_ms = -1
+    for position, raw in enumerate(vad_regions, start=1):
+        if not isinstance(raw, Mapping):
+            raise ForcedAlignmentError(f"vad_regions[{position}] must be an object")
+        vad_index = _require_integer(
+            raw.get("vad_region_index"),
+            f"vad_regions[{position}] vad_region_index",
+            minimum=1,
+        )
+        if vad_index in seen_indices:
+            raise ForcedAlignmentError("vad_region_index values must be unique")
+        seen_indices.add(vad_index)
+        start_ms = _require_integer(
+            raw.get("start_ms"), f"vad_regions[{position}] start_ms"
+        )
+        end_ms = _require_integer(
+            raw.get("end_ms"), f"vad_regions[{position}] end_ms", minimum=1
+        )
+        if end_ms <= start_ms:
+            raise ForcedAlignmentError(f"vad_regions[{position}] interval is invalid")
+        if start_ms < previous_end_ms:
+            raise ForcedAlignmentError("vad_regions must be chronological and disjoint")
+        if raw.get("source") != "silero_vad":
+            raise ForcedAlignmentError(
+                f"vad_regions[{position}] is not independent Silero VAD evidence"
+            )
+        trusted.append(
+            {
+                "vad_region_index": vad_index,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "source": "silero_vad",
+            }
+        )
+        previous_end_ms = end_ms
+    return trusted
 
 
 def _raw_aligned_words(result: Any, utterance_uid: str) -> list[Mapping[str, Any]]:
@@ -547,6 +597,7 @@ def _normalize_aligned_words(
     first_word_index: int,
     min_word_score: float,
     max_word_duration_ms: int,
+    vad_regions: Sequence[Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:
     utterance_uid = str(coarse["utterance_uid"])
     expected_tokens = _canonical_lexical_surfaces(str(coarse["text"]))
@@ -571,7 +622,6 @@ def _normalize_aligned_words(
             raw_index=raw_index,
             window_start_ms=int(coarse["start_ms"]),
             window_end_ms=int(coarse["end_ms"]),
-            max_word_duration_ms=max_word_duration_ms,
         )
         if normalized is None:
             punctuation_only_count += 1
@@ -583,6 +633,48 @@ def _normalize_aligned_words(
             )
         previous_end_ms = end_ms
         accepted.append((text, start_ms, end_ms, score))
+
+    duration_audits: dict[int, dict[str, Any]] = {}
+    for offset, (_, start_ms, end_ms, _) in enumerate(accepted):
+        if end_ms - start_ms <= max_word_duration_ms:
+            continue
+        next_start_ms = accepted[offset + 1][1] if offset + 1 < len(accepted) else None
+        matching_regions = [
+            region
+            for region in vad_regions
+            if int(region["start_ms"]) <= start_ms < int(region["end_ms"])
+            and int(region["end_ms"]) < end_ms
+            and next_start_ms is not None
+            and int(region["end_ms"]) <= next_start_ms
+        ]
+        trimmed_end_ms = (
+            int(matching_regions[0]["end_ms"])
+            if audio_review_supported and len(matching_regions) == 1
+            else end_ms
+        )
+        if (
+            not audio_review_supported
+            or len(matching_regions) != 1
+            or trimmed_end_ms <= start_ms
+            or trimmed_end_ms - start_ms > max_word_duration_ms
+        ):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} word {accepted[offset][0]!r} duration "
+                f"{end_ms - start_ms} ms exceeds the maximum "
+                f"{max_word_duration_ms} ms"
+            )
+        region = matching_regions[0]
+        duration_audits[offset] = {
+            "duration_context": DURATION_VAD_CONTEXT,
+            "raw_start_ms": start_ms,
+            "raw_end_ms": end_ms,
+            "vad_region_index": int(region["vad_region_index"]),
+            "vad_start_ms": int(region["start_ms"]),
+            "vad_end_ms": trimmed_end_ms,
+            "vad_source": "silero_vad",
+        }
+        text, _, _, score = accepted[offset]
+        accepted[offset] = (text, start_ms, trimmed_end_ms, score)
 
     expected_lexemes = [
         _lexeme(_alignment_model_text(token)) for token in expected_tokens
@@ -659,6 +751,7 @@ def _normalize_aligned_words(
                 "edit_kind": edit_kind,
                 "asr_token_index": token_edit["asr_token_index"],
                 "timing_source": TIMING_SOURCE,
+                **duration_audits.get(offset, {}),
                 **(
                     {"score_context": score_context}
                     if score_context is not None
@@ -1165,6 +1258,81 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
                     f"{utterance_uid} word {word_text!r} exceeds provenance "
                     "max_word_duration_ms"
                 )
+            duration_fields = DURATION_VAD_FIELDS.intersection(word)
+            if duration_fields:
+                if duration_fields != DURATION_VAD_FIELDS:
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} has incomplete "
+                        "duration VAD evidence"
+                    )
+                if word.get("duration_context") != DURATION_VAD_CONTEXT:
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} has invalid "
+                        "duration_context"
+                    )
+                if not audio_review_supported:
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} has unreviewed "
+                        "duration VAD evidence"
+                    )
+                raw_start_ms = _require_integer(
+                    word.get("raw_start_ms"),
+                    f"{utterance_uid} word {word_text!r} raw_start_ms",
+                )
+                raw_end_ms = _require_integer(
+                    word.get("raw_end_ms"),
+                    f"{utterance_uid} word {word_text!r} raw_end_ms",
+                    minimum=1,
+                )
+                vad_start_ms = _require_integer(
+                    word.get("vad_start_ms"),
+                    f"{utterance_uid} word {word_text!r} vad_start_ms",
+                )
+                vad_end_ms = _require_integer(
+                    word.get("vad_end_ms"),
+                    f"{utterance_uid} word {word_text!r} vad_end_ms",
+                    minimum=1,
+                )
+                _require_integer(
+                    word.get("vad_region_index"),
+                    f"{utterance_uid} word {word_text!r} vad_region_index",
+                    minimum=1,
+                )
+                if word.get("vad_source") != "silero_vad":
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} duration VAD source "
+                        "is not independent"
+                    )
+                if (
+                    raw_start_ms != word_start
+                    or raw_end_ms <= word_end
+                    or raw_end_ms - raw_start_ms <= max_word_duration_ms
+                    or raw_end_ms > window_end
+                    or vad_start_ms > raw_start_ms
+                    or raw_start_ms >= vad_end_ms
+                    or vad_end_ms != word_end
+                ):
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} duration VAD evidence "
+                        "does not bind the raw interval"
+                    )
+                next_word = (
+                    segment_words[segment_word_offset + 1]
+                    if segment_word_offset + 1 < len(segment_words)
+                    else None
+                )
+                if (
+                    not isinstance(next_word, Mapping)
+                    or vad_end_ms > _require_integer(
+                        next_word.get("start_ms"),
+                        f"{utterance_uid} next word start_ms",
+                    )
+                    or raw_end_ms > int(next_word["start_ms"])
+                ):
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} duration VAD boundary "
+                        "is not bounded by the next aligned word"
+                    )
             if word_start < window_start or word_end > window_end:
                 raise ForcedAlignmentError(
                     f"{utterance_uid} word {word_text!r} is outside its window"
@@ -1406,6 +1574,7 @@ def align_corrected_segments(
     min_word_score: float = DEFAULT_MIN_WORD_SCORE,
     max_word_duration_ms: int = DEFAULT_MAX_WORD_DURATION_MS,
     max_outward_drift_ms: int = DEFAULT_MAX_OUTWARD_DRIFT_MS,
+    vad_regions: Sequence[Mapping[str, Any]] = (),
     whisperx_module: Any | None = None,
     whisperx_version: str | None = None,
 ) -> dict[str, Any]:
@@ -1443,6 +1612,7 @@ def align_corrected_segments(
         raise ForcedAlignmentError(
             f"max_outward_drift_ms cannot exceed {DEFAULT_MAX_OUTWARD_DRIFT_MS}"
         )
+    trusted_vad_regions = _trusted_vad_regions(vad_regions)
     source = validate_coarse_segments(coarse_segments)
     path = Path(audio_path)
     if not path.is_file():
@@ -1523,6 +1693,7 @@ def align_corrected_segments(
             first_word_index=next_word_index,
             min_word_score=min_word_score,
             max_word_duration_ms=max_word_duration_ms,
+            vad_regions=trusted_vad_regions,
         )
         raw_punctuation_only_count += punctuation_count
         next_word_index += len(words)

@@ -17,6 +17,7 @@ from mas.engine.forced_align import (
     DEFAULT_MAX_WORD_DURATION_MS,
     DEFAULT_MIN_WORD_SCORE,
     DEFAULT_TURKISH_ALIGNMENT_MODEL,
+    DURATION_VAD_CONTEXT,
     EDITED_TOKEN_MIN_WORD_SCORE,
     REVIEW_WORD_SCORE,
     SUPPORTED_WHISPERX_VERSION,
@@ -904,6 +905,63 @@ class ForcedAlignmentTests(unittest.TestCase):
                         [_result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}])]
                     ),
                 )
+
+    def test_reviewed_overlong_ctc_word_uses_exact_independent_vad_boundary(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 6_000,
+                "text": "Allah'im ya",
+                "asr_text": "Allah'im ya",
+                "deletion_audio_reviewed": False,
+                "audio_reviewed": True,
+                "review_disposition": "confirmed_dialogue",
+                "utterance_uid": "utt-vad-duration",
+            }
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result(
+                    [
+                        {"word": "Allah'im", "start": 1.1, "end": 5.0},
+                        {"word": "ya", "start": 5.1, "end": 5.4},
+                    ]
+                )
+            ]
+        )
+        vad_regions = [
+            {
+                "vad_region_index": 7,
+                "start_ms": 1_000,
+                "end_ms": 1_700,
+                "source": "silero_vad",
+            },
+            {
+                "vad_region_index": 8,
+                "start_ms": 5_050,
+                "end_ms": 5_500,
+                "source": "silero_vad",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory),
+                coarse,
+                vad_regions=vad_regions,
+                whisperx_module=fake,
+            )
+
+        word = data["segments"][0]["words"][0]
+        self.assertEqual(word["start_ms"], 1_100)
+        self.assertEqual(word["end_ms"], 1_700)
+        self.assertEqual(word["raw_end_ms"], 5_000)
+        self.assertEqual(word["duration_context"], DURATION_VAD_CONTEXT)
+        self.assertEqual(data["report"]["maximum_alignment_word_duration_ms"], 600)
+
+        tampered = copy.deepcopy(data)
+        tampered["segments"][0]["words"][0]["vad_end_ms"] = 1_701
+        with self.assertRaisesRegex(ForcedAlignmentError, "does not bind"):
+            validate_forced_alignment_data(tampered)
 
     def test_unpadded_coarse_bounds_and_outward_drift_are_hard_bound(self) -> None:
         coarse = [

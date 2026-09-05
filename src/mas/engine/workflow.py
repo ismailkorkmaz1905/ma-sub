@@ -24,7 +24,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .forced_align import validate_coarse_segments, validate_forced_alignment_data
+from .forced_align import (
+    DURATION_VAD_CONTEXT,
+    validate_coarse_segments,
+    validate_forced_alignment_data,
+)
 from .id_translation import (
     DEFAULT_ID_BATCH_SIZE,
     create_id_translation_pack,
@@ -548,6 +552,42 @@ def _assert_same_audio(
     return alignment_audio_sha
 
 
+def _assert_alignment_duration_vad_evidence(
+    trusted_raw: Mapping[str, Any],
+    forced_alignment_data: Mapping[str, Any],
+) -> None:
+    raw_regions = {
+        int(region["vad_region_index"]): region
+        for region in trusted_raw["vad_regions"]
+    }
+    segments = forced_alignment_data.get("segments")
+    assert isinstance(segments, Sequence)
+    for segment in segments:
+        assert isinstance(segment, Mapping)
+        words = segment.get("words")
+        assert isinstance(words, Sequence)
+        for word in words:
+            assert isinstance(word, Mapping)
+            if word.get("duration_context") != DURATION_VAD_CONTEXT:
+                continue
+            region = raw_regions.get(int(word["vad_region_index"]))
+            expected = (
+                int(word["vad_start_ms"]),
+                int(word["vad_end_ms"]),
+                word["vad_source"],
+            )
+            actual = (
+                region.get("start_ms"),
+                region.get("end_ms"),
+                region.get("source"),
+            ) if region is not None else None
+            if actual != expected:
+                raise V2PipelineError(
+                    "Forced alignment duration VAD evidence does not match "
+                    f"raw ASR for word_index={word.get('word_index')}"
+                )
+
+
 def _coverage_config_from_raw(
     trusted_raw: Mapping[str, Any],
 ) -> SpeechCoverageConfig:
@@ -1067,6 +1107,7 @@ def build_strict_v2_artifacts(
         preparation.alignment_inputs,
     )
     audio_sha = _assert_same_audio(trusted_raw, trusted_alignment)
+    _assert_alignment_duration_vad_evidence(trusted_raw, trusted_alignment)
 
     # A caller may use ``recompute_final_speech_coverage`` with a custom policy
     # for diagnostics, but the schema/publication gate must use the exact

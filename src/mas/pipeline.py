@@ -415,7 +415,12 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             resumed = True
         else:
             _source_guard(state, download.video_path)
-            result = align_corrected_segments(audio.audio_path, bundle.alignment_inputs, device="cuda")
+            result = align_corrected_segments(
+                audio.audio_path,
+                bundle.alignment_inputs,
+                device="cuda",
+                vad_regions=raw["vad_regions"],
+            )
             atomic_write_json(alignment_path, result)
             resumed = False
         holder["aligned"] = result

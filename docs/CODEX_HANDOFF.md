@@ -7,7 +7,7 @@
 - Consolidation: [PR #1](https://github.com/ismailkorkmaz1905/ma-sub/pull/1) is merged, and the obsolete `engineering/ep12-reliability` branch was deleted locally and remotely.
 - Controller, source reliability, and preflight implementation commit: `09320beb0a51e02b44612ae745d07f7ceaf72b5a`. Resolve the review candidate with `git rev-parse HEAD`; documentation-only commits may be newer.
 - Recorded implementation worktree: clean and synchronized with `origin/main`
-- Main CI at `64b851e769977cf3c54409acbd375847b9cf8fab`: test and Dockerfile jobs passed in workflow run `33950517688` on 2026-09-05.
+- Main CI at `c2adfcd6a23512219b0fb41ca176336c53f9bfd6`: test and Dockerfile jobs passed in workflow run `33951396788` on 2026-09-05.
 
 Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr view 1` because this snapshot can become stale.
 
@@ -35,7 +35,7 @@ Always re-run `git status --short --branch`, `git rev-parse HEAD`, and `gh pr vi
 - Ported engine suite: `342 passed, 31 skipped`.
 - Cross-speaker focused suite: `82 passed`.
 - Local Python compilation and `git diff --check`: passed.
-- Exact `main` CI at `64b851e769977cf3c54409acbd375847b9cf8fab`: test and Dockerfile jobs passed. PR #1 checks are historical because the PR is merged.
+- Exact `main` CI at `c2adfcd6a23512219b0fb41ca176336c53f9bfd6`: test and Dockerfile jobs passed. PR #1 checks are historical because the PR is merged.
 - Docker was not available in the local Windows environment, so a local image build was not performed.
 - Gmail SMTP notification was verified by a real test email to the configured recipient. The app password remains outside Git in the Windows user environment.
 - A user-exported 3,225-byte Netscape cookie file was copied byte-for-byte to `C:\Users\Ismail\.config\ma-sub\youtube-cookies.txt`, restricted to the current Windows user, and bound through the persistent user-level `MAS_YTDLP_COOKIES` variable. Its 23 non-comment records and YouTube domain were validated without logging cookie values. Authenticated source acquisition and the equivalent RunPod secret-file mount remain unverified.

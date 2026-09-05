@@ -741,6 +741,12 @@ def run_remote_episode(episode, source_url=None):
                         / "translation_output"
                         / f"{name}_TR_TEXT_CORRECTED.zip",
                     ),
+                    (
+                        f"{remote_root}/translation_output/{name}_TR_CORRECTED.zip",
+                        local_root
+                        / "translation_output"
+                        / f"{name}_TR_CORRECTED.zip",
+                    ),
                 )
                 for position, (remote_file, local_file) in enumerate(
                     diagnostics, start=1

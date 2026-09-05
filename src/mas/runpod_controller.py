@@ -457,6 +457,13 @@ def run_remote_episode(episode, source_url=None):
     endpoint = None
     try:
         controller_started_pod = True
+        replacement_count = 0
+        max_replacements = 2
+        startup_timeout = int(os.getenv("MAS_RUNPOD_STARTUP_TIMEOUT_SECONDS", "180"))
+        if not 60 <= startup_timeout <= 600:
+            raise RunPodControllerError(
+                "MAS_RUNPOD_STARTUP_TIMEOUT_SECONDS must be within [60, 600]"
+            )
         if startup_mode == "start":
             print(f"[RUNPOD] starting pod {values['RUNPOD_POD_ID']}")
             try:
@@ -471,13 +478,38 @@ def run_remote_episode(episode, source_url=None):
                 client = _migrate_capacity_bound_pod(client, initial)
                 values["RUNPOD_POD_ID"] = client.pod_id
                 controller_started_pod = True
+                replacement_count += 1
         else:
             print(f"[RUNPOD] adopting newly deployed pod {values['RUNPOD_POD_ID']}")
-        pod = client.wait(
-            lambda item: item.get("desiredStatus") == "RUNNING" and _ssh_endpoint(item),
-            "startup",
-            timeout=600,
-        )
+        while True:
+            try:
+                pod = client.wait(
+                    lambda item: item.get("desiredStatus") == "RUNNING"
+                    and _ssh_endpoint(item),
+                    "startup",
+                    timeout=startup_timeout,
+                )
+                break
+            except RunPodControllerError as exc:
+                if (
+                    os.getenv("MAS_RUNPOD_AUTO_MIGRATE") != "1"
+                    or "startup timed out" not in str(exc)
+                    or replacement_count >= max_replacements
+                ):
+                    raise
+                current = client.get()
+                if current.get("desiredStatus") == "RUNNING":
+                    client.stop()
+                    current = client.wait(
+                        lambda item: item.get("desiredStatus") == "EXITED",
+                        "stalled-host shutdown",
+                        timeout=300,
+                    )
+                if current.get("desiredStatus") != "EXITED":
+                    raise
+                client = _migrate_capacity_bound_pod(client, current)
+                values["RUNPOD_POD_ID"] = client.pod_id
+                replacement_count += 1
         host, port = _ssh_endpoint(pod)
         endpoint = (host, port)
         _wait_for_ssh(key, host, port)

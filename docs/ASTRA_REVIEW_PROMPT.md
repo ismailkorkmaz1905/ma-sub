@@ -88,4 +88,3 @@ Return exactly:
 
 PASS is allowed only when every automated and real-environment gate is directly verified. Otherwise keep PR #1 draft and explicitly state that merge and stable tag remain prohibited.
 ```
-

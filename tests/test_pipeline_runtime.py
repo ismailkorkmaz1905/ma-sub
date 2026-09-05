@@ -63,7 +63,13 @@ def test_pending_extra_audio_review_uids_are_collected_once(tmp_path, monkeypatc
         "read_tr_correction_pack",
         lambda _path: SimpleNamespace(
             speech_holes=({"hole_uid": "hole"},),
-            asr_hallucination_records=({"utterance_uid": "candidate"},),
+            asr_hallucination_records=(
+                {"utterance_uid": "candidate", "reason": "automatic"},
+                {
+                    "utterance_uid": "explicit",
+                    "reason": "high_asr_no_speech_probability, explicit_uid_review_request",
+                },
+            ),
         ),
     )
     monkeypatch.setattr(
@@ -75,6 +81,7 @@ def test_pending_extra_audio_review_uids_are_collected_once(tmp_path, monkeypatc
                 {"utterance_uid": "candidate", "review_required": True},
                 {"utterance_uid": "extra-1", "review_required": True},
                 {"utterance_uid": "ignored", "review_required": False},
+                {"utterance_uid": "explicit", "review_required": True},
                 {"utterance_uid": "extra-2", "review_required": True},
             )
         ),
@@ -82,6 +89,7 @@ def test_pending_extra_audio_review_uids_are_collected_once(tmp_path, monkeypatc
 
     assert pipeline._pending_extra_audio_review_uids(input_pack, output_pack) == (
         "extra-1",
+        "explicit",
         "extra-2",
     )
 

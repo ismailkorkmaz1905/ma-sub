@@ -193,11 +193,19 @@ def _pending_extra_audio_review_uids(tr_pack, tr_text):
         str(item["utterance_uid"])
         for item in pack.asr_hallucination_records
     )
+    explicit_review_uids = {
+        str(item["utterance_uid"])
+        for item in pack.asr_hallucination_records
+        if "explicit_uid_review_request" in str(item.get("reason", "")).split(", ")
+    }
     return tuple(
         str(record["utterance_uid"])
         for record in output.records
-        if record["review_required"] is True
-        and str(record["utterance_uid"]) not in review_uids
+        if str(record["utterance_uid"]) in explicit_review_uids
+        or (
+            record["review_required"] is True
+            and str(record["utterance_uid"]) not in review_uids
+        )
     )
 
 

@@ -14,6 +14,7 @@ Production code lives under `src/mas/` and runs through `./mas`. Notebooks and t
 
 ## Start here
 
+- [Mimari harita](docs/ARCHITECTURE_MAP.md)
 - [Operator and architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
 - [EP12 incident acceptance criteria](docs/EP12_ACCEPTANCE.md)
 - [Codex continuation handoff](docs/CODEX_HANDOFF.md)

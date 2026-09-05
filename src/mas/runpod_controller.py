@@ -554,6 +554,44 @@ def run_remote_episode(episode, source_url=None):
             except (OSError, UnicodeError, ValueError) as exc:
                 raise RunPodControllerError("remote pipeline exit code is invalid") from exc
 
+            if exit_code not in (0, 20, 21):
+                diagnostics = (
+                    (
+                        f"{remote_root}/translation_input/{name}_TR_CORRECTION_PACK.zip",
+                        local_root / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip",
+                    ),
+                    (
+                        f"{remote_root}/prepare/audio_review_v2.json",
+                        local_root / "prepare" / "audio_review_v2.json",
+                    ),
+                    (
+                        f"{remote_root}/prepare/audio_review_v2.recovery.json",
+                        local_root / "prepare" / "audio_review_v2.recovery.json",
+                    ),
+                )
+                for position, (remote_file, local_file) in enumerate(
+                    diagnostics, start=1
+                ):
+                    temporary_file = temporary / f"diagnostic-{position}"
+                    try:
+                        _network_retry(
+                            scp
+                            + [
+                                f"root@{host}:{remote_file}",
+                                str(temporary_file),
+                            ],
+                            attempts=2,
+                        )
+                    except RunPodControllerError as exc:
+                        print(
+                            f"[RUNPOD] diagnostic download warning: {exc}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    local_file.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(temporary_file, local_file)
+                    print(f"[RUNPOD] diagnostic downloaded {local_file}")
+
             handoff = None
             if exit_code == 20:
                 handoff = f"{name}_TR_CORRECTION_PACK.zip"

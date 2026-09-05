@@ -31,6 +31,7 @@ export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles'
 export MAS_GMAIL_ADDRESS='your.account@gmail.com'
 export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
 export MAS_NOTIFY_TO='your.account@gmail.com'
+export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
 ./mas run 13 --source-url 'SOURCE_URL'
 ```
 
@@ -88,4 +89,4 @@ export MAS_DRIVE_STRICT_REMOTE='gdrive:MyDrive/Muhtemel_Ask_Subtitles'
 
 Stopping a Pod releases its GPU but may retain billable volume storage. A Pod with a network volume may need termination instead of stop. Decide that separately after artifacts are verified.
 
-See [architecture decisions](docs/ARCHITECTURE_DECISIONS.md), [incident acceptance](docs/EP12_ACCEPTANCE.md), and [Astra handoff](docs/ASTRA_HANDOFF.md).
+See [architecture decisions](docs/ARCHITECTURE_DECISIONS.md), [incident acceptance](docs/EP12_ACCEPTANCE.md), [Codex handoff](docs/CODEX_HANDOFF.md), [Astra handoff](docs/ASTRA_HANDOFF.md), and the [Astra review prompt](docs/ASTRA_REVIEW_PROMPT.md).

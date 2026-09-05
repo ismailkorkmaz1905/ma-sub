@@ -77,18 +77,20 @@ def test_pending_extra_audio_review_uids_are_collected_once(tmp_path, monkeypatc
         "validate_tr_correction_output",
         lambda *_paths: SimpleNamespace(
             records=(
-                {"utterance_uid": "hole", "review_required": True},
-                {"utterance_uid": "candidate", "review_required": True},
-                {"utterance_uid": "extra-1", "review_required": True},
-                {"utterance_uid": "ignored", "review_required": False},
-                {"utterance_uid": "explicit", "review_required": True},
-                {"utterance_uid": "extra-2", "review_required": True},
+                {"utterance_uid": "hole", "review_required": True, "asr_text": "a", "tr_corrected": "a"},
+                {"utterance_uid": "candidate", "review_required": True, "asr_text": "b", "tr_corrected": "b"},
+                {"utterance_uid": "extra-1", "review_required": True, "asr_text": "c", "tr_corrected": "c"},
+                {"utterance_uid": "ignored", "review_required": False, "asr_text": "d", "tr_corrected": "d"},
+                {"utterance_uid": "lexical-delete", "review_required": False, "asr_text": "lüks lüks", "tr_corrected": "lüks"},
+                {"utterance_uid": "explicit", "review_required": True, "asr_text": "e", "tr_corrected": "e"},
+                {"utterance_uid": "extra-2", "review_required": True, "asr_text": "f", "tr_corrected": "f"},
             )
         ),
     )
 
     assert pipeline._pending_extra_audio_review_uids(input_pack, output_pack) == (
         "extra-1",
+        "lexical-delete",
         "explicit",
         "extra-2",
     )

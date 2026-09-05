@@ -1,7 +1,6 @@
 import os
 import smtplib
 import time
-from email.header import Header
 from email.message import EmailMessage
 
 
@@ -19,7 +18,7 @@ def send_email(episode, event, details=None):
     message["From"] = sender
     message["To"] = recipient
     subject = f"Muhtemel Aşk {episode}. Bölüm" if episode is not None else "Muhtemel Aşk"
-    message["Subject"] = Header(f"{subject} - {event}", "utf-8").encode()
+    message["Subject"] = f"{subject} - {event}"
     message.set_content(
         f"Bölüm: {episode if episode is not None else '-'}\n"
         f"Durum: {event}\n"

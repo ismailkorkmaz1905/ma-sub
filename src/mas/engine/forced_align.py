@@ -251,6 +251,15 @@ def _token_edit_audit(
     return token_edits, audit
 
 
+def correction_deletes_lexical_tokens(asr_text: str, corrected_text: str) -> bool:
+    _, audit = _token_edit_audit(
+        asr_text,
+        corrected_text,
+        deletion_audio_reviewed=False,
+    )
+    return bool(audit["deleted_asr_token_count"])
+
+
 def validate_coarse_segments(
     coarse_segments: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1437,6 +1446,7 @@ __all__ = [
     "SUPPORTED_WHISPERX_VERSION",
     "TIMING_SOURCE",
     "align_corrected_segments",
+    "correction_deletes_lexical_tokens",
     "validate_coarse_segments",
     "validate_forced_alignment_data",
 ]

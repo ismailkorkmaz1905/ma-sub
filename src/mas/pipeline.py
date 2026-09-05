@@ -25,7 +25,11 @@ from .engine.api import (
     transcribe_raw_audio,
 )
 from .engine.download import atomic_write_bytes, atomic_write_json, download_source
-from .engine.forced_align import align_corrected_segments, validate_forced_alignment_data
+from .engine.forced_align import (
+    align_corrected_segments,
+    correction_deletes_lexical_tokens,
+    validate_forced_alignment_data,
+)
 from .engine.id_translation import (
     load_and_validate_id_translation_zip,
     load_default_id_translation_glossary,
@@ -251,7 +255,13 @@ def _pending_extra_audio_review_uids(tr_pack, tr_text):
         for record in output.records
         if str(record["utterance_uid"]) in explicit_review_uids
         or (
-            record["review_required"] is True
+            (
+                record["review_required"] is True
+                or correction_deletes_lexical_tokens(
+                    str(record["asr_text"]),
+                    str(record["tr_corrected"]),
+                )
+            )
             and str(record["utterance_uid"]) not in review_uids
         )
     )

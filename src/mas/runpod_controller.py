@@ -45,6 +45,23 @@ class RunPodClient:
                     if response.status < 200 or response.status >= 300:
                         raise RunPodControllerError(f"RunPod returned HTTP {response.status}")
                     return json.loads(payload) if payload else {}
+            except urllib.error.HTTPError as exc:
+                detail = None
+                try:
+                    payload = json.loads(exc.read(4096))
+                    if isinstance(payload, dict):
+                        for key in ("error", "message", "detail"):
+                            if isinstance(payload.get(key), str):
+                                detail = payload[key].strip()[:500]
+                                break
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pass
+                message = f"HTTP {exc.code}"
+                if detail:
+                    message += f": {detail}"
+                last_error = RunPodControllerError(message)
+                if attempt + 1 < self.attempts:
+                    self.sleep(2 ** attempt)
             except (urllib.error.URLError, TimeoutError, RunPodControllerError) as exc:
                 last_error = exc
                 if attempt + 1 < self.attempts:

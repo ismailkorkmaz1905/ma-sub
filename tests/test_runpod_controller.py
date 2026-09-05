@@ -43,6 +43,22 @@ def test_client_uses_bounded_authenticated_rest_request(monkeypatch):
     }
 
 
+def test_client_preserves_safe_runpod_http_error_detail(monkeypatch):
+    def open_request(request, timeout):
+        raise runpod_controller.urllib.error.HTTPError(
+            request.full_url,
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(b'{"error":"GPU host is unavailable"}'),
+        )
+
+    monkeypatch.setattr(runpod_controller.urllib.request, "urlopen", open_request)
+    client = runpod_controller.RunPodClient("pod123", "secret", attempts=1)
+    with pytest.raises(runpod_controller.RunPodControllerError, match="GPU host is unavailable"):
+        client.start()
+
+
 def test_wait_requires_running_ip_and_ssh_mapping():
     assert runpod_controller._ssh_endpoint({"desiredStatus": "RUNNING"}) is None
     assert runpod_controller._ssh_endpoint(

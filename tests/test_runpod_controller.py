@@ -66,6 +66,16 @@ def test_wait_requires_running_ip_and_ssh_mapping():
     ) == ("192.0.2.4", "10022")
 
 
+def test_running_pod_requires_explicit_one_time_adoption(monkeypatch):
+    pod = {"desiredStatus": "RUNNING"}
+    monkeypatch.delenv("MAS_RUNPOD_ADOPT_RUNNING", raising=False)
+    with pytest.raises(runpod_controller.RunPodControllerError, match="must be EXITED"):
+        runpod_controller._startup_mode(pod)
+    monkeypatch.setenv("MAS_RUNPOD_ADOPT_RUNNING", "1")
+    assert runpod_controller._startup_mode(pod) == "adopt"
+    assert runpod_controller._startup_mode({"desiredStatus": "EXITED"}) == "start"
+
+
 def test_ssh_authentication_failure_stops_without_retry(monkeypatch, tmp_path):
     calls = []
 

@@ -168,6 +168,15 @@ def _ssh_endpoint(pod):
     return str(host), str(port)
 
 
+def _startup_mode(pod):
+    status = pod.get("desiredStatus", "UNKNOWN")
+    if status == "EXITED":
+        return "start"
+    if status == "RUNNING" and os.getenv("MAS_RUNPOD_ADOPT_RUNNING") == "1":
+        return "adopt"
+    raise RunPodControllerError(f"pod must be EXITED before an automatic run; status={status}")
+
+
 def _stream(chunk, target):
     target.write(chunk.decode("utf-8", "replace"))
     target.flush()
@@ -278,18 +287,18 @@ def run_remote_episode(episode, source_url=None):
     cookie = Path(values["MAS_YTDLP_COOKIES"]).resolve()
     client = RunPodClient(values["RUNPOD_POD_ID"], values["RUNPOD_API_KEY"])
     initial = client.get()
-    if initial.get("desiredStatus") != "EXITED":
-        raise RunPodControllerError(
-            f"pod must be EXITED before an automatic run; status={initial.get('desiredStatus', 'UNKNOWN')}"
-        )
+    startup_mode = _startup_mode(initial)
 
     started_at = time.monotonic()
     controller_started_pod = False
     endpoint = None
     try:
-        print(f"[RUNPOD] starting pod {values['RUNPOD_POD_ID']}")
         controller_started_pod = True
-        client.start()
+        if startup_mode == "start":
+            print(f"[RUNPOD] starting pod {values['RUNPOD_POD_ID']}")
+            client.start()
+        else:
+            print(f"[RUNPOD] adopting newly deployed pod {values['RUNPOD_POD_ID']}")
         pod = client.wait(
             lambda item: item.get("desiredStatus") == "RUNNING" and _ssh_endpoint(item),
             "startup",

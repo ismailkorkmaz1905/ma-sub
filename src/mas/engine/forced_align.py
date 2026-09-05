@@ -1137,10 +1137,31 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
             raise ForcedAlignmentError(
                 f"{utterance_uid} alignment drift audit mismatch"
             )
-        if (
+        exceeds_default_drift = (
             expected_drift_audit["early_outward_drift_ms"] > max_outward_drift_ms
             or expected_drift_audit["late_outward_drift_ms"] > max_outward_drift_ms
-        ):
+        )
+        contextual_drift_supported = (
+            exceeds_default_drift
+            and any(
+                word.get("score_context") == "adjacent_unchanged_word"
+                for word in segment_words
+            )
+            and expected_drift_audit["early_outward_drift_ms"]
+            <= coarse_start - window_start
+            and expected_drift_audit["late_outward_drift_ms"]
+            <= window_end - coarse_end
+        )
+        expected_drift_context = (
+            "contextual_low_score_alignment_window"
+            if contextual_drift_supported
+            else None
+        )
+        if raw_segment.get("drift_context") != expected_drift_context:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} drift_context does not match acoustic evidence"
+            )
+        if exceeds_default_drift and not contextual_drift_supported:
             raise ForcedAlignmentError(
                 f"{utterance_uid} exceeds provenance max_outward_drift_ms"
             )
@@ -1405,15 +1426,27 @@ def align_corrected_segments(
             coarse_start_ms=coarse["coarse_start_ms"],
             coarse_end_ms=coarse["coarse_end_ms"],
         )
+        exceeds_default_drift = (
+            drift_audit["early_outward_drift_ms"] > max_outward_drift_ms
+            or drift_audit["late_outward_drift_ms"] > max_outward_drift_ms
+        )
+        contextual_drift_supported = (
+            exceeds_default_drift
+            and any(
+                word.get("score_context") == "adjacent_unchanged_word"
+                for word in words
+            )
+            and drift_audit["early_outward_drift_ms"]
+            <= coarse["coarse_start_ms"] - coarse["start_ms"]
+            and drift_audit["late_outward_drift_ms"]
+            <= coarse["end_ms"] - coarse["coarse_end_ms"]
+        )
         _, edit_audit = _token_edit_audit(
             str(coarse["asr_text"]),
             str(coarse["text"]),
             deletion_audio_reviewed=bool(coarse["deletion_audio_reviewed"]),
         )
-        if (
-            drift_audit["early_outward_drift_ms"] > max_outward_drift_ms
-            or drift_audit["late_outward_drift_ms"] > max_outward_drift_ms
-        ):
+        if exceeds_default_drift and not contextual_drift_supported:
             raise ForcedAlignmentError(
                 f"{coarse['utterance_uid']} exceeds max_outward_drift_ms "
                 f"{max_outward_drift_ms}: {drift_audit}"
@@ -1429,6 +1462,11 @@ def align_corrected_segments(
                 "coarse_start_ms": coarse["coarse_start_ms"],
                 "coarse_end_ms": coarse["coarse_end_ms"],
                 "drift_audit": drift_audit,
+                **(
+                    {"drift_context": "contextual_low_score_alignment_window"}
+                    if contextual_drift_supported
+                    else {}
+                ),
                 "text": coarse["text"],
                 "asr_text": coarse["asr_text"],
                 "deletion_audio_reviewed": coarse["deletion_audio_reviewed"],

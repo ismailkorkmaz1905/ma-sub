@@ -463,8 +463,10 @@ class ForcedAlignmentTests(unittest.TestCase):
     def test_unchanged_word_uses_bounded_adjacent_score_context(self) -> None:
         coarse = [
             {
-                "start_ms": 1_000,
+                "start_ms": 100,
                 "end_ms": 3_000,
+                "coarse_start_ms": 1_000,
+                "coarse_end_ms": 2_500,
                 "text": "Ağabeyim Ağabey",
                 "asr_text": "Ağabeyim Ağabey",
                 "deletion_audio_reviewed": False,
@@ -475,8 +477,8 @@ class ForcedAlignmentTests(unittest.TestCase):
             [
                 _result(
                     [
-                        {"word": "Ağabeyim", "start": 1.1, "end": 1.4, "score": 0.275},
-                        {"word": "Ağabey", "start": 1.5, "end": 1.9, "score": 0.80},
+                        {"word": "Ağabeyim", "start": 0.3, "end": 0.8, "score": 0.275},
+                        {"word": "Ağabey", "start": 1.1, "end": 1.4, "score": 0.80},
                     ]
                 )
             ]
@@ -493,6 +495,10 @@ class ForcedAlignmentTests(unittest.TestCase):
             data["words"][0]["score_context"], "adjacent_unchanged_word"
         )
         self.assertNotIn("score_context", data["words"][1])
+        self.assertEqual(
+            data["segments"][0]["drift_context"],
+            "contextual_low_score_alignment_window",
+        )
 
     def test_inserted_token_requires_edited_token_acoustic_floor(self) -> None:
         coarse = [

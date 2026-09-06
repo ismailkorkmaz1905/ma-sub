@@ -1,5 +1,9 @@
 # Codex handoff
 
+## Current override - 2026-09-06 Astra review
+
+Read [the current review](ASTRA_REVIEW_2026-09-06.md), [all 63 controller logs and stage durations](EP11_CONTROLLER_LOG_INVENTORY.md), and [GPT transcription evaluation](GPT_TRANSCRIPTION_EVALUATION.md) first. They supersede historical status and continuation prompts below. Episode 11 is incomplete. Production has no speaker-evidence acquisition path; historical audio-review PASS does not bind the new provisional return. Local fixes passed 563 tests with 32 skipped in 37.62 seconds. No GPU or delivery PASS follows from those tests. Paid compute and Drive mutation remain prohibited without renewed explicit permission. Do not execute historical resume/invalidation commands.
+
 ## Repository snapshot
 
 - Repository: `ismailkorkmaz1905/ma-sub`
@@ -105,7 +109,7 @@ This section supersedes the older Episode 11 status and continuation prompt abov
 
 Observed causes of delay and cost:
 
-1. Raw ASR reran after code releases because checkpoint identity was too broadly bound; forced-alignment-only changes therefore repeated `104.0-175.2 s` ASR work.
+1. Correction: the `104.0-175.2 s` raw-stage durations do not prove repeated transcription or code-driven invalidation. The raw input digest does not contain code/Git identity. See the current review for the evidence and missing legacy checkpoint provenance.
 2. The first overlap candidate implementation performed unbounded external-word combination searches. One run was manually stopped after about `781 s`; commits `9e4ae5b` and `33637d3` bounded the search and avoided redundant candidates, but the exact candidate still spent `755.8 s` before the final fail-closed overlap.
 3. Provider capacity and SSH readiness failures caused repeated start/stop cycles and migrations. Fresh Pods repeated bootstrap and ffmpeg installation.
 4. The pipeline correctly failed closed on unresolved overlaps, but the review artifact did not initially include the final two exact conflict UIDs, causing another correction-return cycle.

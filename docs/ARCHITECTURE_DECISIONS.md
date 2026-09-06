@@ -46,7 +46,19 @@ The in-pod controller requests `POST https://rest.runpod.io/v1/pods/{podId}/stop
 
 `runpod/run-episode.sh` imposes a 14,400-second maximum run and a 1,800-second no-log-progress limit unless explicitly overridden. It terminates the process group, preserves already atomic checkpoints, and requests provider-side stop. Storage cost is reported separately from GPU compute cost.
 
-## Provider references
+## ADR-012: Reviewed dialogue is not speaker identity
+
+Audio review can establish that words were spoken, not that overlapping utterances came from different speakers. Synthetic `acoustic-overlap-*` lanes and their persisted provenance are rejected. Production speaker acquisition is still missing; tests with injected identities do not establish an end-to-end capability. See [the review](ASTRA_REVIEW_2026-09-06.md).
+
+## ADR-013: Reuse model calls, not unbound completed alignments
+
+Successful alignment calls are journaled under exact transcript/options, audio hash, actual model tensor/config/dictionary digest, model/version/device and implementation/dependency hashes. Reused raw outputs still pass current acoustic/timing validators. Completed output additionally binds correction inputs, VAD and relevant code; its output digest covers the actual-model fingerprint in provenance. Legacy output without a matching marker is preserved and rejected. Downloadable model revision pinning and safe raw-ASR legacy adoption remain unresolved release concerns.
+
+## ADR-014: Episode deadline survives controller restarts
+
+The controller's default 14,400-second wall deadline is anchored to the earliest retained episode start and a checksum-bound persisted origin. Restarting does not reset it. Precompute and network waits share the remaining allowance; bounded shutdown/diagnostic grace remains available after expiry. Extending the total allowance requires operator approval, not deletion of history. This is a wall-time guard, not a GPU billing measurement or a demonstrated four-hour performance result.
+
+## Provider references (historical)
 
 - [RunPod Stop a Pod REST API](https://docs.runpod.io/api-reference/pods/POST/pods/podId/stop)
 - [RunPod Find a Pod by ID REST API](https://docs.runpod.io/api-reference/pods/GET/pods/podId)

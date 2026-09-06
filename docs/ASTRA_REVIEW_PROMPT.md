@@ -1,5 +1,7 @@
 # Astra review prompt
 
+Read [the 2026-09-06 review](ASTRA_REVIEW_2026-09-06.md) before this historical prompt. It corrects unsupported raw-ASR invalidation claims and records the current paid-operation prohibition and missing speaker evidence.
+
 Copy the following prompt into a fresh Astra review session after the candidate commit and real-run evidence are available.
 
 ```text
@@ -108,7 +110,7 @@ Apply this addendum before the prompt above. The review starts now, before final
 - Review candidate `33637d3a31ee49c82813ca947ffd3b56174f9571` and the later documentation commit. Preserve the dirty worktree if any.
 - Do not start or migrate RunPod, execute `.\mas.ps1 run 11`, mutate Drive, delete volume `xgogcmey5o`, or incur paid services without explicit new user authority.
 - Deep-review the whole production codebase and all Episode 11 controller/remote logs. Repair locally provable defects; run focused/full tests, `git diff --check`, and available Docker/static checks; commit and push meaningful stages to `main`.
-- Explain the observed delay chain: overly broad checkpoint invalidation repeating raw ASR, initially unbounded overlap candidate combinations, remaining expensive forced alignment, provider capacity/SSH failures, repeated fresh-Pod bootstrap, a late two-UID review cycle, and transfer/network retries. Distinguish log-derived seconds from the user's unverified report of nearly `21 hours` and approximately `$20`.
+- Explain the observed delay chain: missing persistent alignment-call reuse, unbounded overlap candidate paths, provider capacity/SSH failures, repeated fresh-Pod bootstrap, a late two-UID review cycle, and transfer/network retries. Raw-stage duration alone does not prove repeated transcription; code-driven raw-ASR invalidation is unsupported by its input digest. Distinguish log-derived seconds from the user's unverified report of nearly `21 hours` and approximately `$20`.
 - Validate the local corrected-return ZIP using manifest SHA-256 `195f7d1509cb3592fb6ed207d1c6b088930a02006d4cfc338a3ec3f92cc6c9bf` and file SHA-256 `DA278A26B22BC507D40577E2658F7E9A48374154BD978B940125AD1CB1C7BC2A`. Its remote consumption is NOT VERIFIED.
 - The exact unresolved pair is `MA11-TR-a09b20542760d351` and `MA11-TR-1144d768dc92c4a9`. Do not invent speaker identities or corrected text.
 - Audit stale YouTube-cookie handling and Gmail status notification event/delivery evidence without exposing credentials.

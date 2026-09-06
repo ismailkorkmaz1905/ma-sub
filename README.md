@@ -10,7 +10,7 @@ source -> audio -> Turkish ASR -> acoustic review -> correction handoff
 
 Production code lives under `src/mas/` and runs through `./mas`. Notebooks and the imported source snapshot under `legacy/` are read-only reference material, not production entrypoints.
 
-> Release status: Episode 11 completed real RTX 4090 source, audio, and raw-ASR stages. The Turkish correction return was accepted, and the previous bounded audio-review policy resolved 107 of 245 records while leaving 138 pending. A contextual machine-review policy now keeps non-orphan boundary speech, does not invent text for blank boundary intervals, records hash-bound decision evidence, and requires production forced alignment. Its local suite passed, but a real resumed GPU run has not yet verified the 138 decisions. Indonesian translation, strict mux, Drive readback, and delivery remain incomplete. Do not create a stable tag until the Astra review and all real episode gates pass.
+> Release status, 2026-09-06: FAIL for release readiness. [Current Astra review](docs/ASTRA_REVIEW_2026-09-06.md) supersedes historical Episode 11 progress and resume instructions below. Local repairs passed 563 tests, 32 skipped, in 37.62 seconds. Production speaker evidence is missing, and the old audio-review PASS does not bind the new return. TR/ID subtitles, strict mux and Drive delivery remain incomplete. Paid compute and Drive mutation require renewed explicit permission. No stable tag.
 
 ## Start here
 

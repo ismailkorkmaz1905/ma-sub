@@ -1,5 +1,7 @@
 # Astra handoff
 
+Current override, 2026-09-06: [Astra review](ASTRA_REVIEW_2026-09-06.md) supersedes the historical status and resume instructions below. Local repairs are not Episode 11 completion. Missing production speaker evidence and stale review binding remain blockers. No paid compute or Drive mutation without renewed explicit permission.
+
 ## Current boundary
 
 The maintained package, strict CLI orchestration, historical source archive, runtime policy, Docker definition, and RunPod control scripts are in this branch. Legacy notebooks are reference-only under `legacy/`.
@@ -170,7 +172,7 @@ Current facts:
 Review and repair priorities:
 
 1. Reconcile every controller and remote log listed in `docs/EP11_FIRST_PRODUCTION_RUN.md` with code releases and checkpoints.
-2. Fix checkpoint identity granularity so forced-alignment-only releases do not needlessly invalidate raw ASR, without weakening source, model, code, or artifact integrity.
+2. Establish raw-checkpoint generating-code provenance and actual recovery behavior. Code-driven raw ASR invalidation was not supported by the inspected input digest; do not treat it as a proven cause or silently rebind legacy artifacts.
 3. Prove overlap candidate search is bounded and deterministic on adversarial and Episode 11-shaped fixtures. Audit the acoustic-lane provenance checks and the two remaining UIDs without inventing text or speaker identity.
 4. Reduce fresh-Pod bootstrap repetition through the existing image/runtime design, preserving exact dependency evidence.
 5. Audit transfer retries, finite timeouts, no-progress watchdogs, adoption/migration behavior, and shutdown on every exit path.

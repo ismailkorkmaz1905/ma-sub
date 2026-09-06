@@ -53,6 +53,11 @@ Production entrypoints:
 
 ## Working style
 
+- Do not load large JSON, SRT, or log files in full. Read the relevant ranges and records only.
+- Inspect only the episode or job directory relevant to the task.
+- Treat generated outputs as artifacts, not source code.
+- Do not open audio or WAV files unless the user explicitly requests audio inspection.
+- Read checkpoint and progress files selectively.
 - Think before acting. Be concise in output and thorough in reasoning.
 - Execute clearly scoped work without narration, status chatter, or confirmation requests.
 - If a required step fails, state what failed, why, and what was attempted, then stop.

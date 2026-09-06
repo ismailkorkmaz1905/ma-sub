@@ -596,6 +596,7 @@ def test_missing_audio_review_overrides_does_not_touch_remote(monkeypatch, tmp_p
 
 def test_ssh_has_bounded_liveness_options(tmp_path):
     command = runpod_controller._ssh_args(tmp_path / "key", "192.0.2.4", "10022")
+    assert command[1:3] == ["-n", "-T"]
     assert "ConnectionAttempts=2" in command
     assert "ServerAliveInterval=10" in command
     assert "ServerAliveCountMax=3" in command

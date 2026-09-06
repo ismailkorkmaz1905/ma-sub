@@ -547,6 +547,8 @@ def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host, b
 def _ssh_args(key, host, port):
     return [
         "ssh",
+        "-n",
+        "-T",
         "-i",
         str(key),
         "-p",

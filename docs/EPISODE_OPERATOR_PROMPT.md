@@ -1,5 +1,7 @@
 # Episode {{EPISODE}} operatör promptu
 
+Son kullanıcı tercihi (2026-09-06): Bölüm 12 MP4'ünü olduğu gibi koru; yeniden kodlama başlatma. Yeni bölümlerde yüksek görüntü kalitesi ve 1080p öncelikli, bölüm başına yaklaşık 3 GB hedef olsun. 3 GB kesin tavan değildir; boyut uğruna belirgin kalite kaybı yaratma. Bölüm süresine göre bit hızını ve uygun codec'i kısa gerçek sahne denemeleriyle seç; aşağıdaki H.264 tanımı mevcut uygulamayı belirtir, codec tercihini sabitlemez. Bu boyut hedefi henüz ana koda uygulanmadı; çalıştırmadan önce mevcut encoder ayarını kontrol et. Ana teslim adını resmi YouTube başlığıyla eşleştir; inceleme/strict ayrımını kanıt kayıtlarında koru.
+
 Native terminal kullan. Lean-ctx veya kaldırılmış MCP araçlarını zorunlu tutma. Önce docs/SON_DURUM_VE_BOLUM_13.md oku. Önceki bölümün var/ ve EPISODES/ kayıtları C:/Users/Ismail/CodeBase/ma-sub-archive-20260906 altına taşındı; eski yolu yok diye yeniden üretim başlatma. Silinmiş geçici sesler gerekirse korunan özgün kaynaktan yeniden çıkarılabilir.
 
 Yerel bilgisayarda uzun video dönüştürme veya ağır konuşmacı işi başlatma; yerel encode ile testleri aynı anda çalıştırma. Bu makine önceki denemede kullanılamaz hâle geldi. Uzak GPU için önce kısa bağlantı, dosya doğrulama ve gerçek MP4 örneği tamamlanmalı; örnek hızıyla süre/bütçe hesaplanmalı. Önceki iki denemede SSH süreci çıktı üretse de kapanmadı; kök neden UNKNOWN. Aynı controller'ı düzeltmeden tekrar başlatma. Yarım saat gibi hedefleri ölçüm olmadan garanti etme.

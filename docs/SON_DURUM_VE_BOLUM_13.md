@@ -47,6 +47,8 @@ Kalıcı toplu silme otomatik güvenlik denetiminde engellendiği için geri al�
 
 ## Cuma başlamadan önce
 
+**Son tercih, 6 Eylül:** Bölüm 12 mevcut hâliyle kalacak; yeniden sıkıştırma yapılmayacak. Drive'daki adı YouTube başlığıyla eşleşen `Muhtemel Aşk 12. Bölüm.mp4`. Sonraki bölümlerde öncelik yüksek görüntü kalitesi ve 1080p; bölüm başına yaklaşık 3 GB hedefleniyor. Bu kesin üst sınır değil: boyuta yetişmek için belirgin görüntü bozulması kabul edilmeyecek. Uygun sıkıştırma, bölüm süresi ve kısa sahne denemelerine göre seçilecek. Bu tercih şimdilik not ve operatör talimatıdır; ana kodun boyut ayarı henüz değiştirilmedi.
+
 - **YouTube çerezini yenile.** Cuma hâlâ çalışacağı garanti değil.
 - **Drive bağlantısını kontrol et.** Ortak Google bağlantısında kota hatası yaşandı. Kendi Google bağlantı kimliğine geçmek gerekiyor; kullanıcı hesabıyla yetkilendirme gerekebilir.
 - **Gmail'i bir kez dene.** Bugün günlük gönderim sınırına takıldı. Bildirimlerin gittiğini varsayma.

@@ -166,8 +166,10 @@ class MKVRoundTripTests(unittest.TestCase):
                 float(video_packet["dts_time"]), float(audio_packet["pts_time"])
             )
 
-            id_entries = [SubtitleEntry(1, 1_000, 2_500, "Defne sudah datang.")]
-            tr_entries = [SubtitleEntry(1, 1_000, 2_500, "Defne geldi.")]
+            id_entries = [SubtitleEntry(1, 0, 500, "Ya."),
+                          SubtitleEntry(2, 1_000, 2_500, "Defne sudah datang.")]
+            tr_entries = [SubtitleEntry(1, 0, 500, "Evet."),
+                          SubtitleEntry(2, 1_000, 2_500, "Defne geldi.")]
             write_srt(id_srt, id_entries)
             write_srt(tr_srt, tr_entries)
 
@@ -181,6 +183,10 @@ class MKVRoundTripTests(unittest.TestCase):
             extracted_id, extracted_tr = extract_softsubs(output, root / "extracted")
 
             self.assertTrue(report["verified"])
+            self.assertEqual(report["subtitle_timestamp_compensation_seconds"], "0")
+            self.assertEqual(
+                self._first_packet(output, 0)["pts_time"], video_packet["pts_time"]
+            )
             self.assertEqual(report["subtitle_order"], ["ind", "tur"])
             self.assertTrue(report["indonesian_default"])
             self.assertFalse(report["turkish_default"])

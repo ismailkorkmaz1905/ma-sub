@@ -8,7 +8,6 @@ their SRT content is compared exactly before the final MKV is published.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import json
 import os
@@ -193,72 +192,6 @@ def compute_av_stream_hashes(
     if not hashes:
         raise MuxError(f"No video/audio stream hashes were produced for {source}")
     return hashes
-
-
-def _subtitle_timestamp_compensation(
-    source: Path,
-    source_probe: Mapping[str, Any],
-    *,
-    ffprobe_bin: str,
-) -> Decimal:
-    """Compensate FFmpeg's Matroska shift for negative first AV presentation.
-
-    AAC/Opus encoder-delay packets commonly have a small negative PTS even when
-    the container reports start_time=0. Matroska moves every presented stream
-    forward to avoid that negative timestamp, which would otherwise move SRT
-    cues too. Decode timestamps from reordered H.264/H.265 B-frames can be more
-    negative without changing presentation start, so DTS must not drive this
-    compensation. A matching negative input offset keeps extracted subtitle
-    milliseconds exact.
-    """
-
-    minimum = Decimal("0")
-    av_streams = _streams(source_probe, "video") + _streams(source_probe, "audio")
-    for stream in av_streams:
-        stream_index = stream.get("index")
-        if not isinstance(stream_index, int):
-            continue
-        command = [
-            _tool(ffprobe_bin),
-            "-v",
-            "error",
-            "-select_streams",
-            str(stream_index),
-            "-read_intervals",
-            "%+#1",
-            "-show_packets",
-            "-show_entries",
-            "packet=pts_time,dts_time",
-            "-of",
-            "json",
-            str(source),
-        ]
-        result = _run(
-            command,
-            description=f"first-packet timestamp probe for stream {stream_index}",
-        )
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise MuxError(
-                f"ffprobe returned invalid packet JSON for stream {stream_index}"
-            ) from exc
-        packets = payload.get("packets", ()) if isinstance(payload, Mapping) else ()
-        if not isinstance(packets, Sequence) or isinstance(packets, (str, bytes)):
-            continue
-        for packet in packets[:1]:
-            if not isinstance(packet, Mapping):
-                continue
-            raw = packet.get("pts_time")
-            if not isinstance(raw, str):
-                continue
-            try:
-                value = Decimal(raw)
-            except InvalidOperation:
-                continue
-            if value < minimum:
-                minimum = value
-    return minimum
 
 
 def _assert_entry_lists_equal(
@@ -516,11 +449,6 @@ def mux_softsubs(
         if verify_stream_hashes
         else None
     )
-    subtitle_compensation = _subtitle_timestamp_compensation(
-        source,
-        source_probe,
-        ffprobe_bin=ffprobe_bin,
-    )
 
     temporary = _temporary_output(destination, ".partial.mkv")
     command = [
@@ -534,8 +462,6 @@ def mux_softsubs(
         str(source),
     ]
     for subtitle_source in (id_source, tr_source):
-        if subtitle_compensation < 0:
-            command.extend(("-itsoffset", format(subtitle_compensation, "f")))
         command.extend(("-sub_charenc", "UTF-8", "-i", str(subtitle_source)))
     command.extend([
         "-map",
@@ -568,6 +494,8 @@ def mux_softsubs(
         "title=Türkçe",
         "-disposition:s:1",
         "0",
+        "-avoid_negative_ts",
+        "disabled",
         str(temporary),
     ])
     try:
@@ -626,9 +554,7 @@ def mux_softsubs(
                 "source": source_hashes,
                 "output": output_hashes,
             },
-            "subtitle_timestamp_compensation_seconds": format(
-                subtitle_compensation, "f"
-            ),
+            "subtitle_timestamp_compensation_seconds": "0",
             "ffmpeg_command": command[:-1] + [str(destination)],
         }
     except BaseException:

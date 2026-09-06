@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence, Union, get_args, get_origin
 
 from .speaker import overlap_is_unsafe, speaker_id
+from ..reliability import UnitJournal, digest
 
 
 FORCED_ALIGNMENT_FORMAT_VERSION = "1.0"
@@ -50,6 +51,7 @@ AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
 OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v1"
+MAX_OVERLAP_COMBINATIONS = 4096
 DURATION_VAD_FIELDS = frozenset(
     {
         "duration_context",
@@ -1081,33 +1083,10 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
         raise ForcedAlignmentError(
             "provenance overlap acoustic component count mismatch"
         )
-    acoustic_lane_by_uid: dict[str, str] = {}
-    for expected_component_index, component in enumerate(acoustic_components, start=1):
-        if not isinstance(component, Mapping):
-            raise ForcedAlignmentError("acoustic overlap component must be an object")
-        if component.get("component_index") != expected_component_index:
-            raise ForcedAlignmentError("acoustic overlap component index mismatch")
-        lanes = component.get("lanes")
-        if isinstance(lanes, (str, bytes)) or not isinstance(lanes, Sequence):
-            raise ForcedAlignmentError("acoustic overlap lanes must be a sequence")
-        if len(lanes) < 2:
-            raise ForcedAlignmentError("acoustic overlap component needs two lanes")
-        for expected_lane_index, lane in enumerate(lanes, start=1):
-            if not isinstance(lane, Mapping):
-                raise ForcedAlignmentError("acoustic overlap lane must be an object")
-            uid = _require_nonempty_string(
-                lane.get("utterance_uid"), "acoustic overlap utterance_uid"
-            )
-            lane_id = _require_nonempty_string(
-                lane.get("speaker_id"), "acoustic overlap speaker_id"
-            )
-            expected_lane_id = (
-                f"acoustic-overlap-{expected_component_index:04d}-lane-"
-                f"{expected_lane_index:02d}"
-            )
-            if lane_id != expected_lane_id or uid in acoustic_lane_by_uid:
-                raise ForcedAlignmentError("acoustic overlap lane binding is invalid")
-            acoustic_lane_by_uid[uid] = lane_id
+    if acoustic_components:
+        raise ForcedAlignmentError(
+            "synthetic acoustic overlap lanes are not independent speaker evidence"
+        )
 
     segments = data.get("segments")
     flat_words = data.get("words")
@@ -1199,12 +1178,9 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
             raise ForcedAlignmentError(
                 f"{utterance_uid} audio-review fields are inconsistent"
             )
-        expected_acoustic_lane = acoustic_lane_by_uid.get(utterance_uid)
-        if expected_acoustic_lane is not None and (
-            not audio_review_supported or segment_speaker_id != expected_acoustic_lane
-        ):
+        if segment_speaker_id and segment_speaker_id.startswith("acoustic-overlap-"):
             raise ForcedAlignmentError(
-                f"{utterance_uid} acoustic overlap lane lacks review evidence"
+                f"{utterance_uid} synthetic lane is not independent speaker evidence"
             )
         expected_token_edits, expected_edit_audit = _token_edit_audit(
             asr_text,
@@ -1524,8 +1500,6 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
 
     if word_indices != set(range(1, len(flattened) + 1)):
         raise ForcedAlignmentError("aligned word_index sequence is not contiguous")
-    if not set(acoustic_lane_by_uid).issubset(seen_uids):
-        raise ForcedAlignmentError("acoustic overlap lane references an unknown segment")
     chronological = sorted(
         flattened,
         key=lambda word: (
@@ -1808,11 +1782,27 @@ def _resolve_alignment_overlaps(
 
     def select_component(component_uids: Sequence[str]) -> bool:
         option_sets = [options[uid] for uid in component_uids]
+        combination_count = math.prod(len(option_set) for option_set in option_sets)
+        if combination_count > MAX_OVERLAP_COMBINATIONS:
+            raise ForcedAlignmentError(
+                f"overlap candidate budget exceeded: {combination_count} combinations "
+                f"for {', '.join(component_uids)}; limit {MAX_OVERLAP_COMBINATIONS}"
+            )
+        envelope_start = min(
+            int(word["start_ms"])
+            for option_set in option_sets for _, words in option_set for word in words
+        )
+        envelope_end = max(
+            int(word["end_ms"])
+            for option_set in option_sets for _, words in option_set for word in words
+        )
         outside_words = [
             word
             for uid, words in selected.items()
             if uid not in component_uids
             for word in words
+            if int(word["end_ms"]) > envelope_start
+            and int(word["start_ms"]) < envelope_end
         ]
         best: tuple[Any, ...] | None = None
         best_joint_count = -1
@@ -2020,9 +2010,15 @@ def _resolve_alignment_overlaps(
                     expanded.add(str(source[neighbor]["utterance_uid"]))
         component_uids = sorted(expanded, key=order.__getitem__)
         option_sets = [options[uid] for uid in component_uids]
-        if math.prod(len(option_set) for option_set in option_sets) > 200_000:
+        if math.prod(len(option_set) for option_set in option_sets) > MAX_OVERLAP_COMBINATIONS:
             component_uids = list(seed_uids)
             option_sets = [options[uid] for uid in component_uids]
+        combination_count = math.prod(len(option_set) for option_set in option_sets)
+        if combination_count > MAX_OVERLAP_COMBINATIONS:
+            raise ForcedAlignmentError(
+                f"overlap candidate budget exceeded: {combination_count} combinations "
+                f"for {', '.join(component_uids)}; limit {MAX_OVERLAP_COMBINATIONS}"
+            )
         envelope_start = min(
             int(word["start_ms"])
             for option_set in option_sets
@@ -2080,31 +2076,8 @@ def _resolve_alignment_overlaps(
             selected_mode_by_uid[uid] = mode
         resolved_component_count += 1
 
-    residual_overlaps = _unsafe_word_overlaps(
-        [word for words in selected.values() for word in words]
-    )
     assigned_speakers: dict[str, str] = {}
     acoustic_components: list[dict[str, Any]] = []
-    for component_index, component_uids in enumerate(
-        _overlap_components(residual_overlaps, order), start=1
-    ):
-        records = [by_uid[uid] for uid in component_uids]
-        if any("speaker_id" in record for record in records) or any(
-            record.get("audio_reviewed") is not True
-            or record.get("review_disposition") != "confirmed_dialogue"
-            for record in records
-        ):
-            continue
-        lane_records = []
-        for lane_index, uid in enumerate(component_uids, start=1):
-            lane = f"acoustic-overlap-{component_index:04d}-lane-{lane_index:02d}"
-            assigned_speakers[uid] = lane
-            for word in selected[uid]:
-                word["speaker_id"] = lane
-            lane_records.append({"utterance_uid": uid, "speaker_id": lane})
-        acoustic_components.append(
-            {"component_index": component_index, "lanes": lane_records}
-        )
 
     final_overlaps = _unsafe_word_overlaps(
         [word for words in selected.values() for word in words]
@@ -2144,6 +2117,7 @@ def align_corrected_segments(
     vad_regions: Sequence[Mapping[str, Any]] = (),
     whisperx_module: Any | None = None,
     whisperx_version: str | None = None,
+    checkpoint_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Force-align corrected Turkish text and return strict JSON-ready data.
 
@@ -2228,6 +2202,31 @@ def align_corrected_segments(
         )
 
     call_kwargs, interpolation_mode = _align_call_kwargs(align)
+    if checkpoint_dir is not None:
+        journal = UnitJournal(Path(checkpoint_dir), {
+            "audio_sha256": audio_sha256,
+            "model_name": model_name,
+            "whisperx_version": version,
+            "device": device,
+            "language": language,
+            "interpolation": interpolation_mode,
+            "code_sha256": _audio_sha256(Path(__file__)),
+            "dependencies_sha256": _audio_sha256(
+                Path(__file__).resolve().parents[3] / "requirements.lock"
+            ),
+        })
+        model_align = align
+
+        def align(transcript, model, metadata, audio, device, **kwargs):
+            key = digest({"transcript": transcript, "kwargs": kwargs})
+            cached = journal.read(key)
+            if cached is not None:
+                return cached
+            result = model_align(transcript, model, metadata, audio, device, **kwargs)
+            _raw_aligned_words(result, "alignment checkpoint")
+            journal.write(key, result)
+            return result
+
     aligned_segments: list[dict[str, Any]] = []
     flat_words: list[dict[str, Any]] = []
     independent_by_uid: dict[str, list[dict[str, Any]]] = {}

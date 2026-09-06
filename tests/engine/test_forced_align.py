@@ -6,6 +6,7 @@ import json
 import math
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
@@ -197,6 +198,32 @@ class ForcedAlignmentTests(unittest.TestCase):
         path.write_bytes(b"synthetic-audio-placeholder")
         return path
 
+    def test_interrupted_alignment_reuses_only_hash_bound_model_calls(self):
+        results = [
+            _result([
+                {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                {"word": "d\u00fcnya!", "start": 1.5, "end": 1.9},
+            ]),
+            _result([{"word": "Nas\u0131ls\u0131n?", "start": 4.1, "end": 4.7}]),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            interrupted = _FakeWhisperX(results[:1])
+            with self.assertRaisesRegex(ForcedAlignmentError, "alignment failed for utt-2"):
+                align_corrected_segments(audio, _coarse(), whisperx_module=interrupted,
+                                         checkpoint_dir=checkpoint)
+            resumed = _FakeWhisperX(results[1:])
+            data = align_corrected_segments(audio, _coarse(), whisperx_module=resumed,
+                                            checkpoint_dir=checkpoint)
+            self.assertEqual(len(resumed.align_calls), 1)
+            validate_forced_alignment_data(data)
+            audio.write_bytes(b"different immutable input")
+            fresh = _FakeWhisperX(results)
+            align_corrected_segments(audio, _coarse(), whisperx_module=fresh,
+                                     checkpoint_dir=checkpoint)
+            self.assertEqual(len(fresh.align_calls), 2)
+
     def test_explicit_cross_speaker_overlap_is_preserved(self) -> None:
         coarse = [
             {
@@ -272,7 +299,26 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertNotIn("speaker_id", data["segments"][0])
         validate_forced_alignment_data(data)
 
-    def test_reviewed_simultaneous_dialogue_gets_audited_acoustic_lanes(self) -> None:
+        forged = copy.deepcopy(data)
+        forged["provenance"]["overlap_resolution"]["acoustic_component_count"] = 1
+        forged["provenance"]["overlap_resolution"]["acoustic_components"] = [
+            {"component_index": 1, "lanes": [
+                {"utterance_uid": "utt-a", "speaker_id": "acoustic-overlap-0001-lane-01"},
+                {"utterance_uid": "utt-b", "speaker_id": "acoustic-overlap-0001-lane-02"},
+            ]}
+        ]
+        with self.assertRaisesRegex(ForcedAlignmentError, "not independent speaker evidence"):
+            validate_forced_alignment_data(forged)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("mas.engine.forced_align.MAX_OVERLAP_COMBINATIONS", 1):
+                with self.assertRaisesRegex(ForcedAlignmentError, "candidate budget exceeded"):
+                    align_corrected_segments(
+                        self._audio(directory), coarse,
+                        whisperx_module=_OverlapWhisperX(joint_resolves=True),
+                    )
+
+    def test_reviewed_dialogue_does_not_establish_distinct_speakers(self) -> None:
         coarse = [
             {
                 "start_ms": 1000,
@@ -296,22 +342,13 @@ class ForcedAlignmentTests(unittest.TestCase):
             },
         ]
         with tempfile.TemporaryDirectory() as directory:
-            data = align_corrected_segments(
-                self._audio(directory),
-                coarse,
-                whisperx_module=_OverlapWhisperX(joint_resolves=False),
-            )
-
-        resolution = data["provenance"]["overlap_resolution"]
-        self.assertEqual(resolution["acoustic_component_count"], 1)
-        self.assertEqual(
-            [segment["speaker_id"] for segment in data["segments"]],
-            [
-                "acoustic-overlap-0001-lane-01",
-                "acoustic-overlap-0001-lane-02",
-            ],
-        )
-        validate_forced_alignment_data(data)
+            with self.assertRaisesRegex(ForcedAlignmentError, "unknown-speaker alignment overlap"):
+                align_corrected_segments(
+                    self._audio(directory),
+                    coarse,
+                    whisperx_module=_OverlapWhisperX(joint_resolves=False),
+                )
+        self.assertTrue(all("speaker_id" not in item for item in coarse))
 
     def test_success_is_json_ready_and_preserves_provenance(self) -> None:
         fake = _FakeWhisperX(

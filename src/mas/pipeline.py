@@ -201,12 +201,59 @@ def _stage(path, state, name, action):
         **details,
     )
     print(f"[STAGE] {name}: PASS elapsed={elapsed:.1f}s", flush=True)
+    if "resumed" in details:
+        print(f"[CHECKPOINT] {name}: resumed={str(bool(details['resumed'])).lower()}", flush=True)
     notify(
         state["episode"],
         f"{notification_name} tamamlandı",
         _stage_result_details(name, details, elapsed),
     )
     return details
+
+
+def _aligned_checkpoint(alignment_path, audio_path, alignment_inputs, vad_regions):
+    binding = {
+        "audio_sha256": sha256_file(audio_path),
+        "alignment_inputs": alignment_inputs,
+        "vad_regions": vad_regions,
+        "device": "cuda",
+        "code": {
+            name: sha256_file(ROOT / name)
+            for name in (
+                "src/mas/engine/forced_align.py",
+                "src/mas/engine/speaker.py",
+                "src/mas/engine/workflow.py",
+                "requirements.lock",
+            )
+        },
+    }
+    input_sha256 = sha256_json(binding)
+    marker_path = alignment_path.with_suffix(".binding.json")
+    if alignment_path.is_file():
+        marker = _json(marker_path) if marker_path.is_file() else {}
+        if (
+            marker.get("input_sha256") != input_sha256
+            or marker.get("output_sha256") != sha256_file(alignment_path)
+        ):
+            raise RuntimeError("cached alignment binding is stale or missing; preserve it before realignment")
+        result = _json(alignment_path)
+        validate_forced_alignment_data(result)
+        if (
+            result.get("audio_sha256") != binding["audio_sha256"]
+            or result.get("provenance", {}).get("device") != "cuda"
+        ):
+            raise RuntimeError("cached alignment is stale or was not produced on CUDA")
+        return result, True
+    result = align_corrected_segments(
+        audio_path, alignment_inputs, device="cuda", vad_regions=vad_regions,
+        checkpoint_dir=alignment_path.parent / "forced_alignment_units",
+    )
+    atomic_write_json(alignment_path, result)
+    atomic_write_json(marker_path, {
+        "input_sha256": input_sha256,
+        "output_sha256": sha256_file(alignment_path),
+    })
+    return result, False
 
 
 def _load_configs():
@@ -407,22 +454,10 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             speech_hole_records=pack.speech_holes,
             asr_hallucination_records=pack.asr_hallucination_records,
         )
-        if alignment_path.is_file():
-            result = _json(alignment_path)
-            validate_forced_alignment_data(result)
-            if result.get("audio_sha256") != sha256_file(audio.audio_path) or result.get("provenance", {}).get("device") != "cuda":
-                raise RuntimeError("cached alignment is stale or was not produced on CUDA")
-            resumed = True
-        else:
-            _source_guard(state, download.video_path)
-            result = align_corrected_segments(
-                audio.audio_path,
-                bundle.alignment_inputs,
-                device="cuda",
-                vad_regions=raw["vad_regions"],
-            )
-            atomic_write_json(alignment_path, result)
-            resumed = False
+        _source_guard(state, download.video_path)
+        result, resumed = _aligned_checkpoint(
+            alignment_path, audio.audio_path, bundle.alignment_inputs, raw["vad_regions"]
+        )
         holder["aligned"] = result
         return {"path": str(alignment_path), "sha256": sha256_file(alignment_path), "device": "cuda", "resumed": resumed}
     _stage(state_path, state, "forced_alignment", align)

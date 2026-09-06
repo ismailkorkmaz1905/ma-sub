@@ -24,6 +24,49 @@ def test_offline_fixture_interruption_and_resume(tmp_path, monkeypatch):
     assert resumed["stages"]["fixture_verify"]["status"] == "pass"
 
 
+@pytest.mark.parametrize("change", ["text", "vad", "code", "audio", "output", "missing_marker"])
+def test_alignment_checkpoint_rejects_changed_bindings(tmp_path, monkeypatch, change):
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"original audio")
+    alignment = tmp_path / "alignment.json"
+    inputs = [{"utterance_uid": "u1", "text": "Merhaba"}]
+    vad = [{"start_ms": 0, "end_ms": 1000}]
+    for name in ("src/mas/engine/forced_align.py", "src/mas/engine/speaker.py",
+                 "src/mas/engine/workflow.py", "requirements.lock"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("original", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+    calls = []
+
+    def align(*args, **kwargs):
+        calls.append(args)
+        return {"audio_sha256": pipeline.sha256_file(audio), "provenance": {"device": "cuda"}}
+
+    monkeypatch.setattr(pipeline, "align_corrected_segments", align)
+    monkeypatch.setattr(pipeline, "validate_forced_alignment_data", lambda result: None)
+    assert pipeline._aligned_checkpoint(alignment, audio, inputs, vad)[1] is False
+    assert pipeline._aligned_checkpoint(alignment, audio, inputs, vad)[1] is True
+    original = alignment.read_bytes()
+    if change == "text":
+        inputs[0]["text"] = "Selam"
+    elif change == "vad":
+        vad[0]["end_ms"] = 1100
+    elif change == "code":
+        (tmp_path / "src/mas/engine/forced_align.py").write_text("changed", encoding="utf-8")
+    elif change == "audio":
+        audio.write_bytes(b"different audio")
+    elif change == "output":
+        alignment.write_text("{}", encoding="utf-8")
+        original = alignment.read_bytes()
+    else:
+        alignment.with_suffix(".binding.json").unlink()
+    with pytest.raises(RuntimeError, match="binding is stale or missing"):
+        pipeline._aligned_checkpoint(alignment, audio, inputs, vad)
+    assert len(calls) == 1
+    assert alignment.read_bytes() == original
+
+
 def test_drive_upload_cannot_target_emergency(tmp_path):
     source = tmp_path / "strict.srt"
     source.write_text("strict", encoding="utf-8")

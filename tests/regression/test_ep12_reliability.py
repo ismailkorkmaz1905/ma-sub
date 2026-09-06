@@ -212,11 +212,12 @@ def test_journal_tamper_is_fatal(tmp_path):
 
 
 def test_live_progress_does_not_fabricate_completion(tmp_path):
+    from mas.reliability import read_json
     with Progress(episode=12, run_id='r', stage='ASR', status_path=tmp_path/'status.json',
                   total=10, stream=io.StringIO(), interval_seconds=0.02) as progress:
         progress.advance(3, uid='u3', checkpoint_saved=True)
         time.sleep(0.06)
-        snapshot = json.loads((tmp_path/'status.json').read_text())
+        snapshot = read_json(tmp_path/'status.json')
         assert snapshot['percent'] == 30
         assert snapshot['processed'] == 3
         assert snapshot['status'] == 'RUNNING'

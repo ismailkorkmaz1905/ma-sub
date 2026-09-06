@@ -1015,6 +1015,8 @@ def download_source(
     cookies_file: str | Path | None = None,
     idle_timeout: int = 30,
     total_timeout: int = 900,
+    expected_source_sha256: str | None = None,
+    freeze_captions: bool = False,
 ) -> DownloadResult:
     """Download one source video and optional Turkish captions, resumably.
 
@@ -1026,6 +1028,11 @@ def download_source(
         raise ValueError("A non-empty YouTube/source URL is required")
     if attempts < 1 or retries < 0:
         raise ValueError("attempts must be >= 1 and retries must be >= 0")
+    if expected_source_sha256 is not None:
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_source_sha256):
+            raise ValueError("expected_source_sha256 must be a lowercase SHA-256")
+        if force:
+            raise DownloadError("cannot force replacement of an immutable source")
     watchdog = _DownloadProgressWatchdog(idle_timeout, total_timeout)
     published_stem = _validate_output_stem(output_stem)
 
@@ -1059,6 +1066,8 @@ def download_source(
             marker["_marker_path"] = str(marker_path)
             result = _metadata_from_marker(marker)
             if result is not None:
+                if expected_source_sha256 is not None and sha256_file(result.video_path) != expected_source_sha256:
+                    raise DownloadError("recorded immutable source SHA-256 mismatch")
                 result.metadata["source_validation"] = dict(
                     marker["details"]["source_validation"]
                 )
@@ -1067,6 +1076,10 @@ def download_source(
 
                     verify_media_readable(result.video_path, require_video_audio=True)
                 except Exception as exc:
+                    if expected_source_sha256 is not None:
+                        raise DownloadError(
+                            "immutable source EOF validation failed; source preserved, no reacquisition"
+                        ) from exc
                     LOGGER.warning(
                         "Verified-marker source failed current EOF validation; "
                         "the source will be reacquired: %s",
@@ -1076,6 +1089,8 @@ def download_source(
                     LOGGER.info(
                         "Download stage resumed from verified marker: %s", marker_path
                     )
+                    if freeze_captions:
+                        return result
                     return _caption_retry_on_resume(
                         result,
                         url=url.strip(),
@@ -1091,6 +1106,8 @@ def download_source(
                         cookies_file=cookies_file,
                     )
 
+    if expected_source_sha256 is not None:
+        raise DownloadError("immutable source checkpoint invalid; source preserved, no reacquisition")
     cookie_path = _validated_cookie_file(cookies_file)
     yt_dlp = _import_yt_dlp()
     workspace = _prepare_workspace(destination, input_sha256=input_hash)

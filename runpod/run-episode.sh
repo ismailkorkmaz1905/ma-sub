@@ -14,6 +14,7 @@ IDLE_TIMEOUT_SECONDS="${MAS_IDLE_TIMEOUT_SECONDS:-1800}"
 CHECK_SECONDS="${MAS_WATCHDOG_CHECK_SECONDS:-15}"
 LOG_DIR="$ROOT/EPISODES/Muhtemel Ask ${EPISODE}.Bolum/logs"
 LOG_PATH="$LOG_DIR/runpod-session.log"
+export MAS_PROGRESS_FILE="$LOG_DIR/useful-progress.json"
 
 for value in "$MAX_RUNTIME_SECONDS" "$IDLE_TIMEOUT_SECONDS" "$CHECK_SECONDS"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
@@ -25,6 +26,7 @@ done
 mkdir -p "$LOG_DIR"
 cd "$ROOT"
 touch "$LOG_PATH"
+touch "$MAS_PROGRESS_FILE"
 
 pipeline_pid=""
 stop_on_exit() {
@@ -55,13 +57,13 @@ stop_reason=""
 
 while kill -0 "$pipeline_pid" 2>/dev/null; do
   now="$(date +%s)"
-  last_output="$(stat -c %Y "$LOG_PATH")"
+  last_output="$(stat -c %Y "$MAS_PROGRESS_FILE")"
   if (( now - started >= MAX_RUNTIME_SECONDS )); then
     stop_reason="maximum runtime ${MAX_RUNTIME_SECONDS}s exceeded"
     break
   fi
   if (( now - last_output >= IDLE_TIMEOUT_SECONDS )); then
-    stop_reason="no log progress for ${IDLE_TIMEOUT_SECONDS}s"
+    stop_reason="no completed-work progress for ${IDLE_TIMEOUT_SECONDS}s"
     break
   fi
   sleep "$CHECK_SECONDS"

@@ -57,6 +57,16 @@ def file_digest(path: Path) -> str:
     return h.hexdigest()
 
 
+def read_json(path):
+    for attempt in range(5):
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.01 * (attempt + 1))
+
+
 def atomic_json(path: Path, data: object) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

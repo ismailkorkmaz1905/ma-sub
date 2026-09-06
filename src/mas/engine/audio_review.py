@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .download import atomic_write_json, sha256_file, sha256_json, utc_now_iso
+from ..progress import mark_work_progress
 from .transcribe import (
     TranscriptionConfig,
     TranscriptionError,
@@ -1931,6 +1932,7 @@ def resolve_tr_audio_reviews_v2(
                             contextual_decision["exact_target_crop"] = crop
                         decision = contextual_decision
                 machine_decisions[uid] = decision
+                mark_work_progress("audio_review", completed=position)
                 if (
                     position % settings.checkpoint_every == 0
                     or position == len(inventory)

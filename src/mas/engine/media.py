@@ -239,7 +239,7 @@ def verify_media_readable(
             "-",
         ),
         description=f"full read-through validation of {media_path.name}",
-        timeout_seconds=None,
+        timeout_seconds=1800,
     )
     return {
         "read_through_eof": True,
@@ -272,7 +272,7 @@ def _verify_audio_decodable(path: Path) -> None:
             "-",
         ),
         description=f"full audio decode validation of {path.name}",
-        timeout_seconds=None,
+        timeout_seconds=1800,
     )
 
 
@@ -568,7 +568,7 @@ def extract_audio(
                 str(temporary_audio),
             ),
             description="ffmpeg audio extraction",
-            timeout_seconds=None,
+            timeout_seconds=1800,
         )
         metadata = validate_audio(
             temporary_audio,

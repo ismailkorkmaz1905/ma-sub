@@ -437,7 +437,11 @@ def test_episode_budget_checkpoint_tampering_fails(monkeypatch, tmp_path):
     runpod_controller._episode_budget(tmp_path, 11)
     path = tmp_path / "work" / "controller_budget.json"
     saved = json.loads(path.read_text())
-    saved["data"]["started_at"] = datetime.now(timezone.utc).isoformat()
+    original_start = saved["data"]["started_at"]
+    saved["data"]["started_at"] = (
+        datetime.fromisoformat(original_start) + timedelta(seconds=1)
+    ).isoformat()
+    assert saved["data"]["started_at"] != original_start
     path.write_text(json.dumps(saved))
     with pytest.raises(runpod_controller.RunPodControllerError, match="integrity"):
         runpod_controller._episode_budget(tmp_path, 11)

@@ -139,6 +139,58 @@ def test_pending_extra_audio_review_uids_are_collected_once(tmp_path, monkeypatc
     )
 
 
+def test_stage_heartbeat_does_not_mark_useful_work(tmp_path, monkeypatch, capsys):
+    marks = []
+    class Event:
+        def __init__(self): self.waits = 0
+        def wait(self, timeout):
+            self.waits += 1
+            return self.waits > 2
+        def set(self): pass
+    class Thread:
+        def __init__(self, target, daemon): self.target = target
+        def start(self): self.target()
+        def join(self): pass
+    monkeypatch.setattr(pipeline.threading, "Event", Event)
+    monkeypatch.setattr(pipeline.threading, "Thread", Thread)
+    monkeypatch.setattr(pipeline, "notify", lambda *a: None)
+    monkeypatch.setattr(pipeline, "mark_work_progress", lambda stage, **kw: marks.append((stage, kw)))
+    pipeline._stage(tmp_path / "state.json", {"episode": 11}, "audio", lambda: {})
+    assert capsys.readouterr().out.count("RUNNING") == 2
+    assert marks == [("audio", {}), ("audio", {"completed": True})]
+
+
+def test_work_marker_and_shell_watchdog_are_separate_from_log(tmp_path, monkeypatch):
+    from mas.progress import mark_work_progress
+    marker = tmp_path / "progress.json"
+    monkeypatch.setenv("MAS_PROGRESS_FILE", str(marker))
+    mark_work_progress("raw_asr", completed=7)
+    data = json.loads(marker.read_text())
+    assert data["completed"] == 7
+    shell = (pipeline.ROOT / "runpod/run-episode.sh").read_text()
+    assert 'stat -c %Y "$MAS_PROGRESS_FILE"' in shell
+    assert 'stat -c %Y "$LOG_PATH"' not in shell
+
+
+def test_json_reader_retries_sharing_violation_but_not_invalid_json(tmp_path, monkeypatch):
+    from mas.reliability import read_json
+    import mas.reliability as reliability
+    path = tmp_path / "progress.json"
+    attempts = []
+    def read(*a, **k):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise PermissionError("Windows atomic replacement sharing violation")
+        return '{"processed":3}'
+    monkeypatch.setattr(type(path), "read_text", read)
+    monkeypatch.setattr(reliability.time, "sleep", lambda *a: None)
+    assert read_json(path) == {"processed": 3}
+    assert len(attempts) == 2
+    monkeypatch.setattr(type(path), "read_text", lambda *a, **k: "invalid")
+    with pytest.raises(json.JSONDecodeError):
+        read_json(path)
+
+
 def test_drive_readback_hashes_stream_without_buffering_file(tmp_path, monkeypatch):
     source = tmp_path / "strict.mkv"
     payload = (b"episode-data-" * 100_000) + b"end"

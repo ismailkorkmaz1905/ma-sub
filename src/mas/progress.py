@@ -2,11 +2,19 @@
 from __future__ import annotations
 
 import sys
+import os
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from .reliability import atomic_json
+
+
+def mark_work_progress(stage, *, completed=None):
+    path = os.getenv("MAS_PROGRESS_FILE")
+    if path:
+        atomic_json(Path(path), {"stage": stage, "completed": completed,
+                                "timestamp": datetime.now(timezone.utc).isoformat()})
 
 
 class Progress:

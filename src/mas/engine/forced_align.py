@@ -32,6 +32,7 @@ from typing import Any, Mapping, Sequence, Union, get_args, get_origin
 
 from .speaker import overlap_is_unsafe, speaker_id
 from ..reliability import UnitJournal, digest
+from ..progress import mark_work_progress
 
 
 FORCED_ALIGNMENT_FORMAT_VERSION = "1.0"
@@ -2263,6 +2264,8 @@ def align_corrected_segments(
     next_word_index = 1
     alignment_issues = []
     for segment_index, coarse in enumerate(source, start=1):
+        if segment_index > 1:
+            mark_work_progress("forced_alignment", completed=segment_index - 1)
         transcript = [
             {
                 "start": coarse["start_ms"] / 1000.0,
@@ -2386,6 +2389,8 @@ def align_corrected_segments(
     aligned_segments = []
     flat_words = []
     for segment_index, coarse in enumerate(source, start=1):
+        if segment_index > 1:
+            mark_work_progress("forced_alignment", completed=segment_index - 1)
         utterance_uid = str(coarse["utterance_uid"])
         words = selected_by_uid[utterance_uid]
         segment_speaker = coarse.get("speaker_id", assigned_speakers.get(utterance_uid))

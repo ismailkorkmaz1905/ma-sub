@@ -20,6 +20,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from ..progress import mark_work_progress
 from typing import Any, Iterable, Mapping, Sequence
 
 from .download import (
@@ -646,6 +647,7 @@ def consume_coarse_segments(
                 },
             }
         )
+        mark_work_progress("raw_asr:" + source, completed=ordinal)
     words.sort(key=lambda item: (int(item["start_ms"]), int(item["end_ms"])))
     for index, word in enumerate(words, start=1):
         word["word_index"] = index

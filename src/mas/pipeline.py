@@ -10,6 +10,7 @@ import yaml
 from .config import ROOT, episode_dir
 from .hashing import sha256_file, sha256_json
 from .notify import notify
+from .progress import mark_work_progress
 from .remote import upload_verified
 from .runpod import stop_current_pod
 from .source_discovery import discover_episode_source
@@ -146,6 +147,7 @@ def _stage(path, state, name, action):
     started = time.monotonic()
     notification_name = STAGE_NOTIFICATION_NAMES.get(name, name)
     set_stage(path, state, name, "running")
+    mark_work_progress(name)
     print(f"[STAGE] {name}: START", flush=True)
     start_details = STAGE_START_DETAILS.get(
         name,
@@ -200,6 +202,7 @@ def _stage(path, state, name, action):
         elapsed_seconds=round(elapsed, 3),
         **details,
     )
+    mark_work_progress(name, completed=True)
     print(f"[STAGE] {name}: PASS elapsed={elapsed:.1f}s", flush=True)
     if "resumed" in details:
         print(f"[CHECKPOINT] {name}: resumed={str(bool(details['resumed'])).lower()}", flush=True)
@@ -361,7 +364,12 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     def acquire():
         result = download_source(url, dirs["source"], output_stem=name, retries=3,
                                  attempts=3, socket_timeout=30,
-                                 cookies_file=os.getenv("MAS_YTDLP_COOKIES"))
+                                 cookies_file=os.getenv("MAS_YTDLP_COOKIES"),
+                                 expected_source_sha256=state.get("source_sha256"),
+                                 freeze_captions=any(
+                                     (dirs["prepare"] / filename).is_file()
+                                     for filename in ("raw_asr_v2.json", "raw_asr_v2.recovery.json")
+                                 ))
         holder["download"] = result
         digest = _source_guard(state, result.video_path)
         state["source_path"] = str(Path(result.video_path).resolve())

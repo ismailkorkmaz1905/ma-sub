@@ -2,10 +2,11 @@ import json,os,tempfile
 from pathlib import Path
 from datetime import datetime,timezone
 from . import __version__,SCHEMA_VERSION,RULES_VERSION
+from .reliability import read_json
 def load(path,episode):
  p=Path(path)
  if not p.exists(): return {'episode':episode,'pipeline_version':__version__,'schema_version':SCHEMA_VERSION,'rules_version':RULES_VERSION,'stages':{},'created_at':datetime.now(timezone.utc).isoformat()}
- d=json.loads(p.read_text(encoding='utf-8'))
+ d=read_json(p)
  if d.get('episode')!=episode: raise ValueError('state episode mismatch')
  return d
 def save(path,state):

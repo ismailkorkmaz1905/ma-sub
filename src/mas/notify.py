@@ -45,6 +45,9 @@ def send_email(episode, event, details=None):
                 smtplib.SMTPSenderRefused):
             raise RuntimeError("email authentication or recipient rejected; not retried") from None
         except (OSError, smtplib.SMTPException) as exc:
+            if isinstance(exc, smtplib.SMTPResponseException) and 500 <= exc.smtp_code < 600:
+                return {"status": "blocked", "smtp_code": exc.smtp_code,
+                        "error": "permanent SMTP rejection; not retried"}
             last_error = exc
             if attempt < 3:
                 time.sleep(attempt)

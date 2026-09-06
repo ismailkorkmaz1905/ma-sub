@@ -87,6 +87,43 @@ def test_notification_error_redacts_password(monkeypatch, capsys):
     assert "private-secret" not in capsys.readouterr().out
 
 
+def test_notification_daily_quota_is_blocked_without_retry(monkeypatch, capsys):
+    monkeypatch.setenv("MAS_GMAIL_ADDRESS", "sender@gmail.com")
+    monkeypatch.setenv("MAS_GMAIL_APP_PASSWORD", "app-password")
+    monkeypatch.setattr(notify.time, "sleep", lambda _: pytest.fail("quota rejection retried"))
+    attempts = []
+
+    class QuotaSMTP(FakeSMTP):
+        def send_message(self, message):
+            attempts.append(message)
+            raise smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", QuotaSMTP)
+    result = notify.notify(13, "start")
+    assert result["status"] == "blocked"
+    assert result["smtp_code"] == 550
+    assert len(attempts) == 1
+    assert '"status": "blocked"' in capsys.readouterr().out
+
+
+def test_notification_temporary_data_error_has_bounded_retries(monkeypatch):
+    monkeypatch.setenv("MAS_GMAIL_ADDRESS", "sender@gmail.com")
+    monkeypatch.setenv("MAS_GMAIL_APP_PASSWORD", "app-password")
+    delays = []
+    attempts = []
+    monkeypatch.setattr(notify.time, "sleep", delays.append)
+
+    class TemporarySMTP(FakeSMTP):
+        def send_message(self, message):
+            attempts.append(message)
+            raise smtplib.SMTPDataError(451, b"temporary failure")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", TemporarySMTP)
+    assert notify.notify(13, "start")["status"] == "failed"
+    assert len(attempts) == 3
+    assert delays == [1, 2]
+
+
 def test_notify_test_command_fails_without_credentials(monkeypatch, capsys):
     monkeypatch.setattr(cli, "send_email", lambda *args: {"status": "disabled"})
 

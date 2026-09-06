@@ -45,6 +45,28 @@ Uzak diskte pip/uv kurulum önbellekleri ve bu denemenin yarım MP4'ü kaldırı
 
 Kalıcı toplu silme otomatik güvenlik denetiminde engellendiği için geri alınabilir temizlik yapıldı. Windows ve Drive çöp kutuları boşaltılmadı. Silinen dosya listesi ve Drive karşılaştırma kaydı arşivde saklandı.
 
+## Süre ve bölüm başı maliyet
+
+İlk Bölüm 11 denemeleri için kullanıcı yaklaşık **21 saat** ve **20 USD** bildirdi. Sağlayıcı faturası olmadığı için bu iki sayı kullanıcı raporudur. Çok sayıda yeniden başlatma, bozuk kurulum, kapasite, SSH ve tekrar çalışma bu toplamı büyüttü.
+
+Mevcut sistemde yeni bölüm hedefi **toplam 2-4 saat**. Bu süre garanti veya kanıtlanmış hizmet seviyesi değildir; Bölüm 12'deki gerçek aşama ölçümleri ve giderilen hatalar üzerinden planlama aralığıdır. Çeviri dönüşü, Drive kotası veya yeni bir hata bekletirse uzayabilir.
+
+| Kalem | Ölçüm veya hesap | Bölüm başı tahmin |
+|---|---:|---:|
+| Kaynak indirme ve ses hazırlama | Bölüm 12'de 125,786 saniye | GPU açık tutulursa yaklaşık 0,02 USD |
+| Tam Whisper ASR | Transfer ve worker 1.186,547 saniye | L4 için yaklaşık 0,16 USD |
+| CTC hizalama | 425,802 saniye | L4 için yaklaşık 0,06 USD |
+| Hedefli ASR/CTC onarımları | 375,868 saniye | L4 için yaklaşık 0,05 USD |
+| 1080p gömülü MP4 | 481,949 saniye | L4 için yaklaşık 0,07 USD |
+| Yerel konuşmacı analizi | 8.743,941 saniye, yerel CPU | 0 USD RunPod GPU |
+| 50 GB kalıcı disk | 0,07 USD/GB/ay | 3,50 USD/ay; 2-4 saatlik koşuya yaklaşık 0,01-0,02 USD düşer, fakat bölüm yokken de yazmaya devam eder |
+| Drive, YouTube ve Gmail | Bu koşuda kullanım/kota gözlendi | Kanıtlanmış bölüm başı ek ücret 0 USD; kota sınırları süreci geciktirebilir |
+| Codex Astra/Sol | ChatGPT/Codex kullanım kotası | RunPod faturasına dahil değil; bölüm başı kesin haftalık kota yüzdesi bilinmiyor |
+
+Hesapta son gerçek pilotta görülen **L4 0,49 USD/saat** fiyatı kullanıldı. ASR, CTC, hedefli onarım ve MP4 üretiminin ölçülen toplamı yaklaşık 41 dakika ve teorik çıplak karşılığı yaklaşık **0,34 USD**. Kaynak hazırlığı GPU açıkken yapılırsa yaklaşık 0,02 USD daha eklenir. Pod açılışı, dosya aktarımı, bekleme, kısa testler ve hata payı bunun üstüne gelir. Bölüm 12'nin tam ASR başlangıcı ile son dış gözlem arasında hesap bakiyesi **3,6165304786 USD'den 2,8764311039 USD'ye**, yani yaklaşık **0,74 USD** düştü; bu bir fatura dökümü değil, aynı hesaptaki iki bakiye gözlemidir.
+
+Yeni bölüm için pratik planlama bütçesi **1-2 USD**. L4 dört saat boyunca hiç kapatılmazsa yalnız GPU yaklaşık **1,96 USD** tutar; bu yüzden çeviri veya insan bekleme sırasında GPU açık bırakılmamalı. Son bakiye eski olduğu için her koşudan hemen önce fiyat ve bakiye yeniden sorgulanmalı; 1 USD ve kapanış payı korunmalı.
+
 ## Cuma başlamadan önce
 
 **Son tercih, 6 Eylül:** Bölüm 12 mevcut hâliyle kalacak; yeniden sıkıştırma yapılmayacak. Drive'daki adı YouTube başlığıyla eşleşen `Muhtemel Aşk 12. Bölüm.mp4`. Sonraki bölümlerde öncelik yüksek görüntü kalitesi ve 1080p; bölüm başına yaklaşık 3 GB hedefleniyor. Bu kesin üst sınır değil: boyuta yetişmek için belirgin görüntü bozulması kabul edilmeyecek. Uygun sıkıştırma, bölüm süresi ve kısa sahne denemelerine göre seçilecek. Bu tercih şimdilik not ve operatör talimatıdır; ana kodun boyut ayarı henüz değiştirilmedi.

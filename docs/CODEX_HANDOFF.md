@@ -2,6 +2,8 @@
 
 ## Current override - 2026-09-06 Astra review
 
+Latest authority update: the user subsequently authorized a combined maximum USD 0.50 for a small Episode 11 RunPod/API sample only. See [bounded sample preflight](EP11_BOUNDED_SAMPLE.md) before interpreting the historical paid-operation prohibition below. API credentials and local media are missing; no paid operation was initiated. Full-episode compute, Drive writes, migration and volume deletion are not authorized by this limited permission.
+
 Read [the current review](ASTRA_REVIEW_2026-09-06.md), [all 63 controller logs and stage durations](EP11_CONTROLLER_LOG_INVENTORY.md), and [GPT transcription evaluation](GPT_TRANSCRIPTION_EVALUATION.md) first. They supersede historical status and continuation prompts below. Episode 11 is incomplete. Production has no speaker-evidence acquisition path; historical audio-review PASS does not bind the new provisional return. Local fixes passed 563 tests with 32 skipped in 37.62 seconds. No GPU or delivery PASS follows from those tests. Paid compute and Drive mutation remain prohibited without renewed explicit permission. Do not execute historical resume/invalidation commands.
 
 ## Repository snapshot

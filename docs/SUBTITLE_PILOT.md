@@ -1,5 +1,7 @@
 # Episode 11 cue pilot
 
+Budget override: the former USD 0.50 cap recorded below has been superseded by the user's instruction to leave USD 1.00 of existing RunPod balance. See [live balance and safety reserves](EP11_BOUNDED_SAMPLE.md). Runtime readiness blockers remain unchanged; increased spending authority does not establish a safe runner.
+
 Status: local prototype, not acoustic acceptance or production migration. Episode 12 must not start before the Episode 11 pilot is reviewed. Combined new compute allowance is USD 0.50; no new paid operation has been initiated.
 
 ## Contract

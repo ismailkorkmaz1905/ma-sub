@@ -1,5 +1,7 @@
 # Local hardware and RunPod review - 2026-09-06
 
+Budget override: references below to the original USD 0.50 allowance are historical. The user now authorizes existing RunPod balance minus a USD 1.00 reserve; see [current observed balance and limits](EP11_BOUNDED_SAMPLE.md). This does not authorize Episode 12, account top-ups or volume deletion.
+
 ## Read-only observations
 
 Windows CIM reported Intel N150, four cores/four logical processors, 16,941,326,336 bytes of RAM and Intel Graphics. No NVIDIA device or `nvidia-smi` was found. The C volume reported 416,234,831,872 free bytes. The project environment has Python 3.11; torch, ffmpeg and ffprobe are unavailable. Docker is unavailable and WSL reports not installed. No installation was attempted.

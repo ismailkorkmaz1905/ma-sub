@@ -2,7 +2,13 @@
 
 ## Authority
 
-The user explicitly authorized at most USD 0.50 additional combined RunPod/API spend in response to the proposed small real-audio test. This is a total cap for the sample workflow, not a per-request cap and not authorization for a full episode run, a migration, Drive changes, Episode 12 work or volume deletion. Do not reset the historical controller budget. Do not interpret this permission as proof that the existing controller can enforce a dollar ceiling.
+LATEST OVERRIDE: the user replaced the USD 0.50 ceiling with permission to use existing RunPod balance while leaving USD 1.00. This applies to the Episode 11 pilot, not Episode 12, full-episode execution, GPT transcription, top-ups, migration, Drive changes or volume deletion. Do not reset the historical episode deadline. This is spending authority, not proof that the runner enforces it.
+
+Read-only GraphQL `myself { clientBalance currentSpendPerHr isAutoPayEnabled }` at `2026-09-06T02:59:24.8248931Z` (10:59:24.8248931 SGT) returned balance USD 3.7543464701, account spend USD 0.005/hour and auto-pay false. The mathematical allowance at that instant is USD 2.7543464701 (balance minus USD 1.00), before subsequent charges and shutdown reserves. Operational spend must be lower to cover ongoing account charges, billing delay and shutdown. Re-query before any start, never count future top-ups as renewed permission, and never wait until the displayed balance equals USD 1.00 to stop.
+
+Preserved storage continues charging even after compute stops. The USD 1.00 reserve cannot be promised indefinitely while storage remains retained; do not delete the volume to enforce that reserve without explicit permission. No new paid operation or billing-setting change was made during this authorization update.
+
+The original USD 0.50 authorization and API-oriented preflight below are historical. Current workflow excludes GPT transcription; use `SUBTITLE_PILOT.md` for runtime blockers and corrected local sample availability.
 
 Before compute starts, establish a bounded sample runner, current rate, startup and cleanup reserves, artifact retrieval, and the total allocation shared with API requests. No paid retry after an ambiguous response unless the reserved budget covers both attempts. Preserve request/audio/response hashes and source offsets. Sample speaker output is review evidence, not automatic strict acceptance or permission to guess overlapping speakers.
 

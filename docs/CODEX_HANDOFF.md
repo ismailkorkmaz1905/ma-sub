@@ -2,6 +2,8 @@
 
 ## Current override - 2026-09-06 Astra review
 
+LATEST BUDGET OVERRIDE: preserve USD 1.00 from the existing RunPod balance; the former USD 0.50 cap below is superseded. Live balance at 10:59:24.8248931 SGT was USD 3.7543464701, giving at most USD 2.7543464701 before ongoing charges and shutdown reserves. Auto-pay was false; account spend USD 0.005/hour. See [current budget authority](EP11_BOUNDED_SAMPLE.md). No top-up, Episode 12 or GPT API authority; no paid operation started. Storage continues charging, so USD 1.00 cannot remain untouched forever while the retained volume exists.
+
 Latest user direction: Episode 11 pilot FIRST, including cheaper-GPU feasibility; do not start Episode 12. A local cue-based draft prototype now exists; see [pilot contract and blockers](SUBTITLE_PILOT.md) and [hardware/whole-workflow review](HARDWARE_RUNPOD_REVIEW.md). Four real embedded WAV samples totaling 10,800 milliseconds were extracted and verified, but no new acoustic inference was run. The USD 0.50 combined allowance remains unspent. GPT transcription is out of scope. Sol is assigned bounded read-only pilot verification, not paid execution. Full production cue/translation migration is not complete.
 
 Pilot implementation commit `979008f` was pushed to main. Full local suite: 587 passed, 32 skipped in 37.77 seconds. Sol completed independent checks; no paid runner was started. Pilot and hardware reports were submitted successfully through configured Gmail SMTP, message ID `<178866350961.8160.6195496528119390114@DESKTOP-3L7O2K0>`. SMTP acceptance is not inbox/read confirmation. The first local mail command failed PowerShell argument quoting before execution; retry via stdin succeeded, so only one message was submitted.

@@ -2084,9 +2084,14 @@ def _resolve_alignment_overlaps(
     )
     if final_overlaps:
         prior, current = final_overlaps[0]
+        pairs = sorted({
+            (str(left["utterance_uid"]), str(right["utterance_uid"]))
+            for left, right in final_overlaps
+        })
         raise ForcedAlignmentError(
             "same/unknown-speaker alignment overlap remains between "
-            f"{prior['utterance_uid']} and {current['utterance_uid']}"
+            f"{prior['utterance_uid']} and {current['utterance_uid']}; "
+            f"all {len(pairs)} unresolved UID pairs: {pairs}"
         )
     return selected, assigned_speakers, {
         "policy": OVERLAP_RESOLUTION_POLICY,
@@ -2232,6 +2237,7 @@ def align_corrected_segments(
     independent_by_uid: dict[str, list[dict[str, Any]]] = {}
     raw_punctuation_only_count = 0
     next_word_index = 1
+    alignment_issues = []
     for segment_index, coarse in enumerate(source, start=1):
         transcript = [
             {
@@ -2253,15 +2259,19 @@ def align_corrected_segments(
             raise ForcedAlignmentError(
                 f"WhisperX alignment failed for {coarse['utterance_uid']}: {exc}"
             ) from exc
-        words, punctuation_count = _normalize_aligned_words(
-            raw_result,
-            coarse,
-            segment_index=segment_index,
-            first_word_index=next_word_index,
-            min_word_score=min_word_score,
-            max_word_duration_ms=max_word_duration_ms,
-            vad_regions=trusted_vad_regions,
-        )
+        try:
+            words, punctuation_count = _normalize_aligned_words(
+                raw_result,
+                coarse,
+                segment_index=segment_index,
+                first_word_index=next_word_index,
+                min_word_score=min_word_score,
+                max_word_duration_ms=max_word_duration_ms,
+                vad_regions=trusted_vad_regions,
+            )
+        except ForcedAlignmentError as exc:
+            alignment_issues.append(f"{coarse['utterance_uid']}: {exc}")
+            continue
         raw_punctuation_only_count += punctuation_count
         next_word_index += len(words)
         independent_by_uid[str(coarse["utterance_uid"])] = words
@@ -2290,10 +2300,11 @@ def align_corrected_segments(
             deletion_audio_reviewed=bool(coarse["deletion_audio_reviewed"]),
         )
         if exceeds_default_drift and drift_context is None:
-            raise ForcedAlignmentError(
+            alignment_issues.append(
                 f"{coarse['utterance_uid']} exceeds max_outward_drift_ms "
                 f"{max_outward_drift_ms}: {drift_audit}"
             )
+            continue
         aligned_segments.append(
             {
                 "segment_index": segment_index,
@@ -2324,6 +2335,12 @@ def align_corrected_segments(
                     else {}
                 ),
             }
+        )
+
+    if alignment_issues:
+        raise ForcedAlignmentError(
+            f"independent alignment failed for {len(alignment_issues)} utterances:\n"
+            + "\n".join(alignment_issues)
         )
 
     selected_by_uid, assigned_speakers, overlap_resolution = (

@@ -266,6 +266,36 @@ class ForcedAlignmentTests(unittest.TestCase):
         )
         validate_forced_alignment_data(data)
 
+    def test_large_overlap_component_hits_budget_before_exponential_search(self):
+        coarse = [
+            {"start_ms": 1000, "end_ms": 2500, "text": "Merhaba.",
+             "asr_text": "Merhaba.", "deletion_audio_reviewed": False,
+             "utterance_uid": f"utt-{i}"}
+            for i in range(13)
+        ]
+        independent = _result([{"word": "Merhaba.", "start": 1.1, "end": 2.0}])
+        joint = _result([
+            {"word": "Merhaba.", "start": 1.1, "end": 1.4} for _ in coarse
+        ])
+        fake = _FakeWhisperX([independent] * len(coarse) + [joint])
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ForcedAlignmentError, "8192 combinations.*limit 4096"):
+                align_corrected_segments(self._audio(directory), coarse, whisperx_module=fake)
+        self.assertEqual(len(fake.align_calls), 14)
+
+    def test_all_independent_utterance_failures_are_reported_in_one_pass(self):
+        fake = _FakeWhisperX([
+            _result([{"word": "Merhaba,", "start": 1.1, "end": 1.4, "score": 0.01}]),
+            _result([{"word": "Nas\u0131ls\u0131n?", "start": 4.1, "end": 4.7, "score": 0.01}]),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ForcedAlignmentError) as raised:
+                align_corrected_segments(self._audio(directory), _coarse(), whisperx_module=fake)
+        self.assertIn("failed for 2 utterances", str(raised.exception))
+        self.assertIn("utt-1", str(raised.exception))
+        self.assertIn("utt-2", str(raised.exception))
+        self.assertEqual(len(fake.align_calls), 2)
+
     def test_joint_alignment_resolves_unknown_speaker_overlap(self) -> None:
         coarse = [
             {

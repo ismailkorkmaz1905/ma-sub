@@ -2,6 +2,8 @@
 >
 > Local MP4: C:/Users/Ismail/CodeBase/ma-sub-archive-20260906/deliverables/Muhtemel Ask 12.Bolum.id.BURNED.REVIEW.mp4. Evidence: mp4-final-20260906T125824Z/recovery-complete.json under that archive. Earlier var/ and EPISODES/ paths also resolve under the archive. SSH -n -T and CUDA AV1 decode are in main; last local suite 742 passed, 5 skipped in 57.59 seconds. Pip/uv installer caches and failed video intermediates were cleaned; models, venv, sources and final artifacts preserved. Native single-stream download and direct-ID readback recovered the shared Google quota failure. Episode 13 has NOT started; use the updated desktop launcher and [plain-language report](SON_DURUM_VE_BOLUM_13.md). Earlier stopped/incomplete/active-job statements below are historical.
 
+> DRIVE LAYOUT UPDATE, 2026-09-06: Muhtemel_Ask_Subtitles (1Gdn4WLjICGJNsYIMCSpSNyXgA_8mdL5p) now directly contains only the same verified MP4 object. Live listing confirmed one file and no subfolders. The old EPISODES tree was moved outside delivery to My Drive as "Muhtemel Ask - Eski teslim arsivi - 20260906" (same folder ID 1baEW_vbsemXqM-K1or6SOEAyP63DCGpI). Native trash attempts hit shared-project quota HTTP 403; browser access was unavailable. Old MKV/SRT are archived, NOT deleted. The old delivery path is historical; inventory current Drive before Episode 13 publication.
+
 # Codex handoff
 
 LATEST DELIVERY STATE AFTER INTERRUPTION, 2026-09-06: final local Episode 12

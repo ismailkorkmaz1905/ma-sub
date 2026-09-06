@@ -4,7 +4,17 @@
 
 1080p, Türkçe ses, görüntüye gömülü Endonezce altyazı. Dosya yaklaşık 8,98 GB. Tamamı indirilip kontrol edildi; Drive'daki son adıyla da tekrar okunarak aynı olduğu doğrulandı. Bilgisayardaki dosya: `C:\Users\Ismail\CodeBase\ma-sub-archive-20260906\deliverables\Muhtemel Ask 12.Bolum.id.BURNED.REVIEW.mp4`.
 
-## Son üç işte ne oldu?
+## Son üç gün: 4, 5 ve 6 Eylül 2026
+
+Tarihler Singapur saatine göredir. Aşağıdaki sıra Git kayıtlarına ve gerçek teslim kayıtlarına dayanır; bütün sürecin dört saatte bittiği iddia edilmiyor.
+
+**4 Eylül - Projeyi kurmaya uğraştık.** İlk depo, komut satırından çalıştırma ve kaynak kodu taşıma işleri yapıldı. Taşıma paketlerinde bozulma ve kurulumu kaldığı yerden sürdürme sorunları çıktı; peş peşe onarım kayıtları oluştu. Bu günün işi ağırlıklı olarak sistemi ayağa kaldırmaktı. Dayanak: `a12ff1b`, `f703a50`, `02585d3`, `7bf8a4f`.
+
+**5 Eylül - Bölüm işini yöneten programı toparladık.** Üretim kodu tek projede toplandı, `main` ana dal oldu. Uzak makineyi açma, ilerlemeyi gösterme, kesilen işi sürdürme ve kapanışı kontrol etme eklendi. Bölüm 11 denemelerinde indirme, bağlantı ve altyazı zamanlaması sorunlarıyla uğraşıldı. Şüpheli sözcükleri sırf çıktı oluşsun diye kabul etmek yerine ses incelemesine ayıran kontroller eklendi. Bu, tamamlanmış kalite onayı değildi. Dayanak: `95928e3`, `538f9ce`, `09320be`, `3cbad05`, `1465c27`, `26d66f9`.
+
+**6 Eylül - Gerçek çıktıya ulaştık.** Bölüm 11'in kısa pilotu üretildi; kalite durumu inceleme gerektiriyordu. Senin sonraki talimatınla Bölüm 12'ye geçildi. Türkçe ve Endonezce inceleme altyazıları, ardından 1080p gömülü altyazılı MP4 tamamlandı. Son dosya Drive'dan iki kez tamamen okunarak doğrulandı. Geçici GPU silindi. Kod ve belgeler kaydedildi; proje içindeki büyük çalışma dosyaları dışarı ayrıldı. Bölüm 13 başlatılmadı.
+
+### Bugün bizi en çok ne yordu?
 
 1. **Altyazıyı ürettik.** Bölüm 12 için Türkçe ve Endonezce dosyalar var. Metnin kaybolmaması ve dosyaların bozulmaması kontrol edildi. Ama bazı hızlı cümleler, zamanlamalar ve kimin konuştuğu hâlâ dinleyerek kontrol edilmeli. "Kusursuz bitti" diyemiyoruz.
 2. **Bilgisayarı fazla yükledik ve durdurduk.** Yerel dönüştürme ile testleri aynı anda çalıştırmak hataydı. Sonra bağlantı ayarını düzelttik; uzak makinede aynı dosya kontrolleri takılmadan tamamlandı. Yeni yerel dönüştürme yapılmadı.
@@ -27,7 +37,9 @@ Son Bölüm 12 altyazıları ve altyazı seçilebilen MKV, arşivde `EPISODES/Mu
 
 405 geçici dosya, toplam 5,66 GB, geri dönüşüm kutusuna kaldırıldı. Bunlar ses kopyaları, yarım videolar ve model önbellekleri. Kutuyu boşaltmadan disk alanı tamamen geri kazanılmaz. Kimlik bilgileri ve çalışan Python ortamı korundu.
 
-Drive'daki eski kopya altyazı ve başarısız SRT yüklemesi temizlendi. Boş klasörler kaldırıldı. Eski asıl MKV ve Endonezce altyazı korundu. Yeni MP4 ayrı teslim klasöründe; geçici uzantısı kaldırıldı ve teslim doğrulaması geçti.
+**Drive teslim klasöründe artık yalnız bir MP4 var.** [Muhtemel_Ask_Subtitles klasörünü aç](https://drive.google.com/drive/folders/1Gdn4WLjICGJNsYIMCSpSNyXgA_8mdL5p). MP4 doğrudan bu klasöre taşındı; bağlantısı, boyutu ve içeriği değişmedi. Canlı klasör listesinde başka dosya veya alt klasör yok.
+
+Eski MKV/SRT'yi çöp kutusuna taşıma isteği Google'ın ortak bağlantı kotasında HTTP 403 aldı; tarayıcı erişimi de kurulamadı. Bu yüzden eski klasör silinmedi, teslim klasörünün dışına, Drive ana dizinine **Muhtemel Ask - Eski teslim arsivi - 20260906** adıyla taşındı. Bu geri alınabilir düzenleme teslim klasörünü temizledi; Drive'daki eski dosyaların kapladığı alanı boşaltmadı. [Eski arşiv](https://drive.google.com/drive/folders/1baEW_vbsemXqM-K1or6SOEAyP63DCGpI). Tam silme yerine yapılan bu işlem özellikle kaydedildi.
 
 Uzak diskte pip/uv kurulum önbellekleri ve bu denemenin yarım MP4'ü kaldırıldı. Kullanılan modeller, çalışma ortamı ve kaynak video korundu. Kalıcı disk silinmedi.
 
@@ -52,6 +64,7 @@ Masaüstündeki **Muhtemel Ask - Episode 13 Astra** kısayolu güncel promptu ok
 - `00b9f66`: kalite kapılarından sonra gömülü altyazılı MP4 üretimi ve MP4 teslimi.
 - `697f5d2`: otomatik uzak bağlantının giriş beklemesini önleyen ayar.
 - `047d1c8`: AV1 görüntüyü ekran kartında açarak dönüşümü hızlandırma.
-- Bu sade özet, temizlik sonucu ve güncel prompt ayrıca belge commit'inde kaydedilir; son iki kayıt `git log -2 --oneline` ile görülebilir.
+- `156b4ca`: gerçek MP4 teslim kanıtları, temizlik ve Bölüm 13 hazırlığı.
+- Bu üç günlük rapor ve yalnız MP4 kalan Drive düzeni sonraki belge commit'inde kaydedilir. Kesin son kayıt `git log -1 --oneline` ile görülebilir; masaüstündeki commit listesinde de bulunur.
 
 Son tam test 742 başarılı, 5 atlandı; 57,59 saniye sürdü. Yeni Docker görüntüsü oluşturulmadı. Tam bölüm MP4 üretimi gerçek L4 ekran kartında tamamlandı. Drive'dan iki tam okuma yapıldı; 8.978.040.872 byte ve SHA-256 eşleşti. Kanıt: arşivde `mp4-final-20260906T125824Z/recovery-complete.json`. Bu ayrı inceleme koşusu, tüm strict akışın gerçek bölüm kabulü değildir.

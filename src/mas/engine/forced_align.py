@@ -2109,6 +2109,27 @@ def _resolve_alignment_overlaps(
     }
 
 
+def _model_state_sha256(model, metadata):
+    state_dict = getattr(model, "state_dict", None)
+    if not callable(state_dict):
+        raise ForcedAlignmentError("alignment checkpoint requires actual model weights")
+    state = state_dict()
+    if not state:
+        raise ForcedAlignmentError("alignment model state is empty")
+    config = getattr(model, "config", None)
+    hasher = hashlib.sha256()
+    hasher.update(digest({
+        "metadata": dict(metadata),
+        "config": config.to_dict() if config is not None else None,
+    }).encode("ascii"))
+    for name in sorted(state):
+        tensor = state[name].detach().cpu().contiguous()
+        hasher.update(digest({"name": name, "dtype": str(tensor.dtype),
+                              "shape": list(tensor.shape)}).encode("ascii"))
+        hasher.update(tensor.numpy().tobytes())
+    return hasher.hexdigest()
+
+
 def align_corrected_segments(
     audio_path: str | Path,
     coarse_segments: Sequence[Mapping[str, Any]],
@@ -2207,10 +2228,13 @@ def align_corrected_segments(
         )
 
     call_kwargs, interpolation_mode = _align_call_kwargs(align)
+    model_state_sha256 = None
     if checkpoint_dir is not None:
+        model_state_sha256 = _model_state_sha256(align_model, align_metadata)
         journal = UnitJournal(Path(checkpoint_dir), {
             "audio_sha256": audio_sha256,
             "model_name": model_name,
+            "model_state_sha256": model_state_sha256,
             "whisperx_version": version,
             "device": device,
             "language": language,
@@ -2463,6 +2487,7 @@ def align_corrected_segments(
             "whisperx_version": version,
             "model_name": model_name,
             "model_type": align_metadata.get("type"),
+            "model_state_sha256": model_state_sha256,
             "language": language,
             "device": device,
             "interpolation": interpolation_mode,

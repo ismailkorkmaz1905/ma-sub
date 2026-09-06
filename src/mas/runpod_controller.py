@@ -111,7 +111,13 @@ class RunPodClient:
                     payload = response.read()
                     if response.status < 200 or response.status >= 300:
                         raise RunPodControllerError(f"RunPod returned HTTP {response.status}")
-                    return json.loads(payload) if payload else {}
+                    try:
+                        result = json.loads(payload) if payload else {}
+                    except (ValueError, UnicodeError):
+                        raise RunPodControllerError("RunPod returned invalid JSON") from None
+                    if not isinstance(result, dict):
+                        raise RunPodControllerError("RunPod returned a non-object response")
+                    return result
             except urllib.error.HTTPError as exc:
                 detail = None
                 try:
@@ -421,9 +427,11 @@ def _network(command, *, idle_timeout=180, total_timeout=1800, capture=False):
 
 
 def _network_retry(
-    command, *, attempts=3, idle_timeout=60, total_timeout=1800, capture=False, budget=None
+    command, *, attempts=3, idle_timeout=60, total_timeout=1800, capture=False, budget=None,
+    deadline=None,
 ):
-    deadline = time.monotonic() + total_timeout
+    operation_deadline = time.monotonic() + total_timeout
+    deadline = min(deadline, operation_deadline) if deadline is not None else operation_deadline
     for attempt in range(1, attempts + 1):
         remaining = deadline - time.monotonic()
         if budget:
@@ -761,8 +769,10 @@ def run_remote_episode(episode, source_url=None):
                 "printf '%s\\n' \"$rc\" > /workspace/.mas-upload/exit-code; exit 0"
             )
             _network(ssh + [run_command], idle_timeout=1800, total_timeout=budget.check())
+            retrieval_deadline = time.monotonic() + 120
             exit_file = temporary / "exit-code"
-            _network_retry(scp + [f"root@{host}:/workspace/.mas-upload/exit-code", str(exit_file)])
+            _network_retry(scp + [f"root@{host}:/workspace/.mas-upload/exit-code", str(exit_file)],
+                           deadline=retrieval_deadline)
             try:
                 exit_code = int(exit_file.read_text(encoding="ascii").strip())
             except (OSError, UnicodeError, ValueError) as exc:
@@ -807,12 +817,15 @@ def run_remote_episode(episode, source_url=None):
                                 str(temporary_file),
                             ],
                             attempts=2,
+                            deadline=retrieval_deadline,
                         )
                     except RunPodControllerError as exc:
                         print(
                             f"[RUNPOD] diagnostic download warning: {exc}",
                             file=sys.stderr,
                         )
+                        if time.monotonic() >= retrieval_deadline:
+                            break
                         continue
                     local_file.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(temporary_file, local_file)
@@ -827,8 +840,10 @@ def run_remote_episode(episode, source_url=None):
                 local_pack = local_root / "translation_input" / handoff
                 local_pack.parent.mkdir(parents=True, exist_ok=True)
                 remote_pack = f"{remote_root}/translation_input/{handoff}"
-                _network_retry(ssh + ["cp -- " + shlex.quote(remote_pack) + " /workspace/.mas-upload/handoff.zip"])
-                _network_retry(scp + [f"root@{host}:/workspace/.mas-upload/handoff.zip", str(local_pack)])
+                _network_retry(ssh + ["cp -- " + shlex.quote(remote_pack) + " /workspace/.mas-upload/handoff.zip"],
+                               deadline=retrieval_deadline)
+                _network_retry(scp + [f"root@{host}:/workspace/.mas-upload/handoff.zip", str(local_pack)],
+                               deadline=retrieval_deadline)
                 print(f"[HANDOFF] downloaded {local_pack}")
             if exit_code not in (0, 20, 21):
                 raise RunPodControllerError(f"remote pipeline failed with exit code {exit_code}")

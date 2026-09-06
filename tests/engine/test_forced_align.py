@@ -198,7 +198,8 @@ class ForcedAlignmentTests(unittest.TestCase):
         path.write_bytes(b"synthetic-audio-placeholder")
         return path
 
-    def test_interrupted_alignment_reuses_only_hash_bound_model_calls(self):
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_interrupted_alignment_reuses_only_hash_bound_model_calls(self, model_hash):
         results = [
             _result([
                 {"word": "Merhaba,", "start": 1.1, "end": 1.4},
@@ -218,11 +219,52 @@ class ForcedAlignmentTests(unittest.TestCase):
                                             checkpoint_dir=checkpoint)
             self.assertEqual(len(resumed.align_calls), 1)
             validate_forced_alignment_data(data)
+            self.assertEqual(data["provenance"]["model_state_sha256"], "a" * 64)
+            model_hash.return_value = "b" * 64
+            changed_model = _FakeWhisperX(results)
+            align_corrected_segments(audio, _coarse(), whisperx_module=changed_model,
+                                     checkpoint_dir=checkpoint)
+            self.assertEqual(len(changed_model.align_calls), 2)
             audio.write_bytes(b"different immutable input")
             fresh = _FakeWhisperX(results)
             align_corrected_segments(audio, _coarse(), whisperx_module=fresh,
                                      checkpoint_dir=checkpoint)
             self.assertEqual(len(fresh.align_calls), 2)
+
+    def test_model_digest_binds_weights_metadata_and_config(self):
+        from types import SimpleNamespace
+        import struct
+        from mas.engine.forced_align import _model_state_sha256
+
+        class Tensor:
+            def __init__(self, values):
+                self.values = values
+                self.dtype = "float32"
+                self.shape = (len(values),)
+
+            def detach(self): return self
+            def cpu(self): return self
+            def contiguous(self): return self
+            def numpy(self): return self
+            def tobytes(self): return struct.pack(f"<{len(self.values)}f", *self.values)
+
+        state = {"weight": Tensor([1, 2])}
+        config = {"vocab_size": 2}
+        model = SimpleNamespace(state_dict=lambda: state,
+                                config=SimpleNamespace(to_dict=lambda: config))
+        metadata = {"language": "tr", "dictionary": {"a": 1}}
+        original = _model_state_sha256(model, metadata)
+        self.assertEqual(original, _model_state_sha256(model, metadata))
+        state["weight"] = Tensor([1, 3])
+        self.assertNotEqual(original, _model_state_sha256(model, metadata))
+        state["weight"] = Tensor([1, 2])
+        config["vocab_size"] = 3
+        self.assertNotEqual(original, _model_state_sha256(model, metadata))
+        config["vocab_size"] = 2
+        metadata["dictionary"]["a"] = 2
+        self.assertNotEqual(original, _model_state_sha256(model, metadata))
+        with self.assertRaisesRegex(ForcedAlignmentError, "actual model weights"):
+            _model_state_sha256(object(), metadata)
 
     def test_explicit_cross_speaker_overlap_is_preserved(self) -> None:
         coarse = [

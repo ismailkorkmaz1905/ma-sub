@@ -329,6 +329,24 @@ def test_network_retries_share_total_budget(monkeypatch):
     assert budgets == [10, 1]
 
 
+def test_post_run_transfers_share_retrieval_grace(monkeypatch):
+    clock = [0.0]
+    timeouts = []
+
+    def network(*args, **kwargs):
+        timeouts.append(kwargs["total_timeout"])
+        clock[0] += min(70, kwargs["total_timeout"])
+        return b"ok"
+
+    monkeypatch.setattr(runpod_controller, "_network", network)
+    monkeypatch.setattr(runpod_controller.time, "monotonic", lambda: clock[0])
+    runpod_controller._network_retry(["scp", "exit-code"], deadline=120)
+    runpod_controller._network_retry(["scp", "diagnostic"], deadline=120)
+    with pytest.raises(runpod_controller.RunPodControllerError, match="total retry budget"):
+        runpod_controller._network_retry(["scp", "next-diagnostic"], deadline=120)
+    assert timeouts == [120, 50]
+
+
 def test_verified_transfer_cannot_reset_episode_budget(monkeypatch, tmp_path):
     elapsed = [0.0]
     calls = []
@@ -682,7 +700,8 @@ def test_local_preflight_rejects_malformed_cookie_before_compute(monkeypatch, tm
                                             "MAS_YTDLP_COOKIES": str(cookie)})
 
 
-@pytest.mark.parametrize("failure", ["start_response", "shutdown_get", "readiness"])
+@pytest.mark.parametrize("failure", ["start_response", "shutdown_get", "readiness",
+                                     "malformed_json", "non_object_json"])
 def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_path, failure):
     key = tmp_path / "key"
     cookie = tmp_path / "cookie"
@@ -700,12 +719,15 @@ def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_pa
         "MAS_DRIVE_STRICT_REMOTE": "gdrive:path",
     }
 
-    class Client:
+    class Client(runpod_controller.RunPodClient):
         def __init__(self, *args):
+            super().__init__("pod123", "secret", attempts=1)
             self.running = False
             self.stopped = False
 
         def get(self):
+            if self.running and failure in {"malformed_json", "non_object_json"}:
+                return super().get()
             if self.running and failure == "shutdown_get":
                 raise runpod_controller.RunPodControllerError("GET unavailable")
             return {"desiredStatus": "RUNNING" if self.running else "EXITED"}
@@ -727,6 +749,11 @@ def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_pa
             return value
 
     client = Client()
+    class MalformedResponse(_Response):
+        def read(self):
+            return b"not JSON" if failure == "malformed_json" else b"[]"
+    monkeypatch.setattr(runpod_controller.urllib.request, "urlopen",
+                        lambda *a, **kw: MalformedResponse(None))
     monkeypatch.setattr(runpod_controller, "RunPodClient", lambda *args: client)
     monkeypatch.setattr(runpod_controller, "_required_environment", lambda: values)
     monkeypatch.setattr(runpod_controller, "_local_preflight", lambda values: ("a" * 40, config))

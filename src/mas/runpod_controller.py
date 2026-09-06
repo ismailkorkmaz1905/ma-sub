@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from .config import ROOT, episode_dir
 from .engine.tr_correction import validate_tr_correction_output
+from .id_return_preflight import preflight_local_id_return
 from .engine.download import _validated_cookie_file
 from .remote import RemoteVerificationError, _run_watchdog
 from .reliability import BudgetExceeded, RunBudget, atomic_json, digest
@@ -641,6 +642,10 @@ def run_remote_episode(episode, source_url=None):
     name = f"Muhtemel Ask {episode}.Bolum"
     local_root = episode_dir(episode)
     _validate_local_tr_return(local_root, name)
+    try:
+        preflight_local_id_return(local_root, episode, ROOT / "config" / "production")
+    except Exception as exc:
+        raise RunPodControllerError("local Indonesian return failed preflight") from exc
     budget = _episode_budget(local_root, episode)
     key = Path(values["MAS_RUNPOD_SSH_KEY"]).resolve()
     cookie = Path(values["MAS_YTDLP_COOKIES"]).resolve()

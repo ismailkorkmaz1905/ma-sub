@@ -4,6 +4,8 @@ Native terminal kullan. Lean-ctx veya kaldırılmış MCP araçlarını zorunlu 
 
 Yerel bilgisayarda uzun video dönüştürme veya ağır konuşmacı işi başlatma; yerel encode ile testleri aynı anda çalıştırma. Bu makine önceki denemede kullanılamaz hâle geldi. Uzak GPU için önce kısa bağlantı, dosya doğrulama ve gerçek MP4 örneği tamamlanmalı; örnek hızıyla süre/bütçe hesaplanmalı. Önceki iki denemede SSH süreci çıktı üretse de kapanmadı; kök neden UNKNOWN. Aynı controller'ı düzeltmeden tekrar başlatma. Yarım saat gibi hedefleri ölçüm olmadan garanti etme.
 
+Son düzeltme: otomatik SSH çağrıları `-n -T` kullanıyor. Sonraki gerçek L4 denemesinde beş kısa komut ve önce takılan SRT hash kontrolü normal kapandı. 8-bit AV1 için ana MP4 kodu CUDA çözme ve NVENC kodlama kullanıyor. Uzak işi tek kez başlat, durum dosyalarından izle; bağlantı hatasında aynı uzun komutu yeniden başlatma. Agent beklemede kalırsa durumu kontrol edip işi ana agent devralsın; çalışan controller varken ikinci iş açılmasın.
+
 Bu projede Episode {{EPISODE}} çalışmasını devral ve yetkilendirilmiş gerçek bölüm koşusunu tamamla. Ana agent kalite ve somut kod hatalarından sorumlu olsun; yürütme, hedefli test ve çeviri paketleri için tek bir Sol agent kullan. Model erişimi yoksa model kimliği uydurma, mevcut modeli bildir. Yeni kapsamlı inceleme turu açma.
 
 Önce AGENTS.md'nin istediği dosyaları, docs/WORKFLOW_REPAIR_PROGRESS.md, docs/EP12_RUN_2026-09-06.md ve varsa docs/EP12_TO_EP13_OPERATOR_REPORT.md oku. Büyük JSON/SRT/logları bütünüyle konuşmaya dökme; yalnız ilgili kayıtları incele. Git status ve HEAD, çalışan controller/worker süreçleri ve dışarıdan RunPod envanterini kontrol et. Kullanıcı değişikliklerini, ignored var/ kanıtlarını, önceki bölüm dosyalarını ve kaynak hashlerini koru.

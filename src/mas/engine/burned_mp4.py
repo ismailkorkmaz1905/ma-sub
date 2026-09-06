@@ -54,9 +54,14 @@ def burn_indonesian_mp4(source_video, id_srt, output_path, *, encoder='h264_nven
         work = Path(folder)
         shutil.copyfile(subtitles, work / 'id.srt')
         partial = work / 'encoded.mp4'
-        command = ['ffmpeg', '-hide_banner', '-nostdin', '-n', '-i', str(source.resolve()),
+        decoder = []
+        video_filter = "subtitles=id.srt:force_style='" + SUBTITLE_STYLE + "'"
+        if encoder == 'h264_nvenc' and video['codec_name'] == 'av1' and video.get('pix_fmt') == 'yuv420p':
+            decoder = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-c:v', 'av1_cuvid']
+            video_filter = 'hwdownload,format=nv12,' + video_filter
+        command = ['ffmpeg', '-hide_banner', '-nostdin', '-n', *decoder, '-i', str(source.resolve()),
                    '-map', '0:v:0', '-map', '0:a:0', '-sn', '-dn',
-                   '-vf', "subtitles=id.srt:force_style='" + SUBTITLE_STYLE + "'",
+                   '-vf', video_filter,
                    '-c:v', encoder, *ENCODERS[encoder], '-pix_fmt', 'yuv420p',
                    '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-metadata:s:a:0', 'language=tur',
                    '-movflags', '+faststart', str(partial.resolve())]

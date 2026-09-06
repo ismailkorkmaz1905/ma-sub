@@ -36,6 +36,8 @@ Drive is not a workspace or repository mirror. As authorized on 2026-09-06, the 
 
 The original strict finalizer still verifies all source, correction, acoustic, translation and subtitle gates before MP4 creation. Burned video necessarily has different encoded video bytes: a separate encoding receipt binds immutable source and ID SRT hashes, style, encoder, output bytes/SHA-256, dimensions, duration and H.264/AAC stream checks. The strict stage binds that receipt and the original finalization report. This encoding check is not perceptual subtitle acceptance. Default production encoding is NVENC; QSV or libx264 must be explicitly selected with `MAS_MP4_ENCODER`. The main Drive publish set is now MP4 only; input-bound filenames preserve prior versions.
 
+For 8-bit AV1 sources with NVENC output, decode through `av1_cuvid` on CUDA, then transfer frames for libass and encode with NVENC. This path completed a real 60-second 1080p Episode 12 sample on L4; full-episode delivery evidence is recorded separately. Automated SSH commands use `-n -T` to avoid inheriting controller input or requesting a terminal. The previously stalled subtitle hash command returned normally in the subsequent real run. Historical failures do not independently prove the exact original cause.
+
 ## ADR-009: Network work is bounded
 
 Network operations use finite attempts, connection timeout, no-progress timeout, and total retry budget from `config/runtime_policy.json`. Authentication, schema, episode, and hash failures are not transient and are not retried.

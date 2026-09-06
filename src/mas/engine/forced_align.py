@@ -1681,7 +1681,8 @@ def _overlap_components(
     pending = set(graph)
     result: list[list[str]] = []
     while pending:
-        root = pending.pop()
+        root = min(pending, key=order.__getitem__)
+        pending.remove(root)
         component = {root}
         stack = [root]
         while stack:
@@ -1693,7 +1694,7 @@ def _overlap_components(
                 pending.discard(neighbor)
                 stack.append(neighbor)
         result.append(sorted(component, key=order.__getitem__))
-    return result
+    return sorted(result, key=lambda component: order[component[0]])
 
 
 def _alignment_candidate(
@@ -1996,7 +1997,13 @@ def _resolve_alignment_overlaps(
                 if int(word["end_ms"]) > trial_start
                 and int(word["start_ms"]) < trial_end
             ]
-            if _unsafe_word_overlaps(nearby + trial_words):
+            boundary_overlaps = [
+                overlap
+                for overlap in _unsafe_word_overlaps(nearby + trial_words)
+                if str(overlap[0]["utterance_uid"]) in component_uids
+                or str(overlap[1]["utterance_uid"]) in component_uids
+            ]
+            if boundary_overlaps:
                 continue
             score = (
                 sum(mode == "joint" for mode, _ in combination),

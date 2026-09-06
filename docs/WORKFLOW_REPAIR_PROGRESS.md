@@ -1,4 +1,27 @@
+> 2026-09-06 Episode 12 operator override: the user explicitly started the four-hour Episode 12 run. See [EP12_RUN_2026-09-06.md](EP12_RUN_2026-09-06.md) for active evidence and cleanup state. This supersedes the earlier start gate, not strict QA.
+
 # Workflow repair progress
+
+## Latest interruption recovery, 2026-09-06
+
+Episode 12 final local review delivery and verified two-track MKV completed.
+Native evidence is 228/228; final artifact-only independent validation passed.
+Drive upload failed with HTTP 403 shared OAuth project per-minute quota at
+11:22:02 UTC, before a successful readback receipt. The resumed inventory call
+was blocked by the newly required lean-ctx allowlist; its transport subsequently
+closed. No running native/upload job remained. Restore tool access and perform
+upload-only recovery, external provider observation, docs commit and main push.
+Do not rerun ASR or overwrite the local MKV. Code commit `9332295` is local;
+741 tests passed, 5 skipped. Exact files, quality flags, cost, cookie/OAuth actions
+and desktop launcher are in [the operator report](EP12_TO_EP13_OPERATOR_REPORT.md).
+
+## Completed real ASR pilot and remaining acceptance, 2026-09-06
+
+The five real Episode 11 clips completed GPU ASR. [Pilot result](EP11_PILOT_RESULT_2026-09-06.md) records every attempt, installer repairs, measured times, artifacts, remaining quality warnings, notification failure and exact local replay command. Final candidate: `EPISODES/Muhtemel Ask 11.Bolum/work/subtitle-pilot/contextual-asr-20260906-4/`, with SRT, same-audio review player, waveform and per-cue diagnostics. Raw GPU evidence: `var/disposable-asr-pilot-20260906T072407Z-7032e0c9/asr/raw/`.
+
+Root repaired the concrete unknown/candidate transition fragmentation bug; Sol tested and independently verified text, exact word boundaries and separation of differing supported speakers. Initial 90 cues became 54 without new GPU inference. Final local tests: 706 passed, 5 skipped in 58.93 seconds. The final real-evidence receipt is `var/ep11-pilot-validation-20260906/final-real-evidence-integrity.json`.
+
+Acceptance remains REVIEW_REQUIRED: 5 short cues, 12 reading-speed warnings, 41 uncertain-speaker words; no perceptual listening or full-episode quality claim. Episode 12 remains gated. All newly created pilot Pods were externally verified absent; old Pod is EXITED and the 50 GB volume remains. Latest displayed balance USD 3.6213915897. Gmail's daily sending quota is exhausted (SMTP 550 5.4.5); later stage events are explicitly logged as blocked, not sent. No top-up, GPT transcription, Drive mutation, volume deletion or stable tag occurred. The older planning/runtime-only entries below are historical where they conflict with this result.
 
 ## Active goal and authority
 
@@ -99,3 +122,32 @@ The existing migration helper deletes the old Pod before creating its replacemen
 The separate ASR-only worker removes pyannote from the pilot execution path and its separate direct dependency lock; production dependencies are unchanged. It retains offline CUDA, exact contextual-manifest/clip checks, model/runtime/producer identities and per-clip raw checkpoints before regrouping. Focused ASR tests: 10 passed in 0.94 seconds. A full suite overlapping the new qualification module's in-progress development returned 1 failed, 696 passed, 5 skipped in 100.71 seconds; the failure is in draft ambiguous-create reconciliation. A clean full-suite rerun is required after that module is finalized.
 
 After qualification reconciliation fixes and final freeze, the combined full suite passed: **704 passed, 5 skipped in 73.06 seconds**. The real REST `createdAt` value uses Go formatting (`YYYY-MM-DD HH:MM:SS.fff +0000 UTC`), not only ISO; the parser now handles it explicitly. Pod inventory uses documented `includeMachine=true` so acceptance can check actual GPU/datacenter. Protected old Pod must be EXITED. The tested disposable controller and provider adapter are ready for a separately bounded real qualification; atomic schedule acceptance and external absence are not yet proven by a real newly created Pod. No old Pod or network volume deletion is authorized by these helpers.
+
+## Executed cheaper-GPU runtime qualification
+
+Code candidate `2d7e71a7768037b1337e8f6b64d9ff072386d4ea`, clean tracked worktree. Evidence directory: `var/disposable-qualification-20260906-1/`. The quote, creation state, runtime inventory and shutdown receipt are retained; their body checksums were revalidated locally.
+
+| Event | UTC | Seconds since first event |
+|---|---|---:|
+| Preflight START | 2026-09-06T06:45:43.189834Z | 0.000 |
+| Create START | 2026-09-06T06:45:52.006259Z | 8.828 |
+| Create PASS | 2026-09-06T06:45:57.001049Z | 13.812 |
+| Runtime inventory START | 2026-09-06T06:45:59.929595Z | 16.750 |
+| Runtime inventory PASS | 2026-09-06T06:47:01.099999Z | 77.922 |
+| Termination START | 2026-09-06T06:47:03.354993Z | 80.172 |
+| External absence PASS | 2026-09-06T06:47:08.760033Z | 85.578 |
+
+Times derive from events.json UTC/monotonic fields, not billing. All eight recorded events, including preflight PASS, have SMTP status sent; inbox arrival is not verified. Runtime worker reports 58.75 seconds including readiness and model hashing.
+
+New Pod `ullkyc3b73lsc6` used NVIDIA RTX 4000 Ada Generation, 20475 MiB, driver 550.127.05, USD 0.28/hour. Retained Python environment `/workspace/ma-sub/.venv/bin/python` reports torch 2.8.0+cu128, CUDA available, faster-whisper 1.2.1, CTranslate2 4.8.1. stable-ts and openai-whisper are absent. Existing large-v3 snapshot `edaa852ec7e145841d8ffdb056a99866b5f0a478` was hashed; model.bin is 3087284237 bytes, SHA-256 `69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1`. Full inventory checksum: `75f4629cc2c6eb1c4fa9c4f3a3aa6a149876dd7a32679f6915cefd13dffefca5`.
+
+Only the newly created disposable container was terminated; its ephemeral container disk is not retained. The persistent network volume and original Pod were not deleted. Subsequent external inventory returned only original Pod `781ct55zv4gkle` in EXITED, volume `xgogcmey5o` size 50 GB. Account displayed balance USD 3.7349020257, spend USD 0.005/hour, auto-pay false. Displayed balance is not an invoice and may lag charges. The 550-second lease cost bound was computed as `(0.28 + 0.005) * 550 / 3600 = USD 0.0435417`; it is not actual charged cost. Explicit termination preceded scheduled `terminateAfter`; schedule enforcement itself remains untested.
+
+Qualification demonstrates allocatable cheaper capacity, SSH and CUDA visibility, not equal throughput or acoustic success. No ASR call, subtitle generation, Drive publication or Episode 12 execution occurred. Next bounded pilot needs isolated missing dependencies, real inference and source-relative cue/speaker review.
+
+
+### Episode 12 delivery progress, 2026-09-06
+
+The user explicitly started Episode 12 with a four-hour deadline, overriding the earlier Episode 11 pilot gate. First complete TR/ID SRT pair: `EPISODES/Muhtemel Ask 12.Bolum/work/review-delivery-20260906-v1/` (2,992 display entries), with `delivery-review.json`, source-audio `review.html` and acoustic diagnostics. This is REVIEW_REQUIRED, not strict/listening PASS. Detailed current evidence is in `docs/EP12_RUN_2026-09-06.md`.
+
+The root fixed new neighbor overlaps introduced by independent CTC windows, preserving raw ASR and falling back on conflicts. Full local suite: 724 passed, 5 skipped in 177.69 seconds. All temporary GPU Pods from both targeted repairs were deleted with external absence proof. Native CPU evidence continues as one resumed chain; 17 completed 119-second chunks were preserved and remaining audio uses 30-second chunks, absolute deadline 11:25 UTC. Sol is reviewing 619 fast Indonesian cues for concise wording and semantic errors. Gmail remains blocked by daily SMTP quota; no notification-delivery PASS. Current HEAD and pre-existing dirty/ignored files remain preserved.

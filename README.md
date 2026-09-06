@@ -10,7 +10,7 @@ source -> audio -> Turkish ASR -> acoustic review -> correction handoff
 
 Production code lives under `src/mas/` and runs through `./mas`. Notebooks and the imported source snapshot under `legacy/` are read-only reference material, not production entrypoints.
 
-> Release status, 2026-09-06: FAIL for release readiness. [Current Astra review](docs/ASTRA_REVIEW_2026-09-06.md) supersedes historical Episode 11 progress and resume instructions below. Local repairs passed 563 tests, 32 skipped, in 37.62 seconds. Production speaker evidence is missing, and the old audio-review PASS does not bind the new return. TR/ID subtitles, strict mux and Drive delivery remain incomplete. Paid compute and Drive mutation require renewed explicit permission. No stable tag.
+> Current operator status, 2026-09-06: Episode 12 was explicitly authorized and produced separate REVIEW subtitles after full GPU ASR, CTC and targeted repairs. The user also authorized review MKV/Drive delivery and an Episode 13 launcher. This does not establish strict or release acceptance. See the [readable Episode 12 / Episode 13 report](docs/EP12_TO_EP13_OPERATOR_REPORT.md), [run evidence](docs/EP12_RUN_2026-09-06.md), and [reusable Episode X prompt](docs/EPISODE_OPERATOR_PROMPT.md). The earlier [Astra review](docs/ASTRA_REVIEW_2026-09-06.md) remains historical evidence of unresolved strict gates. No stable tag.
 
 ## Start here
 

@@ -1,4 +1,8 @@
+> 2026-09-06 Episode 12 operator override: the user explicitly started the four-hour Episode 12 run. See [EP12_RUN_2026-09-06.md](EP12_RUN_2026-09-06.md) for active evidence and cleanup state. This supersedes the earlier start gate, not strict QA.
+
 # Astra handoff
+
+Current pilot result, 2026-09-06: [five-clip Episode 11 ASR/SRT evidence](EP11_PILOT_RESULT_2026-09-06.md) supersedes runtime-only pilot status. Five real clips completed CUDA ASR; the final 54-cue draft remains REVIEW_REQUIRED with unresolved timing/readability/speaker review and no perceptual listening. Episode 12 was not started. Current blocker is acoustic/text acceptance of the produced candidate, not missing ASR output. Use its local `review.html` and retained raw evidence; the linked report gives the exact local replay command. Do not start another Pod merely to regenerate the draft. All five new pilot Pods were externally verified ABSENT; retained Pod 781ct55zv4gkle remains EXITED and volume xgogcmey5o is preserved. Gmail is blocked by its daily sending quota. Local cue repair has 706 passing tests, 5 skipped; no CI, acoustic or delivery PASS is implied. No new independent review round is requested by this continuation.
 
 Current override, 2026-09-06: [Astra review](ASTRA_REVIEW_2026-09-06.md) supersedes the historical status and resume instructions below. Local repairs are not Episode 11 completion. Missing production speaker evidence and stale review binding remain blockers. No paid compute or Drive mutation without renewed explicit permission.
 

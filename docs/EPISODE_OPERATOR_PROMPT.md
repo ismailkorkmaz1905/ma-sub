@@ -1,0 +1,19 @@
+# Episode {{EPISODE}} operatör promptu
+
+Bu projede Episode {{EPISODE}} çalışmasını devral ve yetkilendirilmiş gerçek bölüm koşusunu tamamla. Ana agent kalite ve somut kod hatalarından sorumlu olsun; yürütme, hedefli test ve çeviri paketleri için tek bir Sol agent kullan. Model erişimi yoksa model kimliği uydurma, mevcut modeli bildir. Yeni kapsamlı inceleme turu açma.
+
+Önce AGENTS.md'nin istediği dosyaları, docs/WORKFLOW_REPAIR_PROGRESS.md, docs/EP12_RUN_2026-09-06.md ve varsa docs/EP12_TO_EP13_OPERATOR_REPORT.md oku. Büyük JSON/SRT/logları bütünüyle konuşmaya dökme; yalnız ilgili kayıtları incele. Git status ve HEAD, çalışan controller/worker süreçleri ve dışarıdan RunPod envanterini kontrol et. Kullanıcı değişikliklerini, ignored var/ kanıtlarını, önceki bölüm dosyalarını ve kaynak hashlerini koru.
+
+Bu prompt gerçek Episode {{EPISODE}} çalışmasını başlatma yetkisidir. Önceki koşu tamamlanmamışsa çift controller/GPU başlatma. Bölümün resmi kaynak URL'sini mevcut doğrulanmış kayıttan bul; yoksa tek gerekli soruyla iste. Yanlış bölüm veya yeniden yüklenmiş kaynak kullanma.
+
+Harcamadan önce canlı RunPod bakiyesini, saatlik GPU ve depolama ücretini sorgula. En az 1 USD bakiye ve ayrıca kapanış payı bırak. Son bilinen korunan volume xgogcmey5o ve eski Pod 781ct55zv4gkle: güncel durumlarını doğrula. Top-up, GPT transcription API, volume silme ve stable tag yasak. GPU zorunlu aşamalar için sessiz CPU fallback yasak. Yardımcı konuşmacı kanıtı CPU'da çalışıyorsa bunu açıkça ayrı etiketle.
+
+11 aşamayı izlenebilir şekilde uygula: download, audio, raw_asr, tr_pack, tr_return, audio_review, forced_alignment, id_pack, id_return, finalize, drive_readback. Önceki review yolunu strict tamamlanmış gibi gösterme. Ana üretim giriş noktası ./mas run komutudur; önceki review yardımcılarının tamamının buna bağlı olduğunu varsayma. Kesin kaynak/çeviri/hash/zamanlama kurallarını gevşetme. Bağımsız konuşmacı kanıtı aktör kimliği doğrulaması değildir. Ses dinleyemiyorsan algısal kalite PASS verme; belirsiz kayıtları ve dinleme gereksinimini belirt.
+
+ASR ham checkpointlerini hemen yerelde koru. Hizalama komşu konuşmalara yeni çakışma getirmesin. Bilinen farklı konuşmacıları birleştirme; bilinmeyen konuşmacı aralıklarını inceleme kanıtı olarak koru. Tekrarlanan/metadata benzeri metni sessizce silme; kaynak aralığı ve gerekçesiyle karantinaya al. Çeviri geri dönüşlerinde tam cue kimliği, kaynak hash, sıralama ve metin bütünlüğünü doğrula. Kısaltmaları bağlamla kontrol et; belirsiz konuşmayı uydurma.
+
+Her ücretli aşamada mutlak süre sınırı, sonlu retry, bağlantı/istek timeout'u, gerçek ilerleme watchdog'u ve checkpoint olsun. Her çıkış yolunda sadece bu koşunun sahip olduğu geçici Pod'u kapat/sil ve yokluğunu dışarıdan doğrula. Başlangıç, sonuç, hata ve geçen saniyeleri kanıt dosyalarına yaz; mevcut Gmail ayarlarıyla bildir. SMTP kota hatasında döngüsel retry yapma; yerel kayıtta BLOCKED göster.
+
+Teslim: Türkçe SRT, Endonezce SRT ve ikisini softsub olarak içeren MKV. Video/sesi yeniden kodlama; sıkıştırılmış A/V stream hashlerini, altyazı extraction roundtrip'ini ve dil/default metadata'sını doğrula. Drive'da mevcut aynı isimleri önce envanterle ve önceki nesneleri byte/SHA kanıtıyla korumadan değiştirme. Review ve strict ayrı isim/yol/receipt kullanmalı. Yüklenen her dosyayı uzaktan gerçekten okuyarak byte sayısı ve SHA-256 eşleşmesini doğrulamadan teslim PASS verme. Aktarım PASS ile kalite PASS ayrı olsun.
+
+Somut hataları küçük değişikliklerle ana kodda düzelt. Hedefli test, gerekli tam test suite ve git diff --check çalıştır. Anlamlı kod ve belge aşamalarını commit et, yetkilendirilmiş main'e push et; unrelated kullanıcı değişikliklerini commit'e katma. Son raporda 11 aşamanın gerçek durumunu, eksikleri, yerel test/GPU/Drive/RunPod kanıt ayrımını, dosya bağlantılarını, commitleri, kalan bakiyeyi ve gelecek koşu aksiyonlarını ver. Bölüm {{EPISODE}} bitmeden sonraki bölümü başlatma.

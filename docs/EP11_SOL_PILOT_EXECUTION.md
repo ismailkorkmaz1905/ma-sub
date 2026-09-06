@@ -36,6 +36,24 @@ Status: BLOCKED before paid startup.
 
 No Pod start, stop, migration, API inference, Drive operation, model download, gated-term acceptance or volume mutation was performed. New pilot compute spend initiated in this execution: USD 0.00.
 
+## Isolated runner implementation
+
+`src/mas/subtitle/pilot_runner.py` now provides local-only readiness primitives for a future approved lease:
+
+- conservative balance calculation with a USD 1.00 floor, USD 0.10 billing-delay margin and combined account/Pod hourly rate;
+- separate 180-second startup, 180-second inference and 120-second shutdown allocations;
+- deterministic FLAC-to-16 kHz mono PCM WAV conversion with immutable input recheck and a checksum-bound provenance receipt;
+- measured progress based only on increased completed-unit or artifact-byte counters;
+- stage START/PASS/FAIL notification calls and atomic event records;
+- artifact byte-count/SHA-256 snapshots;
+- stop in `finally`, including an ambiguous start response, followed by external `EXITED` polling and a checksum-bound final Pod/account receipt.
+
+Focused local validation after runner cleanup repairs: `36 passed in 3.77 seconds` across `tests/test_pilot_runner.py` and `tests/test_subtitle_pilot.py`. The timeout path now terminates the exact worker process tree on Windows and POSIX, artifact SHA-256 reading checks its deadline between 1 MiB chunks, and a failed external shutdown always raises even when inference had already failed. Python compilation and `git diff --check` passed. These results do not include CUDA, provider lifecycle or email-delivery execution.
+
+At `2026-09-06T03:17:15.1826226Z`, a second read-only provider query returned balance USD 3.749485359, account spend USD 0.005/hour, auto-pay false, and the retained Pod still `EXITED` at USD 0.74/hour. If every readiness prerequisite were already satisfied, the planning scaffold would reserve 550 seconds and derive USD 0.1138194444 at the combined USD 0.745/hour rate, while preserving a USD 1.10 balance floor including the billing-delay margin. This is not permission to start: source, model and image readiness remain unproven, and the observed balance decrease since the earlier query demonstrates that displayed current hourly spend is not a complete real-time billing ledger.
+
+The module remains a planning and local enforcement scaffold, not an approved paid runner. It bounds the child inference process, synchronous mail waits and provider HTTP calls, but no independent external lease watchdog has yet been proven to stop the Pod if the controller process itself hangs or terminates. Do not use it to start compute.
+
 ## Required lease plan before a future start
 
 1. Configure existing RunPod S3 credentials in a secure local credential store or environment variables without committing or printing them. Use read-only S3 access to inventory the retained volume and retrieve only the required Episode 11 source/model evidence without starting a GPU. Do not create credentials unless the user separately authorizes it.

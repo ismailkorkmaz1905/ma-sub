@@ -366,7 +366,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
                                  attempts=3, socket_timeout=30,
                                  cookies_file=os.getenv("MAS_YTDLP_COOKIES"),
                                  expected_source_sha256=state.get("source_sha256"),
-                                 freeze_captions=any(
+                                 freeze_captions=(dirs["prepare"] / "primary_asr").is_dir() or any(
                                      (dirs["prepare"] / filename).is_file()
                                      for filename in ("raw_asr_v2.json", "raw_asr_v2.recovery.json")
                                  ))

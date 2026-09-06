@@ -909,6 +909,70 @@ class RawASRV2Tests(unittest.TestCase):
 
 
 class RawASRV2RuntimeTests(unittest.TestCase):
+    def setUp(self):
+        model_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(model_directory.cleanup)
+        model_path = Path(model_directory.name)
+        (model_path / "model.bin").write_bytes(b"synthetic-model")
+        (model_path / "config.json").write_text("{}", encoding="utf-8")
+        (model_path / "tokenizer.json").write_text("{}", encoding="utf-8")
+        for name, value in (("resolve_model", model_path),
+                            ("producer_identity", {"test_runtime": "synthetic-1"})):
+            patcher = patch.object(raw_asr_v2_module.primary_checkpoint, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_primary_survives_vad_failure_and_enrichment_policy_change(self):
+        calls = []
+
+        class Model:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def transcribe(self, _path, **_kwargs):
+                calls.append(_path)
+                return iter([_complete_segment()]), Info()
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio, prepare = self._audio_and_prepare(directory)
+            with patch.object(raw_asr_v2_module, "_import_whisper", return_value=(Model, FakeCTranslate2)):
+                with patch.object(raw_asr_v2_module, "_extract_vad_regions", side_effect=RuntimeError("VAD interrupted")):
+                    with self.assertRaisesRegex(RuntimeError, "VAD interrupted"):
+                        transcribe_raw_audio_v2(audio, prepare, episode=11)
+                self.assertEqual(len(list((prepare / "primary_asr").glob("*.json"))), 1)
+                self.assertFalse((prepare / "raw_asr_v2.recovery.json").exists())
+                with patch.object(raw_asr_v2_module, "_extract_vad_regions", return_value=self._vad()):
+                    result = transcribe_raw_audio_v2(
+                        audio, prepare, episode=11,
+                        config=RawASRV2Config(rescue_max_spans=97))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(result["words"][0]["text"].strip(), "Merhaba")
+
+    def test_primary_does_not_reuse_changed_model_or_prompt(self):
+        calls = []
+
+        class Model:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def transcribe(self, _path, **_kwargs):
+                calls.append(_path)
+                return iter([_complete_segment()]), Info()
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio, prepare = self._audio_and_prepare(directory)
+            with (patch.object(raw_asr_v2_module, "_import_whisper", return_value=(Model, FakeCTranslate2)),
+                  patch.object(raw_asr_v2_module, "_extract_vad_regions", side_effect=RuntimeError("VAD interrupted"))):
+                for names in ((), ("Omer",)):
+                    with self.assertRaisesRegex(RuntimeError, "VAD interrupted"):
+                        transcribe_raw_audio_v2(audio, prepare, episode=11, canonical_names=names)
+                model_path = raw_asr_v2_module.primary_checkpoint.resolve_model("large-v3")
+                (model_path / "model.bin").write_bytes(b"changed-model")
+                with self.assertRaisesRegex(RuntimeError, "VAD interrupted"):
+                    transcribe_raw_audio_v2(audio, prepare, episode=11)
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(len(list((prepare / "primary_asr").glob("*.json"))), 3)
+
     @staticmethod
     def _audio_and_prepare(directory: str) -> tuple[Path, Path]:
         root = Path(directory)

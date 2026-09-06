@@ -20,6 +20,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from ..progress import mark_work_progress
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -37,6 +38,7 @@ from .speech_coverage import (
     analyze_speech_coverage,
     require_v2_beta_speech_coverage_config,
 )
+from . import primary_checkpoint
 from .tr_correction import (
     MAX_ASR_HALLUCINATION_AUDIO_FILES,
     MAX_AUTOMATIC_ASR_HALLUCINATION_AUDIO_FILES,
@@ -2719,10 +2721,12 @@ def transcribe_raw_audio_v2(
     cpu_threads = max(1, os.cpu_count() or 1)
     runtime_fallback_reason: str | None = None
     model: Any | None = None
+    model_path = primary_checkpoint.resolve_model(settings.model_name)
+    primary_model_identity = primary_checkpoint.model_identity(model_path)
 
     def load_model(target_device: str, target_compute_type: str) -> Any:
         return WhisperModel(
-            settings.model_name,
+            str(model_path),
             device=target_device,
             compute_type=target_compute_type,
             cpu_threads=cpu_threads,
@@ -2730,8 +2734,7 @@ def transcribe_raw_audio_v2(
         )
 
     def run_main_pass(runtime_model: Any) -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
-        iterator, pass_info = runtime_model.transcribe(
-            str(source_path),
+        options = dict(
             language=settings.language,
             task="transcribe",
             beam_size=settings.beam_size,
@@ -2743,9 +2746,28 @@ def transcribe_raw_audio_v2(
             vad_filter=True,
             vad_parameters=transcription_settings.vad_parameters,
         )
+        identity = {"format": "mas-primary-asr-1", "episode": episode,
+                    "audio_sha256": audio_sha, "model": primary_model_identity,
+                    "producer": primary_producer, "options": options,
+                    "device": device, "compute_type": compute_type,
+                    "cpu_threads": cpu_threads, "num_workers": 1}
+        checkpoint = destination / "primary_asr" / (sha256_json(identity) + ".json")
+        cached = None if force else primary_checkpoint.load_primary(checkpoint, identity)
+        if cached is not None:
+            LOGGER.info("Reusing hash-bound primary ASR before VAD/rescue")
+            mark_work_progress("raw_asr:primary_checkpoint", completed=True)
+            return SimpleNamespace(language=cached["language"]), cached["segments"], cached["words"]
+        iterator, pass_info = runtime_model.transcribe(str(source_path), **options)
         pass_segments, pass_words = consume_coarse_segments(
             iterator, source="main"
         )
+        if sha256_file(source_path) != audio_sha:
+            raise TranscriptionError("Audio input changed during raw ASR primary inference")
+        if primary_checkpoint.model_identity(model_path) != primary_model_identity:
+            raise TranscriptionError("primary ASR model changed during inference")
+        primary_checkpoint.save_primary(
+            checkpoint, identity, str(getattr(pass_info, "language", settings.language)),
+            pass_segments, pass_words)
         return pass_info, pass_segments, pass_words
 
     def run_rescue_pass(
@@ -2773,6 +2795,8 @@ def transcribe_raw_audio_v2(
             source=f"rescue-{rescue_index}",
         )
 
+    primary_producer = primary_checkpoint.producer_identity(
+        (run_main_pass, load_model, consume_coarse_segments, _finite_ms, _optional_finite_number))
     try:
         try:
             model = load_model(device, compute_type)

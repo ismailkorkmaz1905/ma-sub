@@ -127,6 +127,36 @@ class _MutatingWhisperX(_FakeWhisperX):
         )
 
 
+class _OverlapWhisperX(_FakeWhisperX):
+    def __init__(self, *, joint_resolves: bool) -> None:
+        super().__init__([])
+        self.joint_resolves = joint_resolves
+
+    def align(
+        self,
+        transcript: list[dict[str, Any]],
+        model: object,
+        metadata: dict[str, str],
+        audio: object,
+        device: str,
+        interpolate_method: str = "nearest",
+        return_char_alignments: bool = False,
+        print_progress: bool = False,
+    ) -> dict[str, Any]:
+        text = transcript[0]["text"]
+        if "Merhaba" in text and "Selam" in text:
+            second_start = 1.5 if self.joint_resolves else 1.3
+            return _result(
+                [
+                    {"word": "Merhaba.", "start": 1.1, "end": 1.4},
+                    {"word": "Selam.", "start": second_start, "end": 2.2},
+                ]
+            )
+        if "Merhaba" in text:
+            return _result([{"word": "Merhaba.", "start": 1.1, "end": 2.0}])
+        return _result([{"word": "Selam.", "start": 1.3, "end": 2.2}])
+
+
 def _result(
     words: list[dict[str, Any]], *, add_default_scores: bool = True
 ) -> dict[str, Any]:
@@ -206,6 +236,80 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertEqual(
             [word["speaker_id"] for word in data["words"]],
             ["speaker-a", "speaker-b"],
+        )
+        validate_forced_alignment_data(data)
+
+    def test_joint_alignment_resolves_unknown_speaker_overlap(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1000,
+                "end_ms": 2500,
+                "text": "Merhaba.",
+                "asr_text": "Merhaba.",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-a",
+            },
+            {
+                "start_ms": 1200,
+                "end_ms": 2800,
+                "text": "Selam.",
+                "asr_text": "Selam.",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-b",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory),
+                coarse,
+                whisperx_module=_OverlapWhisperX(joint_resolves=True),
+            )
+
+        resolution = data["provenance"]["overlap_resolution"]
+        self.assertEqual(resolution["initial_overlap_count"], 1)
+        self.assertEqual(resolution["final_overlap_count"], 0)
+        self.assertEqual(resolution["acoustic_component_count"], 0)
+        self.assertNotIn("speaker_id", data["segments"][0])
+        validate_forced_alignment_data(data)
+
+    def test_reviewed_simultaneous_dialogue_gets_audited_acoustic_lanes(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1000,
+                "end_ms": 2500,
+                "text": "Merhaba.",
+                "asr_text": "Merhaba.",
+                "deletion_audio_reviewed": False,
+                "audio_reviewed": True,
+                "review_disposition": "confirmed_dialogue",
+                "utterance_uid": "utt-a",
+            },
+            {
+                "start_ms": 1200,
+                "end_ms": 2800,
+                "text": "Selam.",
+                "asr_text": "Selam.",
+                "deletion_audio_reviewed": False,
+                "audio_reviewed": True,
+                "review_disposition": "confirmed_dialogue",
+                "utterance_uid": "utt-b",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory),
+                coarse,
+                whisperx_module=_OverlapWhisperX(joint_resolves=False),
+            )
+
+        resolution = data["provenance"]["overlap_resolution"]
+        self.assertEqual(resolution["acoustic_component_count"], 1)
+        self.assertEqual(
+            [segment["speaker_id"] for segment in data["segments"]],
+            [
+                "acoustic-overlap-0001-lane-01",
+                "acoustic-overlap-0001-lane-02",
+            ],
         )
         validate_forced_alignment_data(data)
 

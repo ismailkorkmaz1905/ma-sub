@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.metadata
 import hashlib
 import inspect
+import itertools
 import json
 import math
 import re
@@ -48,6 +49,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v1"
 DURATION_VAD_FIELDS = frozenset(
     {
         "duration_context",
@@ -1037,6 +1039,75 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
             f"provenance max_outward_drift_ms cannot exceed "
             f"{DEFAULT_MAX_OUTWARD_DRIFT_MS}"
         )
+    overlap_resolution = provenance.get("overlap_resolution")
+    if not isinstance(overlap_resolution, Mapping):
+        raise ForcedAlignmentError("provenance overlap_resolution must be an object")
+    if overlap_resolution.get("policy") != OVERLAP_RESOLUTION_POLICY:
+        raise ForcedAlignmentError("provenance overlap resolution policy is invalid")
+    for field in (
+        "initial_overlap_count",
+        "initial_component_count",
+        "adaptive_candidate_count",
+        "resolved_component_count",
+        "acoustic_component_count",
+        "final_overlap_count",
+    ):
+        _require_integer(
+            overlap_resolution.get(field),
+            f"provenance overlap_resolution {field}",
+        )
+    if overlap_resolution.get("final_overlap_count") != 0:
+        raise ForcedAlignmentError("provenance final overlap count must be zero")
+    selected_mode_counts = overlap_resolution.get("selected_mode_counts")
+    if not isinstance(selected_mode_counts, Mapping) or any(
+        not isinstance(mode, str)
+        or not mode
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 0
+        for mode, count in selected_mode_counts.items()
+    ):
+        raise ForcedAlignmentError(
+            "provenance overlap selected_mode_counts is invalid"
+        )
+    acoustic_components = overlap_resolution.get("acoustic_components")
+    if isinstance(acoustic_components, (str, bytes)) or not isinstance(
+        acoustic_components, Sequence
+    ):
+        raise ForcedAlignmentError(
+            "provenance overlap acoustic_components must be a sequence"
+        )
+    if len(acoustic_components) != overlap_resolution.get("acoustic_component_count"):
+        raise ForcedAlignmentError(
+            "provenance overlap acoustic component count mismatch"
+        )
+    acoustic_lane_by_uid: dict[str, str] = {}
+    for expected_component_index, component in enumerate(acoustic_components, start=1):
+        if not isinstance(component, Mapping):
+            raise ForcedAlignmentError("acoustic overlap component must be an object")
+        if component.get("component_index") != expected_component_index:
+            raise ForcedAlignmentError("acoustic overlap component index mismatch")
+        lanes = component.get("lanes")
+        if isinstance(lanes, (str, bytes)) or not isinstance(lanes, Sequence):
+            raise ForcedAlignmentError("acoustic overlap lanes must be a sequence")
+        if len(lanes) < 2:
+            raise ForcedAlignmentError("acoustic overlap component needs two lanes")
+        for expected_lane_index, lane in enumerate(lanes, start=1):
+            if not isinstance(lane, Mapping):
+                raise ForcedAlignmentError("acoustic overlap lane must be an object")
+            uid = _require_nonempty_string(
+                lane.get("utterance_uid"), "acoustic overlap utterance_uid"
+            )
+            lane_id = _require_nonempty_string(
+                lane.get("speaker_id"), "acoustic overlap speaker_id"
+            )
+            expected_lane_id = (
+                f"acoustic-overlap-{expected_component_index:04d}-lane-"
+                f"{expected_lane_index:02d}"
+            )
+            if lane_id != expected_lane_id or uid in acoustic_lane_by_uid:
+                raise ForcedAlignmentError("acoustic overlap lane binding is invalid")
+            acoustic_lane_by_uid[uid] = lane_id
 
     segments = data.get("segments")
     flat_words = data.get("words")
@@ -1127,6 +1198,13 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
         if audio_reviewed != audio_review_supported:
             raise ForcedAlignmentError(
                 f"{utterance_uid} audio-review fields are inconsistent"
+            )
+        expected_acoustic_lane = acoustic_lane_by_uid.get(utterance_uid)
+        if expected_acoustic_lane is not None and (
+            not audio_review_supported or segment_speaker_id != expected_acoustic_lane
+        ):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} acoustic overlap lane lacks review evidence"
             )
         expected_token_edits, expected_edit_audit = _token_edit_audit(
             asr_text,
@@ -1446,6 +1524,8 @@ def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
 
     if word_indices != set(range(1, len(flattened) + 1)):
         raise ForcedAlignmentError("aligned word_index sequence is not contiguous")
+    if not set(acoustic_lane_by_uid).issubset(seen_uids):
+        raise ForcedAlignmentError("acoustic overlap lane references an unknown segment")
     chronological = sorted(
         flattened,
         key=lambda word: (
@@ -1564,6 +1644,426 @@ def _align_call_kwargs(align_function: Any) -> tuple[dict[str, Any], str]:
     return kwargs, mode
 
 
+def _unsafe_word_overlaps(
+    words: Sequence[Mapping[str, Any]],
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    ordered = sorted(
+        words,
+        key=lambda word: (int(word["start_ms"]), int(word["end_ms"])),
+    )
+    active: list[Mapping[str, Any]] = []
+    overlaps: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    for word in ordered:
+        word_start = int(word["start_ms"])
+        active = [prior for prior in active if int(prior["end_ms"]) > word_start]
+        current_speaker = speaker_id(word, "aligned word")
+        for prior in active:
+            if overlap_is_unsafe(
+                speaker_id(prior, "prior aligned word"), current_speaker
+            ):
+                overlaps.append((prior, word))
+        active.append(word)
+    return overlaps
+
+
+def _overlap_components(
+    overlaps: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    order: Mapping[str, int],
+) -> list[list[str]]:
+    graph: dict[str, set[str]] = {}
+    for prior, current in overlaps:
+        prior_uid = str(prior["utterance_uid"])
+        current_uid = str(current["utterance_uid"])
+        if prior_uid == current_uid:
+            continue
+        graph.setdefault(prior_uid, set()).add(current_uid)
+        graph.setdefault(current_uid, set()).add(prior_uid)
+    pending = set(graph)
+    result: list[list[str]] = []
+    while pending:
+        root = pending.pop()
+        component = {root}
+        stack = [root]
+        while stack:
+            uid = stack.pop()
+            for neighbor in graph[uid]:
+                if neighbor in component:
+                    continue
+                component.add(neighbor)
+                pending.discard(neighbor)
+                stack.append(neighbor)
+        result.append(sorted(component, key=order.__getitem__))
+    return result
+
+
+def _alignment_candidate(
+    coarse: Mapping[str, Any],
+    *,
+    window_start_ms: int,
+    window_end_ms: int,
+    segment_index: int,
+    align: Any,
+    align_model: Any,
+    align_metadata: Mapping[str, Any],
+    audio: Any,
+    device: str,
+    call_kwargs: Mapping[str, Any],
+    min_word_score: float,
+    max_word_duration_ms: int,
+    max_outward_drift_ms: int,
+    vad_regions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    candidate = dict(coarse)
+    candidate["start_ms"] = window_start_ms
+    candidate["end_ms"] = window_end_ms
+    raw_result = align(
+        [
+            {
+                "start": window_start_ms / 1000.0,
+                "end": window_end_ms / 1000.0,
+                "text": _alignment_model_text(str(coarse["text"])),
+            }
+        ],
+        align_model,
+        align_metadata,
+        audio,
+        device,
+        **call_kwargs,
+    )
+    words, _ = _normalize_aligned_words(
+        raw_result,
+        candidate,
+        segment_index=segment_index,
+        first_word_index=1,
+        min_word_score=min_word_score,
+        max_word_duration_ms=max_word_duration_ms,
+        vad_regions=vad_regions,
+    )
+    drift = _segment_drift_audit(
+        words,
+        coarse_start_ms=int(coarse["coarse_start_ms"]),
+        coarse_end_ms=int(coarse["coarse_end_ms"]),
+    )
+    exceeds = (
+        drift["early_outward_drift_ms"] > max_outward_drift_ms
+        or drift["late_outward_drift_ms"] > max_outward_drift_ms
+    )
+    context = _bounded_drift_context(
+        words,
+        drift,
+        window_start_ms=window_start_ms,
+        window_end_ms=window_end_ms,
+        coarse_start_ms=int(coarse["coarse_start_ms"]),
+        coarse_end_ms=int(coarse["coarse_end_ms"]),
+        max_outward_drift_ms=max_outward_drift_ms,
+    )
+    if exceeds and context is None:
+        raise ForcedAlignmentError(
+            f"{coarse['utterance_uid']} adaptive alignment exceeds outward drift"
+        )
+    return words
+
+
+def _resolve_alignment_overlaps(
+    source: Sequence[Mapping[str, Any]],
+    independent: Mapping[str, list[dict[str, Any]]],
+    *,
+    align: Any,
+    align_model: Any,
+    align_metadata: Mapping[str, Any],
+    audio: Any,
+    device: str,
+    call_kwargs: Mapping[str, Any],
+    min_word_score: float,
+    max_word_duration_ms: int,
+    max_outward_drift_ms: int,
+    vad_regions: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str], dict[str, Any]]:
+    by_uid = {str(item["utterance_uid"]): item for item in source}
+    order = {str(item["utterance_uid"]): index for index, item in enumerate(source)}
+    selected = dict(independent)
+    initial_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    initial_components = _overlap_components(initial_overlaps, order)
+    options: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {
+        uid: [("independent", words)] for uid, words in independent.items()
+    }
+
+    def add_option(uid: str, mode: str, words: list[dict[str, Any]]) -> None:
+        signature = tuple(
+            (int(word["start_ms"]), int(word["end_ms"])) for word in words
+        )
+        if any(
+            signature
+            == tuple(
+                (int(word["start_ms"]), int(word["end_ms"]))
+                for word in existing
+            )
+            for _, existing in options[uid]
+        ):
+            return
+        options[uid].append((mode, words))
+
+    adaptive_candidate_count = 0
+    for component_index, component_uids in enumerate(initial_components, start=1):
+        group = [by_uid[uid] for uid in component_uids]
+        joint_start = min(int(item["start_ms"]) for item in group)
+        joint_end = max(int(item["end_ms"]) for item in group)
+        joint_text = " ".join(str(item["text"]) for item in group)
+        try:
+            joint_raw = align(
+                [
+                    {
+                        "start": joint_start / 1000.0,
+                        "end": joint_end / 1000.0,
+                        "text": _alignment_model_text(joint_text),
+                    }
+                ],
+                align_model,
+                align_metadata,
+                audio,
+                device,
+                **call_kwargs,
+            )
+            raw_words = _raw_aligned_words(
+                joint_raw, f"overlap-component-{component_index}"
+            )
+            expected_count = sum(
+                len(_canonical_lexical_surfaces(str(item["text"])))
+                for item in group
+            )
+            if len(raw_words) == expected_count:
+                offset = 0
+                for item in group:
+                    uid = str(item["utterance_uid"])
+                    word_count = len(_canonical_lexical_surfaces(str(item["text"])))
+                    expanded = dict(item)
+                    expanded["start_ms"] = joint_start
+                    expanded["end_ms"] = joint_end
+                    words, _ = _normalize_aligned_words(
+                        {"word_segments": raw_words[offset : offset + word_count]},
+                        expanded,
+                        segment_index=order[uid] + 1,
+                        first_word_index=1,
+                        min_word_score=min_word_score,
+                        max_word_duration_ms=max_word_duration_ms,
+                        vad_regions=vad_regions,
+                    )
+                    offset += word_count
+                    drift = _segment_drift_audit(
+                        words,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                    )
+                    context = _bounded_drift_context(
+                        words,
+                        drift,
+                        window_start_ms=joint_start,
+                        window_end_ms=joint_end,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                        max_outward_drift_ms=max_outward_drift_ms,
+                    )
+                    if (
+                        drift["early_outward_drift_ms"] > max_outward_drift_ms
+                        or drift["late_outward_drift_ms"] > max_outward_drift_ms
+                    ) and context is None:
+                        continue
+                    add_option(uid, "joint", words)
+                    adaptive_candidate_count += 1
+        except Exception:
+            pass
+        for item in group:
+            uid = str(item["utterance_uid"])
+            for padding_ms in (400, 300, 200, 100, 0):
+                window_start = max(
+                    int(item["start_ms"]),
+                    int(item["coarse_start_ms"]) - padding_ms,
+                )
+                window_end = min(
+                    int(item["end_ms"]),
+                    int(item["coarse_end_ms"]) + padding_ms,
+                )
+                try:
+                    words = _alignment_candidate(
+                        item,
+                        window_start_ms=window_start,
+                        window_end_ms=window_end,
+                        segment_index=order[uid] + 1,
+                        align=align,
+                        align_model=align_model,
+                        align_metadata=align_metadata,
+                        audio=audio,
+                        device=device,
+                        call_kwargs=call_kwargs,
+                        min_word_score=min_word_score,
+                        max_word_duration_ms=max_word_duration_ms,
+                        max_outward_drift_ms=max_outward_drift_ms,
+                        vad_regions=vad_regions,
+                    )
+                except Exception:
+                    continue
+                add_option(uid, f"padding-{padding_ms}", words)
+                adaptive_candidate_count += 1
+
+    anchors: list[int] = []
+    for item in source:
+        anchor = (int(item["coarse_start_ms"]) + int(item["coarse_end_ms"])) // 2
+        if anchors:
+            anchor = max(anchor, anchors[-1] + 2)
+        anchors.append(anchor)
+    boundaries = [
+        (anchors[position - 1] + anchors[position]) // 2
+        for position in range(1, len(anchors))
+    ]
+    conflict_uids = {
+        str(word["utterance_uid"])
+        for overlap in initial_overlaps
+        for word in overlap
+    }
+    partition_uids = set(conflict_uids)
+    for uid in tuple(conflict_uids):
+        position = order[uid]
+        for neighbor in (position - 2, position - 1, position + 1, position + 2):
+            if 0 <= neighbor < len(source):
+                partition_uids.add(str(source[neighbor]["utterance_uid"]))
+    for uid in sorted(partition_uids, key=order.__getitem__):
+        position = order[uid]
+        item = by_uid[uid]
+        window_start = max(
+            int(item["start_ms"]), boundaries[position - 1] if position else 0
+        )
+        window_end = min(
+            int(item["end_ms"]),
+            boundaries[position] if position < len(boundaries) else int(item["end_ms"]),
+        )
+        if window_end <= window_start:
+            continue
+        try:
+            words = _alignment_candidate(
+                item,
+                window_start_ms=window_start,
+                window_end_ms=window_end,
+                segment_index=position + 1,
+                align=align,
+                align_model=align_model,
+                align_metadata=align_metadata,
+                audio=audio,
+                device=device,
+                call_kwargs=call_kwargs,
+                min_word_score=min_word_score,
+                max_word_duration_ms=max_word_duration_ms,
+                max_outward_drift_ms=max_outward_drift_ms,
+                vad_regions=vad_regions,
+            )
+        except Exception:
+            continue
+        add_option(uid, "partition", words)
+        adaptive_candidate_count += 1
+
+    resolved_component_count = 0
+    selected_mode_by_uid = {uid: "independent" for uid in selected}
+    for seed_uids in initial_components:
+        expanded = set(seed_uids)
+        for uid in seed_uids:
+            position = order[uid]
+            for neighbor in (position - 2, position - 1, position + 1, position + 2):
+                if 0 <= neighbor < len(source):
+                    expanded.add(str(source[neighbor]["utterance_uid"]))
+        component_uids = sorted(expanded, key=order.__getitem__)
+        option_sets = [options[uid] for uid in component_uids]
+        if math.prod(len(option_set) for option_set in option_sets) > 200_000:
+            component_uids = list(seed_uids)
+            option_sets = [options[uid] for uid in component_uids]
+        outside_words = [
+            word
+            for uid, words in selected.items()
+            if uid not in component_uids
+            for word in words
+        ]
+        best: tuple[Any, ...] | None = None
+        best_score: tuple[int, int, int] | None = None
+        for combination in itertools.product(*option_sets):
+            trial_words = [word for _, words in combination for word in words]
+            if _unsafe_word_overlaps(trial_words):
+                continue
+            trial_start = min(int(word["start_ms"]) for word in trial_words)
+            trial_end = max(int(word["end_ms"]) for word in trial_words)
+            nearby = [
+                word
+                for word in outside_words
+                if int(word["end_ms"]) > trial_start
+                and int(word["start_ms"]) < trial_end
+            ]
+            if _unsafe_word_overlaps(nearby + trial_words):
+                continue
+            score = (
+                sum(mode == "joint" for mode, _ in combination),
+                sum(mode == "independent" for mode, _ in combination),
+                sum(mode.startswith("padding-") for mode, _ in combination),
+            )
+            if best_score is None or score > best_score:
+                best = combination
+                best_score = score
+        if best is None:
+            continue
+        for uid, (mode, words) in zip(component_uids, best):
+            selected[uid] = words
+            selected_mode_by_uid[uid] = mode
+        resolved_component_count += 1
+
+    residual_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    assigned_speakers: dict[str, str] = {}
+    acoustic_components: list[dict[str, Any]] = []
+    for component_index, component_uids in enumerate(
+        _overlap_components(residual_overlaps, order), start=1
+    ):
+        records = [by_uid[uid] for uid in component_uids]
+        if any("speaker_id" in record for record in records) or any(
+            record.get("audio_reviewed") is not True
+            or record.get("review_disposition") != "confirmed_dialogue"
+            for record in records
+        ):
+            continue
+        lane_records = []
+        for lane_index, uid in enumerate(component_uids, start=1):
+            lane = f"acoustic-overlap-{component_index:04d}-lane-{lane_index:02d}"
+            assigned_speakers[uid] = lane
+            for word in selected[uid]:
+                word["speaker_id"] = lane
+            lane_records.append({"utterance_uid": uid, "speaker_id": lane})
+        acoustic_components.append(
+            {"component_index": component_index, "lanes": lane_records}
+        )
+
+    final_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    if final_overlaps:
+        prior, current = final_overlaps[0]
+        raise ForcedAlignmentError(
+            "same/unknown-speaker alignment overlap remains between "
+            f"{prior['utterance_uid']} and {current['utterance_uid']}"
+        )
+    return selected, assigned_speakers, {
+        "policy": OVERLAP_RESOLUTION_POLICY,
+        "initial_overlap_count": len(initial_overlaps),
+        "initial_component_count": len(initial_components),
+        "adaptive_candidate_count": adaptive_candidate_count,
+        "resolved_component_count": resolved_component_count,
+        "acoustic_component_count": len(acoustic_components),
+        "acoustic_components": acoustic_components,
+        "selected_mode_counts": {
+            mode: list(selected_mode_by_uid.values()).count(mode)
+            for mode in sorted(set(selected_mode_by_uid.values()))
+        },
+        "final_overlap_count": 0,
+    }
+
+
 def align_corrected_segments(
     audio_path: str | Path,
     coarse_segments: Sequence[Mapping[str, Any]],
@@ -1663,6 +2163,7 @@ def align_corrected_segments(
     call_kwargs, interpolation_mode = _align_call_kwargs(align)
     aligned_segments: list[dict[str, Any]] = []
     flat_words: list[dict[str, Any]] = []
+    independent_by_uid: dict[str, list[dict[str, Any]]] = {}
     raw_punctuation_only_count = 0
     next_word_index = 1
     for segment_index, coarse in enumerate(source, start=1):
@@ -1697,6 +2198,7 @@ def align_corrected_segments(
         )
         raw_punctuation_only_count += punctuation_count
         next_word_index += len(words)
+        independent_by_uid[str(coarse["utterance_uid"])] = words
         flat_words.extend(words)
         drift_audit = _segment_drift_audit(
             words,
@@ -1758,6 +2260,98 @@ def align_corrected_segments(
             }
         )
 
+    selected_by_uid, assigned_speakers, overlap_resolution = (
+        _resolve_alignment_overlaps(
+            source,
+            independent_by_uid,
+            align=align,
+            align_model=align_model,
+            align_metadata=align_metadata,
+            audio=audio,
+            device=device,
+            call_kwargs=call_kwargs,
+            min_word_score=min_word_score,
+            max_word_duration_ms=max_word_duration_ms,
+            max_outward_drift_ms=max_outward_drift_ms,
+            vad_regions=trusted_vad_regions,
+        )
+    )
+    aligned_segments = []
+    flat_words = []
+    for segment_index, coarse in enumerate(source, start=1):
+        utterance_uid = str(coarse["utterance_uid"])
+        words = selected_by_uid[utterance_uid]
+        segment_speaker = coarse.get("speaker_id", assigned_speakers.get(utterance_uid))
+        if segment_speaker is not None:
+            for word in words:
+                word["speaker_id"] = segment_speaker
+        drift_audit = _segment_drift_audit(
+            words,
+            coarse_start_ms=int(coarse["coarse_start_ms"]),
+            coarse_end_ms=int(coarse["coarse_end_ms"]),
+        )
+        alignment_window_start_ms = min(
+            int(coarse["start_ms"]), int(words[0]["start_ms"])
+        )
+        alignment_window_end_ms = max(
+            int(coarse["end_ms"]), int(words[-1]["end_ms"])
+        )
+        drift_context = _bounded_drift_context(
+            words,
+            drift_audit,
+            window_start_ms=alignment_window_start_ms,
+            window_end_ms=alignment_window_end_ms,
+            coarse_start_ms=int(coarse["coarse_start_ms"]),
+            coarse_end_ms=int(coarse["coarse_end_ms"]),
+            max_outward_drift_ms=max_outward_drift_ms,
+        )
+        exceeds_default_drift = (
+            drift_audit["early_outward_drift_ms"] > max_outward_drift_ms
+            or drift_audit["late_outward_drift_ms"] > max_outward_drift_ms
+        )
+        if exceeds_default_drift and drift_context is None:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} exceeds max_outward_drift_ms "
+                f"{max_outward_drift_ms}: {drift_audit}"
+            )
+        _, edit_audit = _token_edit_audit(
+            str(coarse["asr_text"]),
+            str(coarse["text"]),
+            deletion_audio_reviewed=bool(coarse["deletion_audio_reviewed"]),
+        )
+        aligned_segments.append(
+            {
+                "segment_index": segment_index,
+                "utterance_uid": utterance_uid,
+                "start_ms": words[0]["start_ms"],
+                "end_ms": words[-1]["end_ms"],
+                "alignment_window_start_ms": alignment_window_start_ms,
+                "alignment_window_end_ms": alignment_window_end_ms,
+                "coarse_start_ms": coarse["coarse_start_ms"],
+                "coarse_end_ms": coarse["coarse_end_ms"],
+                "drift_audit": drift_audit,
+                **(
+                    {"drift_context": drift_context}
+                    if drift_context is not None
+                    else {}
+                ),
+                "text": coarse["text"],
+                "asr_text": coarse["asr_text"],
+                "deletion_audio_reviewed": coarse["deletion_audio_reviewed"],
+                "audio_reviewed": coarse["audio_reviewed"],
+                "review_disposition": coarse["review_disposition"],
+                "edit_audit": edit_audit,
+                "timing_source": TIMING_SOURCE,
+                "words": words,
+                **(
+                    {"speaker_id": segment_speaker}
+                    if segment_speaker is not None
+                    else {}
+                ),
+            }
+        )
+        flat_words.extend(words)
+
     flat_words.sort(
         key=lambda word: (
             int(word["start_ms"]),
@@ -1798,6 +2392,7 @@ def align_corrected_segments(
             "edited_token_min_word_score": EDITED_TOKEN_MIN_WORD_SCORE,
             "max_word_duration_ms": max_word_duration_ms,
             "max_outward_drift_ms": max_outward_drift_ms,
+            "overlap_resolution": overlap_resolution,
         },
         "segments": aligned_segments,
         "words": flat_words,

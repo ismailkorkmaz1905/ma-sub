@@ -99,3 +99,39 @@ def test_zero_existing_account_rate_is_valid(tmp_path):
                                         "currentSpendPerHr": 0,
                                         "isAutoPayEnabled": False}
     assert run(tmp_path, provider) == "done"
+
+
+def test_pilot_limit_is_not_extended_by_episode_support(tmp_path):
+    provider = Provider(created=pod())
+    with pytest.raises(ValueError, match="1..550"):
+        run(tmp_path, provider, lease_seconds=551)
+    assert provider.actions == []
+
+
+@pytest.mark.parametrize('episode', [12, 13, 27])
+def test_episode_lease_preserves_budget_and_external_cleanup(tmp_path, episode):
+    from datetime import datetime, timedelta, timezone
+    from mas.subtitle.qualification_controller import run_disposable_episode
+    created = pod()
+    created['name'] = f'mas-ep{episode}-draft-0123456789abcdef'
+    provider = Provider(created=created)
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+    assert run_disposable_episode(provider, BASE, lambda pod, timeout: 'done', tmp_path / 'out',
+        episode=episode, deadline_utc=deadline, lease_seconds=5400,
+        maximum_rate_usd_per_hour=.6, protected_pod_id='old',
+        nonce='0123456789abcdef') == 'done'
+    assert provider.actions == ['create', ('terminate', 'new'), ('absent', 'new')]
+
+
+def test_episode_cannot_spend_balance_reserve(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from mas.subtitle.qualification_controller import run_disposable_episode
+    provider = Provider(created=pod())
+    provider.account = lambda timeout: {'clientBalance':1.2, 'currentSpendPerHr':.005,
+                                       'isAutoPayEnabled':False}
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+    with pytest.raises(IntegrityError, match='breach balance reserve'):
+        run_disposable_episode(provider, BASE, lambda pod, timeout: None, tmp_path / 'out',
+            episode=12, deadline_utc=deadline, lease_seconds=5400,
+            maximum_rate_usd_per_hour=.6, protected_pod_id='old')
+    assert provider.actions == []

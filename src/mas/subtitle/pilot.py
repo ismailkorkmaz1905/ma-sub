@@ -66,6 +66,7 @@ def speaker_groups(segments, speaker_turns, duration_ms):
         if " ".join(joined.split()) != " ".join(text.split()):
             raise IntegrityError("word text differs from segment text; do not drop dialogue")
         current = None
+        known_speaker = None
         previous_start = -1
         for word_index, word in enumerate(words):
             if not isinstance(word.get("word"), str) or not word["word"].strip():
@@ -78,9 +79,15 @@ def speaker_groups(segments, speaker_turns, duration_ms):
             if speaker is None:
                 issues.append({"kind": "speaker_uncertain", "segment_index": segment_index,
                                "word_index": word_index})
-            if current is None or current["speaker"] != speaker:
+            if current is None or (speaker is not None and known_speaker is not None
+                                   and known_speaker != speaker):
                 current = {"speaker": speaker, "segment_index": segment_index, "words": []}
                 groups.append(current)
+                known_speaker = speaker
+            elif speaker is None:
+                current["speaker"] = None
+            elif known_speaker is None:
+                known_speaker = speaker
             current["words"].append(copy.deepcopy(word))
     return groups, issues
 
@@ -91,10 +98,20 @@ def _wrap(text):
 
 
 def build_pilot(evidence, *, regroup=None):
+    return _build_draft(evidence, regroup=regroup, maximum_duration_ms=120_000,
+                        evidence_format="mas-acoustic-pilot-1", mode="pilot")
+
+
+def build_episode_draft(evidence, *, regroup=None):
+    return _build_draft(evidence, regroup=regroup, maximum_duration_ms=14_400_000,
+                        evidence_format="mas-acoustic-draft-1", mode="draft")
+
+
+def _build_draft(evidence, *, regroup, maximum_duration_ms, evidence_format, mode):
     body = evidence.get("data")
     if not isinstance(body, dict) or evidence.get("sha256") != digest(body):
         raise IntegrityError("pilot evidence checksum mismatch")
-    if body.get("format") != "mas-acoustic-pilot-1":
+    if body.get("format") != evidence_format:
         raise IntegrityError("unsupported pilot evidence format")
     for key in ("audio_sha256", "source_sha256"):
         if not re.fullmatch(r"[a-f0-9]{64}", str(body.get(key, ""))):
@@ -103,8 +120,14 @@ def build_pilot(evidence, *, regroup=None):
         value = body.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < (0 if key == "offset_ms" else 1):
             raise IntegrityError(f"invalid {key}")
-    if body["duration_ms"] > 120_000:
-        raise IntegrityError("pilot clip exceeds 120 seconds")
+    if body["duration_ms"] > maximum_duration_ms:
+        raise IntegrityError(f"{mode} audio exceeds {maximum_duration_ms / 1000:g} seconds")
+    timing_source = body.get("timing_source", "stable_ts_estimated")
+    allowed_timing = {"stable_ts_estimated", "faster_whisper_estimated"}
+    if mode == "draft":
+        allowed_timing.add("mixed_ctc_faster_whisper_draft")
+    if timing_source not in allowed_timing:
+        raise IntegrityError("unsupported draft timing provenance")
     groups, issues = speaker_groups(body["segments"], body["speaker_turns"], body["duration_ms"])
     cues = []
     for group in groups:
@@ -153,8 +176,8 @@ def build_pilot(evidence, *, regroup=None):
         rendered.append({"start_ms": start, "end_ms": boundaries[index + 1],
                          "text": "\n".join(lines),
                          "source_cue_ids": [cue["cue_id"] for cue in present]})
-    result = {"format": FORMAT, "mode": "pilot", "episode": body["episode"],
-              "timing_source": "stable_ts_estimated", "evidence_sha256": evidence["sha256"],
+    result = {"format": FORMAT if mode == "pilot" else "mas-cue-draft-1", "mode": mode, "episode": body["episode"],
+              "timing_source": timing_source, "evidence_sha256": evidence["sha256"],
               "source_sha256": body["source_sha256"], "audio_sha256": body["audio_sha256"],
               "offset_ms": body["offset_ms"], "cues": cues, "rendered": rendered,
               "issues": issues, "status": "REVIEW_REQUIRED",

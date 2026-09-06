@@ -57,6 +57,29 @@ def test_weak_speaker_coverage_is_unknown():
     assert all(cue["speaker"] is None for cue in result["cues"])
 
 
+def test_uncertain_word_does_not_create_an_artificial_cue_boundary():
+    source = evidence(turns=[{"start": 1.5, "end": 2, "speaker": "A"}])
+    result = build_pilot(source)["data"]
+    assert len(result["cues"]) == 1
+    assert result["cues"][0]["speaker"] is None
+    assert result["cues"][0]["text"] == source["data"]["segments"][0]["text"]
+    assert (result["cues"][0]["start_ms"], result["cues"][0]["end_ms"]) == (1000, 2000)
+    assert any(issue["kind"] == "speaker_uncertain" for issue in result["issues"])
+
+
+def test_uncertain_bridge_never_merges_two_known_speakers():
+    segments = [{"start": 1, "end": 2, "text": "one two three", "words": [
+        {"word": "one", "start": 1, "end": 1.3},
+        {"word": " two", "start": 1.4, "end": 1.6},
+        {"word": " three", "start": 1.7, "end": 2}]}]
+    turns = [{"start": 1, "end": 1.3, "speaker": "A"},
+             {"start": 1.7, "end": 2, "speaker": "B"}]
+    cues = build_pilot(evidence(segments=segments, turns=turns))["data"]["cues"]
+    assert [cue["text"] for cue in cues] == ["one two", "three"]
+    assert [cue["speaker"] for cue in cues] == [None, "B"]
+    assert [(cue["start_ms"], cue["end_ms"]) for cue in cues] == [(1000, 1600), (1700, 2000)]
+
+
 def test_dual_dialogue_preserves_each_cues_full_display_interval():
     segments = [
         {"start": 1, "end": 3, "text": "Birinci."},
@@ -174,3 +197,26 @@ def test_clip_without_word_timing_is_preserved_but_not_accepted():
     assert result["cues"][0]["text"] == "Merhaba."
     assert any(r["kind"] == "segment_timing_only" for r in result["issues"])
     assert result["status"] == "REVIEW_REQUIRED"
+
+
+def test_full_episode_draft_does_not_relax_pilot_limit_or_claim_strict():
+    from mas.subtitle.pilot import build_episode_draft
+    item = evidence()
+    item['data'].update(episode=12, duration_ms=8_352_921)
+    item['sha256'] = digest(item['data'])
+    with pytest.raises(IntegrityError, match='exceeds 120 seconds'):
+        build_pilot(item)
+    item['data'].update(format='mas-acoustic-draft-1', timing_source='faster_whisper_estimated')
+    item['sha256'] = digest(item['data'])
+    result = build_episode_draft(item)['data']
+    assert result['mode'] == 'draft'
+    assert result['timing_source'] == 'faster_whisper_estimated'
+    assert result['strict_delivery'] is False
+    assert result['acoustic_acceptance'] == 'NOT_VERIFIED'
+    item['data']['timing_source'] = 'mixed_ctc_faster_whisper_draft'
+    item['sha256'] = digest(item['data'])
+    assert build_episode_draft(item)['data']['timing_source'] == 'mixed_ctc_faster_whisper_draft'
+    item['data'].update(format='mas-acoustic-pilot-1', duration_ms=10_000)
+    item['sha256'] = digest(item['data'])
+    with pytest.raises(IntegrityError, match='unsupported draft timing'):
+        build_pilot(item)

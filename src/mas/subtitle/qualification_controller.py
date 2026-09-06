@@ -69,15 +69,38 @@ def _reconcile(provider, payload, old_ids, requested_after, deadline, *, clock, 
 
 
 def run_disposable_qualification(provider, base_payload, worker, output_dir, *,
+                                  maximum_rate_usd_per_hour, **kwargs):
+    return _run_disposable_lease(provider, base_payload, worker, output_dir,
+                                maximum_rate_usd_per_hour=maximum_rate_usd_per_hour,
+                                episode=11, maximum_lease_seconds=550, **kwargs)
+
+
+def run_disposable_episode(provider, base_payload, worker, output_dir, *,
+                           episode, deadline_utc, lease_seconds,
+                           maximum_rate_usd_per_hour, **kwargs):
+    remaining = _timestamp(deadline_utc) - time.time()
+    if type(episode) is not int or episode < 1 or not 0 < remaining <= 14400:
+        raise ValueError("Episode requires a positive number and an unexpired deadline within four hours")
+    if lease_seconds > remaining:
+        raise ValueError("episode lease exceeds the fixed delivery deadline")
+    return _run_disposable_lease(provider, base_payload, worker, output_dir,
+                                episode=episode, maximum_lease_seconds=5400,
+                                lease_seconds=lease_seconds,
+                                maximum_rate_usd_per_hour=maximum_rate_usd_per_hour,
+                                **kwargs)
+
+
+def _run_disposable_lease(provider, base_payload, worker, output_dir, *,
                                   maximum_rate_usd_per_hour, lease_seconds=550,
                                   minimum_balance_usd=1.10,
                                   protected_pod_id="781ct55zv4gkle",
                                   shutdown_reserve_seconds=120,
                                   reconciliation_seconds=30, clock=time.monotonic,
-                                  wall_clock=time.time, sleep=time.sleep, nonce=None):
+                                  wall_clock=time.time, sleep=time.sleep, nonce=None,
+                                  episode=11, maximum_lease_seconds=550):
     if (not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool)
-            or not 1 <= lease_seconds <= 550):
-        raise ValueError("qualification lease must be within 1..550 seconds")
+            or not 1 <= lease_seconds <= maximum_lease_seconds):
+        raise ValueError(f"qualification lease must be within 1..{maximum_lease_seconds} seconds")
     maximum_rate = _amount(maximum_rate_usd_per_hour, "rate cap")
     reserve = _amount(minimum_balance_usd, "balance reserve")
     if not isinstance(shutdown_reserve_seconds, int) or not 1 <= shutdown_reserve_seconds < lease_seconds:
@@ -90,6 +113,8 @@ def run_disposable_qualification(provider, base_payload, worker, output_dir, *,
         raise IntegrityError("protected qualification Pod is missing")
     if next(pod for pod in old_pods if pod["id"] == protected_pod_id).get("desiredStatus") != "EXITED":
         raise IntegrityError("protected qualification Pod must remain EXITED")
+    if any(pod.get("desiredStatus") != "EXITED" for pod in old_pods):
+        raise IntegrityError("another Pod is active; refusing duplicate compute")
     account = provider.account(10)
     balance = _amount(account.get("clientBalance"), "balance")
     current_rate = _nonnegative_amount(account.get("currentSpendPerHr"), "account rate")
@@ -110,11 +135,12 @@ def run_disposable_qualification(provider, base_payload, worker, output_dir, *,
     terminate_after = datetime.fromtimestamp(requested_epoch + lease_seconds,
                                               timezone.utc).isoformat()
     payload = copy.deepcopy(base_payload)
-    payload.update(name=f"mas-ep11-qualification-{token}", terminateAfter=terminate_after)
+    purpose = "qualification" if episode == 11 else "draft"
+    payload.update(name=f"mas-ep{episode}-{purpose}-{token}", terminateAfter=terminate_after)
     required = {"networkVolumeId", "imageName", "dataCenterId", "gpuTypeId"}
     if not required <= payload.keys() or payload["networkVolumeId"] != "xgogcmey5o":
         raise IntegrityError("qualification payload identity is incomplete")
-    state = {"format": "mas-disposable-qualification-state-1", "payload": payload,
+    state = {"format": "mas-disposable-qualification-state-1", "episode": episode, "payload": payload,
              "payload_sha256": digest(payload), "old_pod_ids": old_ids,
              "requested_at_utc": requested_after, "lease_seconds": lease_seconds,
              "maximum_rate_usd_per_hour": maximum_rate}

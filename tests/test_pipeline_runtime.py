@@ -197,7 +197,7 @@ def test_drive_readback_hashes_stream_without_buffering_file(tmp_path, monkeypat
     source.write_bytes(payload)
     calls = []
 
-    def fake_run(command, *, idle_timeout, total_timeout, stdout_handler=None):
+    def fake_run(command, *, idle_timeout, total_timeout, stdout_handler=None, progress_observer=None):
         calls.append((command, stdout_handler is not None))
         if command[1] == "cat":
             for offset in range(0, len(payload), 8191):
@@ -242,6 +242,79 @@ def test_network_watchdog_total_timeout_survives_closed_pipes():
         _run_watchdog(
             [sys.executable, "-c", script], idle_timeout=0.2, total_timeout=0.4
         )
+
+
+def test_repeated_rclone_stats_do_not_count_as_transfer_progress():
+    from mas.remote import _RcloneProgress
+    observe = _RcloneProgress()
+    chunk = b'{"stats":{"bytes":10,"transfers":0}}\n'
+    assert not observe("stderr", chunk[:12])
+    assert observe("stderr", chunk[12:])
+    assert not observe("stderr", chunk)
+    assert not observe("stderr", b'{"stats":{"bytes":0,"elapsedTime":100}}\n')
+    assert not observe("stdout", b"heartbeat")
+    assert observe("stderr", b'{"stats":{"bytes":11,"transfers":0}}\n')
+
+
+def test_rclone_chatter_cannot_keep_stalled_process_alive():
+    import time
+    from mas.remote import _RcloneProgress
+    script = "import time\nwhile True:\n print('{\"stats\":{\"bytes\":0}}', flush=True); time.sleep(0.02)"
+    started = time.monotonic()
+    with pytest.raises(RemoteVerificationError, match="watchdog expired"):
+        _run_watchdog([sys.executable, "-u", "-c", script],
+                      idle_timeout=0.3, total_timeout=5,
+                      progress_observer=_RcloneProgress())
+    assert time.monotonic() - started < 3
+
+
+def test_upload_readbacks_share_one_deadline(tmp_path, monkeypatch):
+    import mas.remote as remote_module
+    source = tmp_path / "strict.srt"
+    source.write_bytes(b"subtitle")
+    clock = [100.0]
+    deadlines = []
+    monkeypatch.setattr(remote_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(remote_module.shutil, "which", lambda name: "rclone")
+    def run(command, *, total_timeout, stdout_handler=None, **kwargs):
+        deadlines.append(total_timeout)
+        clock[0] += 3
+        if stdout_handler:
+            stdout_handler(b"subtitle")
+        return b""
+    monkeypatch.setattr(remote_module, "_run_watchdog", run)
+    with pytest.raises(RemoteVerificationError, match="transaction deadline"):
+        upload_verified(source, "drive:strict/subtitle.srt", total_timeout=8)
+    assert deadlines == [8, 5, 2]
+
+
+def test_failed_output_handler_reaps_network_process(monkeypatch):
+    import mas.remote as remote_module
+    original = remote_module.subprocess.Popen
+    processes = []
+    def start(*args, **kwargs):
+        process = original(*args, **kwargs)
+        processes.append(process)
+        return process
+    def fail(chunk):
+        raise RuntimeError("consumer failed")
+    monkeypatch.setattr(remote_module.subprocess, "Popen", start)
+    with pytest.raises(RuntimeError, match="consumer failed"):
+        _run_watchdog([sys.executable, "-u", "-c", "import time; print('data', flush=True); time.sleep(30)"],
+                      stdout_handler=fail, total_timeout=5)
+    assert processes[0].poll() is not None
+
+
+def test_targeted_audio_clip_extraction_has_finite_deadline(tmp_path, monkeypatch):
+    from mas.engine import transcribe
+    import subprocess
+    monkeypatch.setattr(transcribe.shutil, "which", lambda name: "ffmpeg")
+    def run(command, **kwargs):
+        assert kwargs["timeout"] == 120
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+    monkeypatch.setattr(transcribe.subprocess, "run", run)
+    with pytest.raises(transcribe.TranscriptionError, match="exceeded 120 seconds"):
+        transcribe._extract_clip(tmp_path / "source.flac", tmp_path / "clip.wav", 1000, 2000)
 
 
 def test_runpod_stop_requires_key(monkeypatch):

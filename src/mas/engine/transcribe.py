@@ -1067,15 +1067,19 @@ def _extract_clip(audio_path: Path, output_path: Path, start_ms: int, end_ms: in
         "pcm_s16le",
         str(output_path),
     ]
-    process = subprocess.run(
-        command,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        process = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TranscriptionError("Targeted clip extraction exceeded 120 seconds") from exc
     if process.returncode != 0 or not output_path.is_file() or output_path.stat().st_size <= 44:
         diagnostic = process.stderr.strip()[-3000:]
         raise TranscriptionError(f"Targeted clip extraction failed: {diagnostic}")

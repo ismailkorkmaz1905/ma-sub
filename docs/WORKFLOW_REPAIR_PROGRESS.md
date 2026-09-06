@@ -22,8 +22,8 @@ User supplied `C:/Users/Ismail/Downloads/11 cookie.txt` and `12 cookie.txt`. Bot
 
 ## Remaining work
 
-- Persist primary ASR before rescue/enrichment, with actual-model and producer binding.
-- Local Indonesian-return structural, readability and semantic preflight before compute.
+- Measure primary-checkpoint runtime on the real GPU; the local implementation and regression tests are complete.
+- Exercise local Indonesian-return preflight with a real new return; structural/readability/semantic code and local tests are complete.
 - Effective shared runtime/readability configuration and phase-specific resume.
 - Cue correction/translation integration after measured pilot acceptance.
 - Collision-preserving transactional Drive delivery outside GPU compute.
@@ -43,3 +43,22 @@ The user authorized creating necessary access keys. The live RunPod S3 creation 
 Combined full working-tree suite before the additional explicit semantic-review-count guard: 622 passed, 32 skipped in 45.66 seconds. Local doctor: Python/git/rclone OK; ffmpeg/ffprobe/torch missing at that observation. Docker definition inspected, but Docker is unavailable locally so no image build PASS is claimed. FFmpeg installation from the Windows build provider linked by ffmpeg.org is in progress, with vendor SHA-256 verification required before execution.
 
 Previous group-1 status email was accepted by configured SMTP: `<178866529351.15200.2443881922230205678@DESKTOP-3L7O2K0>`. This is service submission evidence, not inbox/read confirmation.
+
+## Source readiness and repair group 3
+
+Group 2 commits `5453960`, `f161250` and `63f7510` were pushed to main. Final full suite after the semantic-review guard: 622 passed, 32 skipped in 56.42 seconds. Group-2 status email accepted by SMTP: `<178866628142.7688.696258260362935316@DESKTOP-3L7O2K0>`.
+
+FFmpeg and ffprobe are now installed at `C:/Users/Ismail/AppData/Local/ma-sub-tools/ffmpeg-release-20260906/extracted/ffmpeg-n9.0-latest-win64-gpl-9.0/bin`, added to User PATH. Verified version: `n9.0.1-26-g5c8e7e2433-20260905`. BtbN archive SHA-256 matches its published checksum: `87C4729F3193F3BA562BADA0330A98338C9A858D25B15FC98338A1364667348B`. The first Gyan download was explicitly stopped after throughput stayed around 54 KB/s; its incomplete ZIP remains outside the repository and was never extracted/executed. The BtbN provider is linked by https://ffmpeg.org/download.html . Local doctor with refreshed PATH reports Python/ffmpeg/ffprobe/git/rclone OK, torch missing. No local NVIDIA GPU exists, so no CPU substitution for ASR is intended.
+
+Free source reacquisition succeeded with a private working copy of the user's Episode 11 cookies. Official source: `https://www.youtube.com/watch?v=3CeNouZts7o`, selected format `251`, reported duration 8278 seconds. Audio download log reports 10 seconds for transfer; total extraction/handshake wall time was not instrumented. No RunPod was started. Files are isolated under `EPISODES/Muhtemel Ask 11.Bolum/work/subtitle-pilot/source-reacquisition-20260906/`:
+
+- `source.webm`: 106448305 bytes, SHA-256 `ea3ee9b3a5f986f9f7dbc634abbbd8af4d3b1cd80e69a3d22d83c87f95c9e2d4`.
+- `source.wav`: 264910244 bytes, SHA-256 `f4858dfcc4909d9f7331a20f233e205def9b5953bd4d51723982bde9105bdd64`. Immutable input recheck and conversion provenance persisted. Exact conversion elapsed seconds: UNKNOWN, not recorded by the conversion helper.
+- All four historical PCM samples differ from the new decoded WAV by at most 1 signed 16-bit sample unit at zero lag; measured correlations are above 0.99999998. This is sampled diagnostic evidence, not whole-source byte equivalence. Old hashes/production sources were not replaced or rebound.
+- `contextual-samples-20260906/samples.json` binds five newly extracted clips to the new source by exact PCM offset equality: 60000-90000, 350000-380000, 470000-505000, 600000-630000 and 4280000-4310000 milliseconds. Total 155000 milliseconds, preparation elapsed 2.25 seconds. Final conflict context included; acoustic acceptance remains NOT_EVALUATED.
+
+Source access no longer depends on S3. The S3 key creation form was prepared but not submitted; access would cover all compatible volumes read/write. A separate question requests explicit approval for a noncommercial-only NVIDIA Sortformer pilot (CC-BY-NC-4.0); no model was downloaded or license accepted. Community-1 access is also unresolved. Model/runtime readiness remains a real pilot prerequisite, but a bounded GPU bootstrap/validation lease can be considered within the existing spending allowance; do not impose the circular requirement of proving GPU compatibility without ever using a bounded paid GPU check.
+
+Uncommitted group 3: rclone progress now requires increasing transferred bytes/completed files rather than repeated statistics, binary readback counts stdout bytes only, and upload/hash/readbacks share one deadline. Targeted FFmpeg clip extraction has a 120-second subprocess ceiling. Focused transfer/controller/discovery tests: 88 passed in 3.01 seconds. Combined clip/transfer/guardian/pilot tests: 85 passed in 7.37 seconds. A sandbox run had 49 fixture permission errors and 39 passes; approved escalation reran the relevant tests successfully, without changing test gates.
+
+Guardian remains under repair, not paid-ready: root replaced unsafe Windows `os.kill(pid, 0)` liveness probing before execution. Sol added ready receipts, sanitized errors and bounded shutdown on monitoring failure. Root then found a ready/start race where the parent could start after the guardian exited; Sol is repairing single-owner START sequencing and startup-budget accounting. Do not start a Pod from the draft runner until this regression is resolved and reviewed.

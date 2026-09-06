@@ -1,5 +1,7 @@
 # Muhtemel Ask Subtitles
 
+Current outcome and next-run checklist: [simple Episode 13 handoff](docs/SON_DURUM_VE_BOLUM_13.md). Main delivery now targets H.264/AAC MP4 with Indonesian subtitles burned into the image. Episode 12 MP4 was stopped before completion; no new Drive delivery or perceptual quality acceptance is claimed. Historical episode evidence moved outside the repository as described in that handoff.
+
 Muhtemel Ask Subtitles is the single production pipeline for turning one episode source into strict Turkish and Indonesian subtitle deliverables.
 
 ```text

@@ -1,6 +1,14 @@
+> FINAL CLEANUP STATE, 2026-09-06: The local encoder and upload waiter were stopped on user request because the PC became overloaded. No complete burned MP4 or new Drive delivery exists. Both temporary MP4 Pods were externally ABSENT; last balance USD 3.1442612121, retained Pod EXITED, volume preserved. All older active-job statements below are historical. Native terminal works. Full local suite: 742 passed, 5 skipped in 217.43 seconds. No perceptual quality acceptance is claimed.
+>
+> Previous `var/` and `EPISODES/` evidence is now under `C:/Users/Ismail/CodeBase/ma-sub-archive-20260906/`. Generated media/model caches (405 files, 5,661,294,122 bytes) were moved to Windows Recycle Bin; source MKV, final review subtitles/MKV and compact evidence remain archived. See [plain-language outcome and Episode 13 checklist](SON_DURUM_VE_BOLUM_13.md). Episode 13 has not started. Do not launch heavy local encoding. The next remote job needs a successful short connectivity/encoding check first.
+
 > 2026-09-06 Episode 12 operator override: the user explicitly started the four-hour Episode 12 run. See [EP12_RUN_2026-09-06.md](EP12_RUN_2026-09-06.md) for active evidence and cleanup state. This supersedes the earlier start gate, not strict QA.
 
 # Workflow repair progress
+
+## Latest Episode 12 delivery progress, 2026-09-06
+
+The user authorized a high-quality 1080p Indonesian burned-in MP4 with a 12:40 UTC deadline. Stage 10 burned-MP4 work is active under unique local QSV evidence `var/ep12-delivery-20260906T121211Z`; it is not complete. A fresh NVENC GPU attempt is active under `var/ep12-delivery-20260906T122631Z`; no Drive PASS exists. The earlier alignment Pod `hvapadbtpxaz5j` failed SSH after a 90-second SRT SHA check and was externally confirmed ABSENT at 12:24:59 UTC. Stage 11 is intended to publish only the MP4 while retaining internal MKV and SRT proof. Existing strict QA, source hashes, translation bindings and review flags remain unchanged. Do not claim final completion, quality PASS or Drive delivery before local MP4 verification and remote byte-count/SHA-256 readback.
 
 ## Latest interruption recovery, 2026-09-06
 

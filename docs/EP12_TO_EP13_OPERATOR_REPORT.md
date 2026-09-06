@@ -1,3 +1,11 @@
+> FINAL CLEANUP STATE, 2026-09-06: The local encoder and upload waiter were stopped on user request because the PC became overloaded. No complete burned MP4 or new Drive delivery exists. Both temporary MP4 Pods were externally ABSENT; last balance USD 3.1442612121, retained Pod EXITED, volume preserved. All older active-job statements below are historical. Native terminal works. Full local suite: 742 passed, 5 skipped in 217.43 seconds. No perceptual quality acceptance is claimed.
+>
+> Previous `var/` and `EPISODES/` evidence is now under `C:/Users/Ismail/CodeBase/ma-sub-archive-20260906/`. Generated media/model caches (405 files, 5,661,294,122 bytes) were moved to Windows Recycle Bin; source MKV, final review subtitles/MKV and compact evidence remain archived. See [plain-language outcome and Episode 13 checklist](SON_DURUM_VE_BOLUM_13.md). Episode 13 has not started. Do not launch heavy local encoding. The next remote job needs a successful short connectivity/encoding check first.
+
+# Latest delivery update, 2026-09-06
+
+The user authorized a high-quality 1080p Indonesian burned-in MP4 with a 12:40 UTC deadline. Stage-10 local QSV work is active under `var/ep12-delivery-20260906T121211Z` and is not complete. A fresh NVENC attempt is active under `var/ep12-delivery-20260906T122631Z`. The earlier GPU alignment Pod `hvapadbtpxaz5j` failed SSH after a 90-second SRT SHA check and was externally confirmed ABSENT at 12:24:59 UTC. No Drive PASS exists. The final target is the burned-in MP4; internal MKV and SRT artifacts remain evidence and must retain their source, translation, timing and QA bindings. Review quality remains REVIEW_REQUIRED until the final MP4 is locally verified and Drive byte-count/SHA-256 readback succeeds.
+
 # Episode 12 sonucu ve Episode 13 hazırlığı
 
 Tarih: 6 Eylül 2026. Sonraki planlanan koşu: 11 Eylül 2026 Cuma.

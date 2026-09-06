@@ -99,3 +99,19 @@ Return exactly:
 
 PASS is allowed only when every automated and real-environment gate is directly verified. Otherwise explicitly state that the stable tag remains prohibited.
 ```
+
+## Emergency review addendum - 2026-09-06
+
+Apply this addendum before the prompt above. The review starts now, before final real-run evidence, because the user explicitly requested an urgent Astra takeover after a costly incomplete run.
+
+- Read `AGENTS.md`, `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`, `docs/ARCHITECTURE_DECISIONS.md`, `docs/ASTRA_HANDOFF.md`, and the complete Episode 11 run record first.
+- Review candidate `33637d3a31ee49c82813ca947ffd3b56174f9571` and the later documentation commit. Preserve the dirty worktree if any.
+- Do not start or migrate RunPod, execute `.\mas.ps1 run 11`, mutate Drive, delete volume `xgogcmey5o`, or incur paid services without explicit new user authority.
+- Deep-review the whole production codebase and all Episode 11 controller/remote logs. Repair locally provable defects; run focused/full tests, `git diff --check`, and available Docker/static checks; commit and push meaningful stages to `main`.
+- Explain the observed delay chain: overly broad checkpoint invalidation repeating raw ASR, initially unbounded overlap candidate combinations, remaining expensive forced alignment, provider capacity/SSH failures, repeated fresh-Pod bootstrap, a late two-UID review cycle, and transfer/network retries. Distinguish log-derived seconds from the user's unverified report of nearly `21 hours` and approximately `$20`.
+- Validate the local corrected-return ZIP using manifest SHA-256 `195f7d1509cb3592fb6ed207d1c6b088930a02006d4cfc338a3ec3f92cc6c9bf` and file SHA-256 `DA278A26B22BC507D40577E2658F7E9A48374154BD978B940125AD1CB1C7BC2A`. Its remote consumption is NOT VERIFIED.
+- The exact unresolved pair is `MA11-TR-a09b20542760d351` and `MA11-TR-1144d768dc92c4a9`. Do not invent speaker identities or corrected text.
+- Audit stale YouTube-cookie handling and Gmail status notification event/delivery evidence without exposing credentials.
+- At medium priority, research current GPT transcription APIs using only official OpenAI documentation. Evaluate Turkish accuracy, word timestamps, diarization/overlap, cost, latency, privacy/retention, limits, retries, deterministic resume, artifact hashing, and compatibility with strict correction/alignment contracts. Give a grounded replace/complement/reject decision. Do not implement a substitution that weakens timing or evidence requirements.
+- Current Pod evidence is an external API observation at `2026-09-06T01:35:52.8724964Z`: `781ct55zv4gkle` desired state `EXITED`, rate field `$0.74/hour`, retained volume `xgogcmey5o`. Re-query only if it can be done without starting compute.
+- There is no Turkish SRT, Indonesian pack/return/SRT, strict mux, Drive readback, final delivery, or stable release. Keep each gate NOT VERIFIED until direct evidence exists.

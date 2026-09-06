@@ -87,6 +87,32 @@ RUNPOD_POD_ID
 RUNPOD_API_KEY
 ```
 
+## Emergency continuation boundary - 2026-09-06
+
+This section supersedes the older Episode 11 status and continuation prompt above.
+
+- Candidate commit before this documentation update: `33637d3a31ee49c82813ca947ffd3b56174f9571` on `main`, synchronized with `origin/main` and clean when checked.
+- Local verification at that candidate: `530 passed, 32 skipped in 39.74 s`; focused forced-alignment tests: `35 passed in 0.33-0.40 s`. These are local tests, not real GPU or delivery evidence.
+- Real Episode 11 audio review reached `998/998` PASS. Three acoustically duplicated fragments were resolved with retained provenance.
+- The last exact GPU run still failed closed during forced alignment after `755.8 s` on one overlap: `MA11-TR-a09b20542760d351` and `MA11-TR-1144d768dc92c4a9`. No Turkish SRT exists yet.
+- A new local Turkish-return ZIP was generated with those two UIDs pending exact audio review. Manifest SHA-256: `195f7d1509cb3592fb6ed207d1c6b088930a02006d4cfc338a3ec3f92cc6c9bf`. ZIP SHA-256: `DA278A26B22BC507D40577E2658F7E9A48374154BD978B940125AD1CB1C7BC2A`. It was not proven uploaded or consumed remotely before shutdown.
+- Indonesian handoff/return/SRT, strict mux, subtitle QA, Drive upload and byte/SHA-256 readback, and final delivery remain incomplete. No stable tag is allowed.
+- The user reported nearly `21 hours` elapsed and approximately `$20` of RunPod spend. These values are user reports, not provider billing measurements.
+- External RunPod API observation at `2026-09-06T01:35:52.8724964Z`: Pod `781ct55zv4gkle` had desired state `EXITED`; its recorded rate field was `$0.74/hour`; retained network volume `xgogcmey5o` still existed. This proves stopped compute state only, not billing closure. Do not delete the volume.
+- Do not start, restart, migrate, or otherwise incur paid RunPod compute until the user explicitly reauthorizes spend. The eventual resume command is `.\mas.ps1 run 11`, but it is currently prohibited.
+- The current YouTube cookie file is stale/invalid according to real RunPod yt-dlp warnings. Episode 11 passed download only because immutable source media already existed. Refresh authentication before a new episode.
+- `.\mas.ps1 notify-test` successfully submitted a real Gmail message to the configured recipient. The user's report of missing long-term status mail remains unresolved; audit pipeline notification events, delivery/log evidence, and recipient-side filtering without exposing credentials.
+
+Observed causes of delay and cost:
+
+1. Raw ASR reran after code releases because checkpoint identity was too broadly bound; forced-alignment-only changes therefore repeated `104.0-175.2 s` ASR work.
+2. The first overlap candidate implementation performed unbounded external-word combination searches. One run was manually stopped after about `781 s`; commits `9e4ae5b` and `33637d3` bounded the search and avoided redundant candidates, but the exact candidate still spent `755.8 s` before the final fail-closed overlap.
+3. Provider capacity and SSH readiness failures caused repeated start/stop cycles and migrations. Fresh Pods repeated bootstrap and ffmpeg installation.
+4. The pipeline correctly failed closed on unresolved overlaps, but the review artifact did not initially include the final two exact conflict UIDs, causing another correction-return cycle.
+5. The last resume attempt encountered transfer/network retries and was stopped before proving that the regenerated return reached the remote checkpoint.
+
+Astra must review the complete codebase, controller logs, checkpoint binding granularity, overlap search complexity, bootstrap/image reuse, notification behavior, and exact current local/remote artifact boundary. It must fix and locally test defects without paid compute. It must also evaluate, using current official OpenAI documentation, whether GPT transcription APIs can replace or complement Whisper/CTC at the required Turkish accuracy, word-timestamp, diarization/overlap, privacy, cost, latency, retry, deterministic-resume, and hash-evidence boundaries. Do not implement an API substitution unless strict timing and evidence contracts can still be met.
+
 Do not place secret values in this file, shell history, issue comments, test output, commits, or chat handoffs. `MAS_YTDLP_COOKIES` must point to a local Netscape-format cookies file outside the repository or in an ignored path.
 
 ## Fresh Codex CLI continuation prompt

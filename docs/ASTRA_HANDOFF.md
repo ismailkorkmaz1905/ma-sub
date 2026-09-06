@@ -150,3 +150,32 @@ printf 'Authorization: Bearer %s\n' "$RUNPOD_API_KEY" | \
 ```
 
 Accept compute shutdown only when provider state is `EXITED` and the console shows no active GPU compute charge. Stopped volume storage may continue to incur storage charges. A network-volume Pod may need explicit termination after retention requirements are satisfied.
+
+## Urgent Astra takeover - 2026-09-06
+
+The earlier boundary in this file is stale. Start from candidate `33637d3a31ee49c82813ca947ffd3b56174f9571` plus the documentation commit containing this section.
+
+Current facts:
+
+- Local full suite at the code candidate: `530 passed, 32 skipped in 39.74 s`. Focused forced-alignment suite: `35 passed in 0.33-0.40 s`.
+- Real audio review completed `998/998` in `719.2 s` on one run. Three duplicate fragment resolutions were retained.
+- Exact commit `33637d3` reran audio review from checkpoint in `18.5 s`, then forced alignment failed closed after `755.8 s` on exactly `MA11-TR-a09b20542760d351` versus `MA11-TR-1144d768dc92c4a9`.
+- A regenerated local `Muhtemel Ask 11.Bolum_TR_TEXT_CORRECTED.zip` has those two exact UIDs pending audio review. Manifest SHA-256 is `195f7d1509cb3592fb6ed207d1c6b088930a02006d4cfc338a3ec3f92cc6c9bf`; ZIP SHA-256 is `DA278A26B22BC507D40577E2658F7E9A48374154BD978B940125AD1CB1C7BC2A`. Validate it before use. Remote upload/consumption is NOT VERIFIED.
+- There is no Turkish SRT, Indonesian pack/return/SRT, strict mux, final QA, Drive byte/SHA-256 readback, or delivery PASS.
+- User-reported impact is nearly `21 hours` and approximately `$20` RunPod spend. Do not present these as provider-verified billing.
+- External API observation at `2026-09-06T01:35:52.8724964Z` showed Pod `781ct55zv4gkle` desired state `EXITED`, rate field `$0.74/hour`, and retained volume `xgogcmey5o`. Do not delete the volume.
+- Paid RunPod compute is prohibited until the user explicitly reauthorizes it. The future command is `.\mas.ps1 run 11`; do not execute it now.
+- YouTube cookies were rejected as stale/invalid by yt-dlp. Gmail `notify-test` submitted successfully, but long-term pipeline notification delivery is unresolved.
+
+Review and repair priorities:
+
+1. Reconcile every controller and remote log listed in `docs/EP11_FIRST_PRODUCTION_RUN.md` with code releases and checkpoints.
+2. Fix checkpoint identity granularity so forced-alignment-only releases do not needlessly invalidate raw ASR, without weakening source, model, code, or artifact integrity.
+3. Prove overlap candidate search is bounded and deterministic on adversarial and Episode 11-shaped fixtures. Audit the acoustic-lane provenance checks and the two remaining UIDs without inventing text or speaker identity.
+4. Reduce fresh-Pod bootstrap repetition through the existing image/runtime design, preserving exact dependency evidence.
+5. Audit transfer retries, finite timeouts, no-progress watchdogs, adoption/migration behavior, and shutdown on every exit path.
+6. Audit Gmail event generation and delivery evidence without exposing secrets.
+7. Evaluate GPT transcription APIs at medium priority using official OpenAI sources. Compare Turkish accuracy, word timestamps, diarization and overlap handling, cost, latency, privacy, rate limits, deterministic resume, hashes, and strict artifact contracts. Recommend replace, complement, or reject; do not implement blindly.
+8. Make fixes, run focused tests, the full suite, `git diff --check`, and Docker/static checks possible without paid GPU. Commit and push meaningful stages to `main`.
+
+Do not claim acoustic, Drive, billing, or end-to-end PASS from local tests. Do not start RunPod, mutate Drive, delete retained artifacts, touch Episode 12, weaken validation, or create a stable tag without new user authority and direct evidence.

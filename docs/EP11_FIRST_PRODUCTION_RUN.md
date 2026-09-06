@@ -112,3 +112,33 @@ forced alignment, Indonesian translation, strict subtitle QA, final mux, live
 Drive byte/SHA-256 readback, and final delivery remain incomplete. The latest
 probe Pod, `tccsb8991x84ua`, was externally verified `EXITED`. No stable tag may
 be created from this partial run.
+
+## Attempts after the original 23 - 2026-09-05 to 2026-09-06
+
+| Log | Candidate | Observed stage timings and result |
+|---|---|---|
+| `run-20260905T235206.955372Z-1880.log` | `c4aec5c` | Download `13.7 s`; audio `5.2 s`; raw ASR `171.0 s`; TR pack `44.9 s`; TR return `3.1 s`; audio review `998/998` PASS in `719.2 s`; forced alignment FAIL in `380.7 s` on same/unknown-speaker overlap. Diagnostics retained; Pod `uziszfw1mrsj03` shutdown verified in `7.6 s`. |
+| `run-20260906T002125.836371Z-14208.log` | `9e17b40` | Download `8.0 s`; audio `3.3 s`; raw ASR `104.0 s`; TR pack `22.4 s`; TR return `2.9 s`; checkpoint audio review `998/998` PASS in `9.8 s`. Forced alignment was manually interrupted at about `781 s` after an unbounded candidate-combination search was identified. Pod `h9wmdsf5fl7o5d` was externally stopped. |
+| `run-20260906T004148.201847Z-1396.log` through `run-20260906T004805.705093Z-9416.log` | startup/adoption | Several starts reached desired `RUNNING` without usable SSH/machine readiness. They were interrupted after bounded waits and externally stopped. Capacity migration preserved the volume and replaced `h9wmdsf5fl7o5d` with `9aret9grguxm1i` at the recorded `$0.74/hour` rate. |
+| `run-20260906T004815.388366Z-6628.log` | `33637d3` | Download `11.5 s`; audio `5.2 s`; raw ASR `175.2 s`; TR pack `36.9 s`; TR return `3.1 s`; checkpoint audio review `998/998` PASS in `18.5 s`; forced alignment FAIL in `755.8 s` on one remaining conflict: `MA11-TR-a09b20542760d351` and `MA11-TR-1144d768dc92c4a9`. Diagnostics retained; Pod `9aret9grguxm1i` shutdown verified in `7.3 s`. |
+| `run-20260906T013246.588786Z-13720.log` | resume attempt | Transfer/network work retried and the controller migrated to `781ct55zv4gkle`. The user stopped further spending before stage completion. Shutdown was externally verified in `7.3 s`; subsequent API observation at `2026-09-06T01:35:52.8724964Z` showed desired state `EXITED`. |
+
+The user reports nearly `21 hours` total elapsed and approximately `$20` of RunPod spend. Those are user-reported values, not provider billing measurements. The table records controller and stage timings only and must not be used as exact billing time.
+
+Code changes across this interval:
+
+- `c4aec5c`: resolve acoustically duplicated review fragments.
+- `667799f`: resolve forced-alignment overlap components.
+- `9e17b40`: deterministic overlap selection.
+- `9e4ae5b`: bound overlap candidate search by the candidate time envelope.
+- `33637d3`: avoid redundant narrowed/partition candidates when earlier selection already resolves a component.
+
+Current local return artifact:
+
+- Filename: `Muhtemel Ask 11.Bolum_TR_TEXT_CORRECTED.zip`
+- Pending exact audio-review UIDs: `MA11-TR-a09b20542760d351`, `MA11-TR-1144d768dc92c4a9`
+- Manifest SHA-256: `195f7d1509cb3592fb6ed207d1c6b088930a02006d4cfc338a3ec3f92cc6c9bf`
+- ZIP SHA-256: `DA278A26B22BC507D40577E2658F7E9A48374154BD978B940125AD1CB1C7BC2A`
+- Remote upload and checkpoint consumption: NOT VERIFIED
+
+Current boundary: no Turkish SRT, Indonesian handoff/return/SRT, strict mux, final QA, Drive readback, or delivery exists. Pod `781ct55zv4gkle` is externally observed `EXITED`; retained volume `xgogcmey5o` remains. Paid compute must not be restarted until explicit user authorization. The eventual resume command is `.\mas.ps1 run 11`.

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -11,14 +12,50 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from datetime import datetime, timezone
 
 from .config import ROOT, episode_dir
 from .engine.tr_correction import validate_tr_correction_output
+from .engine.download import _validated_cookie_file
 from .remote import RemoteVerificationError, _run_watchdog
+from .reliability import BudgetExceeded, RunBudget, atomic_json, digest
 
 
 class RunPodControllerError(RuntimeError):
     pass
+
+
+def _episode_budget(local_root, episode):
+    budget_path = Path(local_root) / "work" / "controller_budget.json"
+    starts = []
+    if budget_path.exists():
+        saved = json.loads(budget_path.read_text(encoding="utf-8"))
+        body = saved.get("data")
+        if not isinstance(body, dict) or saved.get("sha256") != digest(body) or body.get("episode") != episode:
+            raise RunPodControllerError("episode budget checkpoint integrity mismatch")
+        starts.append(datetime.fromisoformat(body["started_at"]))
+    for log_path in (Path(local_root) / "logs").glob("run-*.log"):
+        with log_path.open(encoding="utf-8") as handle:
+            first_line = handle.readline()
+        try:
+            event = json.loads(first_line)
+            if event.get("event") == "run_started" and event.get("episode") == episode:
+                starts.append(datetime.fromisoformat(event["timestamp"]))
+        except (ValueError, KeyError, TypeError) as exc:
+            raise RunPodControllerError(f"cannot establish episode budget from {log_path.name}") from exc
+    if any(start.tzinfo is None for start in starts):
+        raise RunPodControllerError("episode budget timestamps must include timezone")
+    started_at = min(starts) if starts else datetime.now(timezone.utc)
+    try:
+        limit = float(os.getenv("MAS_EPISODE_BUDGET_SECONDS", "14400"))
+        budget = RunBudget(started_at.isoformat(), limit_seconds=limit)
+    except ValueError as exc:
+        raise RunPodControllerError("MAS_EPISODE_BUDGET_SECONDS must be finite and positive") from exc
+    body = {"episode": episode, "started_at": budget.started_at,
+            "limit_seconds": budget.limit_seconds}
+    atomic_json(budget_path, {"data": body, "sha256": digest(body)})
+    budget.check()
+    return budget
 
 
 def _validate_local_tr_return(local_root, name):
@@ -38,7 +75,7 @@ def _validate_local_tr_return(local_root, name):
 
 
 class RunPodClient:
-    def __init__(self, pod_id, api_key, *, timeout=15, attempts=3, sleep=time.sleep):
+    def __init__(self, pod_id, api_key, *, timeout=15, attempts=3, sleep=time.sleep, budget=None):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", pod_id or ""):
             raise RunPodControllerError("RUNPOD_POD_ID is missing or invalid")
         if not api_key or "\r" in api_key or "\n" in api_key:
@@ -48,6 +85,7 @@ class RunPodClient:
         self.timeout = timeout
         self.attempts = attempts
         self.sleep = sleep
+        self.budget = budget
 
     def _request_url(self, method, url, *, payload=None, attempts=None):
         data = None
@@ -67,8 +105,9 @@ class RunPodClient:
         last_error = None
         request_attempts = self.attempts if attempts is None else attempts
         for attempt in range(request_attempts):
+            request_timeout = min(self.timeout, self.budget.check()) if self.budget else self.timeout
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                with urllib.request.urlopen(request, timeout=request_timeout) as response:
                     payload = response.read()
                     if response.status < 200 or response.status >= 300:
                         raise RunPodControllerError(f"RunPod returned HTTP {response.status}")
@@ -89,11 +128,11 @@ class RunPodClient:
                     message += f": {detail}"
                 last_error = RunPodControllerError(message)
                 if attempt + 1 < request_attempts:
-                    self.sleep(2 ** attempt)
+                    self.sleep(min(2 ** attempt, self.budget.check()) if self.budget else 2 ** attempt)
             except (urllib.error.URLError, TimeoutError, RunPodControllerError) as exc:
                 last_error = exc
                 if attempt + 1 < request_attempts:
-                    self.sleep(2 ** attempt)
+                    self.sleep(min(2 ** attempt, self.budget.check()) if self.budget else 2 ** attempt)
         raise RunPodControllerError(
             f"RunPod request failed after {request_attempts} attempts: {last_error}"
         )
@@ -146,7 +185,10 @@ class RunPodClient:
             elapsed = time.monotonic() - started
             status = last.get("desiredStatus", "UNKNOWN")
             print(f"[RUNPOD] waiting for {description}: status={status}; elapsed={elapsed:.1f}s")
-            self.sleep(poll)
+            remaining = max(0, timeout - (time.monotonic() - started))
+            if self.budget:
+                remaining = min(remaining, self.budget.check())
+            self.sleep(min(poll, remaining))
         status = (last or {}).get("desiredStatus", "UNKNOWN")
         raise RunPodControllerError(f"RunPod {description} timed out after {timeout}s; status={status}")
 
@@ -205,6 +247,7 @@ def _local_preflight(values):
         raise RunPodControllerError("git status failed")
     if result.stdout.strip():
         raise RunPodControllerError("repository must be clean before a RunPod episode run")
+    _validated_cookie_file(values["MAS_YTDLP_COOKIES"])
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=ROOT,
@@ -274,6 +317,12 @@ def _migrate_capacity_bound_pod(client, pod):
     volume_id = os.getenv("MAS_RUNPOD_NETWORK_VOLUME_ID")
     data_center_id = os.getenv("MAS_RUNPOD_DATA_CENTER_ID")
     gpu_type_ids = _configured_gpu_type_ids()
+    try:
+        max_cost = float(os.getenv("MAS_RUNPOD_MAX_COST_PER_HR", "0.75"))
+    except ValueError:
+        raise RunPodControllerError("maximum Pod hourly cost must be finite and positive") from None
+    if not math.isfinite(max_cost) or max_cost <= 0:
+        raise RunPodControllerError("maximum Pod hourly cost must be finite and positive")
     if not volume_id or not data_center_id:
         raise RunPodControllerError(
             "automatic Pod migration requires MAS_RUNPOD_NETWORK_VOLUME_ID, "
@@ -323,28 +372,27 @@ def _migrate_capacity_bound_pod(client, pod):
             f"replacement creation failed: {exc}"
         ) from exc
     new_id = created.get("id")
-    if (
-        not re.fullmatch(r"[A-Za-z0-9_-]+", new_id or "")
-        or created.get("networkVolumeId") != volume_id
-    ):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", new_id or ""):
         raise RunPodControllerError("replacement Pod response failed identity validation")
-    max_cost = float(os.getenv("MAS_RUNPOD_MAX_COST_PER_HR", "0.75"))
-    cost = float(created.get("costPerHr") or created.get("adjustedCostPerHr") or 0)
     replacement = RunPodClient(
         new_id,
         client.api_key,
         timeout=client.timeout,
         attempts=client.attempts,
         sleep=client.sleep,
+        budget=getattr(client, "budget", None),
     )
-    if cost <= 0 or cost > max_cost:
-        replacement.terminate()
-        raise RunPodControllerError(
-            f"replacement Pod hourly cost {cost} exceeds allowed {max_cost}"
-        )
     try:
+        if created.get("networkVolumeId") != volume_id:
+            raise RunPodControllerError("replacement Pod response failed volume identity validation")
+        cost = float(created.get("costPerHr") or created.get("adjustedCostPerHr") or 0)
+        if not math.isfinite(cost) or cost <= 0 or cost > max_cost:
+            raise RunPodControllerError(
+                f"replacement Pod hourly cost {cost} exceeds allowed {max_cost}"
+            )
         _persist_windows_user_pod_id(new_id)
     except Exception:
+        replacement.budget = None
         replacement.terminate()
         raise
     print(
@@ -373,25 +421,33 @@ def _network(command, *, idle_timeout=180, total_timeout=1800, capture=False):
 
 
 def _network_retry(
-    command, *, attempts=3, idle_timeout=60, total_timeout=1800, capture=False
+    command, *, attempts=3, idle_timeout=60, total_timeout=1800, capture=False, budget=None
 ):
+    deadline = time.monotonic() + total_timeout
     for attempt in range(1, attempts + 1):
+        remaining = deadline - time.monotonic()
+        if budget:
+            remaining = min(remaining, budget.check())
+        if remaining <= 0:
+            raise RunPodControllerError("network command total retry budget expired")
         try:
             return _network(
                 command,
                 idle_timeout=idle_timeout,
-                total_timeout=total_timeout,
+                total_timeout=remaining,
                 capture=capture,
             )
         except RunPodControllerError:
             if attempt == attempts:
                 raise
-            delay = 2 ** (attempt - 1)
+            delay = min(2 ** (attempt - 1), max(0, deadline - time.monotonic()))
+            if budget:
+                delay = min(delay, budget.check())
             print(f"[RUNPOD] network command retry {attempt + 1}/{attempts} in {delay}s")
             time.sleep(delay)
 
 
-def _remote_file_signature(ssh, remote_path):
+def _remote_file_signature(ssh, remote_path, *, budget=None):
     quoted = shlex.quote(remote_path)
     output = _network_retry(
         ssh
@@ -403,6 +459,7 @@ def _remote_file_signature(ssh, remote_path):
         idle_timeout=60,
         total_timeout=300,
         capture=True,
+        budget=budget,
     )
     match = re.fullmatch(
         rb"\s*(\d+)\s*\r?\n([0-9a-f]{64})\s+[^\r\n]+\s*",
@@ -413,12 +470,14 @@ def _remote_file_signature(ssh, remote_path):
     return int(match.group(1)), match.group(2).decode("ascii")
 
 
-def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host):
+def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host, budget=None):
     source = Path(source)
     expected_size = source.stat().st_size
     digest = hashlib.sha256()
     with source.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            if budget:
+                budget.check()
             digest.update(chunk)
     expected_sha256 = digest.hexdigest()
     partial = (
@@ -430,13 +489,15 @@ def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host):
         ssh + ["install -d -m 700 -- " + shlex.quote(remote_parent)],
         idle_timeout=60,
         total_timeout=300,
+        budget=budget,
     )
     _network_retry(
         scp + [str(source), f"root@{host}:{partial}"],
         idle_timeout=60,
         total_timeout=300,
+        budget=budget,
     )
-    partial_size, partial_sha256 = _remote_file_signature(ssh, partial)
+    partial_size, partial_sha256 = _remote_file_signature(ssh, partial, budget=budget)
     if (partial_size, partial_sha256) != (expected_size, expected_sha256):
         raise RunPodControllerError(
             "uploaded episode file byte/SHA-256 readback mismatch"
@@ -450,8 +511,9 @@ def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host):
         ],
         idle_timeout=60,
         total_timeout=300,
+        budget=budget,
     )
-    final_size, final_sha256 = _remote_file_signature(ssh, remote_path)
+    final_size, final_sha256 = _remote_file_signature(ssh, remote_path, budget=budget)
     if (final_size, final_sha256) != (expected_size, expected_sha256):
         raise RunPodControllerError(
             "installed episode file byte/SHA-256 readback mismatch"
@@ -459,7 +521,7 @@ def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host):
     return {"bytes": expected_size, "sha256": expected_sha256}
 
 
-def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host):
+def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host, budget=None):
     source = Path(local_root) / "review" / "audio_review_overrides.json"
     if not source.is_file():
         return None
@@ -469,6 +531,7 @@ def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host):
         ssh=ssh,
         scp=scp,
         host=host,
+        budget=budget,
     )
 
 
@@ -518,7 +581,8 @@ def _wait_for_ssh(key, host, port, *, timeout=300):
     while time.monotonic() - started < timeout:
         attempt += 1
         try:
-            result = subprocess.run(command, capture_output=True, timeout=20, check=False)
+            result = subprocess.run(command, capture_output=True,
+                                    timeout=min(20, timeout - (time.monotonic() - started)), check=False)
         except subprocess.TimeoutExpired:
             result = None
         if result is not None and result.returncode == 0:
@@ -529,7 +593,7 @@ def _wait_for_ssh(key, host, port, *, timeout=300):
             )
         elapsed = time.monotonic() - started
         print(f"[RUNPOD] waiting for SSH: attempt={attempt}; elapsed={elapsed:.1f}s")
-        time.sleep(5)
+        time.sleep(min(5, max(0, timeout - (time.monotonic() - started))))
     raise RunPodControllerError(f"SSH readiness timed out after {timeout}s")
 
 
@@ -566,9 +630,14 @@ def run_remote_episode(episode, source_url=None):
         raise RunPodControllerError("episode must be a positive integer")
     values = _required_environment()
     commit, rclone_config = _local_preflight(values)
+    name = f"Muhtemel Ask {episode}.Bolum"
+    local_root = episode_dir(episode)
+    _validate_local_tr_return(local_root, name)
+    budget = _episode_budget(local_root, episode)
     key = Path(values["MAS_RUNPOD_SSH_KEY"]).resolve()
     cookie = Path(values["MAS_YTDLP_COOKIES"]).resolve()
     client = RunPodClient(values["RUNPOD_POD_ID"], values["RUNPOD_API_KEY"])
+    client.budget = budget
     initial = client.get()
     startup_mode = _startup_mode(initial)
 
@@ -577,8 +646,6 @@ def run_remote_episode(episode, source_url=None):
     endpoint = None
     try:
         controller_started_pod = True
-        replacement_count = 0
-        max_replacements = 2
         startup_timeout = int(os.getenv("MAS_RUNPOD_STARTUP_TIMEOUT_SECONDS", "180"))
         if not 60 <= startup_timeout <= 600:
             raise RunPodControllerError(
@@ -598,41 +665,18 @@ def run_remote_episode(episode, source_url=None):
                 client = _migrate_capacity_bound_pod(client, initial)
                 values["RUNPOD_POD_ID"] = client.pod_id
                 controller_started_pod = True
-                replacement_count += 1
         else:
             print(f"[RUNPOD] adopting newly deployed pod {values['RUNPOD_POD_ID']}")
-        while True:
-            try:
-                pod = client.wait(
-                    lambda item: item.get("desiredStatus") == "RUNNING"
-                    and _ssh_endpoint(item),
-                    "startup",
-                    timeout=startup_timeout,
-                )
-                break
-            except RunPodControllerError as exc:
-                if (
-                    os.getenv("MAS_RUNPOD_AUTO_MIGRATE") != "1"
-                    or "startup timed out" not in str(exc)
-                    or replacement_count >= max_replacements
-                ):
-                    raise
-                current = client.get()
-                if current.get("desiredStatus") == "RUNNING":
-                    client.stop()
-                    current = client.wait(
-                        lambda item: item.get("desiredStatus") == "EXITED",
-                        "stalled-host shutdown",
-                        timeout=300,
-                    )
-                if current.get("desiredStatus") != "EXITED":
-                    raise
-                client = _migrate_capacity_bound_pod(client, current)
-                values["RUNPOD_POD_ID"] = client.pod_id
-                replacement_count += 1
+        pod = client.wait(
+            lambda item: item.get("desiredStatus") == "RUNNING"
+            and _ssh_endpoint(item),
+            "startup",
+            timeout=min(startup_timeout, budget.check()),
+        )
         host, port = _ssh_endpoint(pod)
         endpoint = (host, port)
-        _wait_for_ssh(key, host, port)
+        _wait_for_ssh(key, host, port, timeout=min(300, budget.check()))
+        budget.check()
         print(f"[RUNPOD] ready after {time.monotonic() - started_at:.1f}s")
 
         with tempfile.TemporaryDirectory(prefix="ma-sub-runpod-") as temporary:
@@ -642,17 +686,17 @@ def run_remote_episode(episode, source_url=None):
             subprocess.run(
                 ["git", "archive", "--format=tar.gz", f"--output={archive}", commit],
                 cwd=ROOT,
-                timeout=60,
+                timeout=min(60, budget.check()),
                 check=True,
             )
             _write_runtime_env(runtime_env, values, commit)
             ssh = _ssh_args(key, host, port)
             scp = _scp_args(key, host, port)
-            _network_retry(ssh + ["install -d -m 700 /workspace/.mas-secrets /workspace/.mas-upload"])
-            _network_retry(scp + [str(archive), f"root@{host}:/workspace/.mas-upload/release.tar.gz"])
-            _network_retry(scp + [str(runtime_env), f"root@{host}:/workspace/.mas-secrets/runtime.env"])
-            _network_retry(scp + [str(cookie), f"root@{host}:/workspace/.mas-secrets/youtube-cookies.txt"])
-            _network_retry(scp + [str(rclone_config), f"root@{host}:/workspace/.mas-secrets/rclone.conf"])
+            _network_retry(ssh + ["install -d -m 700 /workspace/.mas-secrets /workspace/.mas-upload"], budget=budget)
+            _network_retry(scp + [str(archive), f"root@{host}:/workspace/.mas-upload/release.tar.gz"], budget=budget)
+            _network_retry(scp + [str(runtime_env), f"root@{host}:/workspace/.mas-secrets/runtime.env"], budget=budget)
+            _network_retry(scp + [str(cookie), f"root@{host}:/workspace/.mas-secrets/youtube-cookies.txt"], budget=budget)
+            _network_retry(scp + [str(rclone_config), f"root@{host}:/workspace/.mas-secrets/rclone.conf"], budget=budget)
 
             deploy_command = (
                 "set -euo pipefail; "
@@ -669,25 +713,21 @@ def run_remote_episode(episode, source_url=None):
             _network_retry(
                 ssh + [deploy_command],
                 idle_timeout=600,
-                total_timeout=3600,
+                total_timeout=min(3600, budget.check()),
+                budget=budget,
             )
 
-            name = f"Muhtemel Ask {episode}.Bolum"
-            local_root = episode_dir(episode)
             remote_root = f"/workspace/ma-sub/EPISODES/{name}"
-            _validate_local_tr_return(local_root, name)
             for filename in (f"{name}_TR_TEXT_CORRECTED.zip", f"{name}_ID_TRANSLATED.zip"):
                 local_return = local_root / "translation_output" / filename
                 if local_return.is_file():
-                    _network_retry(scp + [str(local_return), f"root@{host}:/workspace/.mas-upload/return.zip"])
                     destination = f"{remote_root}/translation_output/{filename}"
-                    _network_retry(
-                        ssh
-                        + [
-                            "install -D -m 600 /workspace/.mas-upload/return.zip "
-                            + shlex.quote(destination)
-                        ]
+                    receipt = _upload_episode_file_verified(
+                        local_return, destination, ssh=ssh, scp=scp, host=host,
+                        budget=budget,
                     )
+                    print(f"[RUNPOD] return upload verified: {filename}; "
+                          f"bytes={receipt['bytes']} sha256={receipt['sha256']}")
 
             override_receipt = _upload_audio_review_overrides(
                 local_root,
@@ -695,6 +735,7 @@ def run_remote_episode(episode, source_url=None):
                 ssh=ssh,
                 scp=scp,
                 host=host,
+                budget=budget,
             )
             if override_receipt is not None:
                 print(
@@ -707,13 +748,19 @@ def run_remote_episode(episode, source_url=None):
             if source_url:
                 arguments.extend(["--source-url", source_url])
             quoted_arguments = " ".join(shlex.quote(value) for value in arguments)
+            runtime_seconds = int(min(
+                float(os.getenv("MAS_MAX_RUNTIME_SECONDS", "14400")), budget.check()
+            ))
+            if runtime_seconds < 1:
+                raise BudgetExceeded("less than one second remains in episode runtime budget")
             run_command = (
                 "set -uo pipefail; source /workspace/.mas-secrets/runtime.env; "
+                f"export MAS_MAX_RUNTIME_SECONDS={runtime_seconds}; "
                 f"cd /workspace/ma-sub/releases/{commit}; "
                 f"./runpod/run-episode.sh {quoted_arguments}; rc=$?; "
                 "printf '%s\\n' \"$rc\" > /workspace/.mas-upload/exit-code; exit 0"
             )
-            _network(ssh + [run_command], idle_timeout=1800, total_timeout=18000)
+            _network(ssh + [run_command], idle_timeout=1800, total_timeout=budget.check())
             exit_file = temporary / "exit-code"
             _network_retry(scp + [f"root@{host}:/workspace/.mas-upload/exit-code", str(exit_file)])
             try:
@@ -787,6 +834,7 @@ def run_remote_episode(episode, source_url=None):
                 raise RunPodControllerError(f"remote pipeline failed with exit code {exit_code}")
     finally:
         if controller_started_pod:
+            client.budget = None
             shutdown_started = time.monotonic()
             print(f"[RUNPOD] stopping pod {values['RUNPOD_POD_ID']}")
             if endpoint:
@@ -799,7 +847,10 @@ def run_remote_episode(episode, source_url=None):
                     )
                 except RunPodControllerError as exc:
                     print(f"[RUNPOD] secret cleanup warning: {exc}", file=sys.stderr)
-            current = client.get()
+            try:
+                current = client.get()
+            except RunPodControllerError:
+                current = {}
             if current.get("desiredStatus") != "EXITED":
                 client.stop()
                 client.wait(lambda item: item.get("desiredStatus") == "EXITED", "shutdown", timeout=300)

@@ -1,7 +1,9 @@
 import os
+import json
 import smtplib
 import time
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 
 
 def enabled():
@@ -17,6 +19,8 @@ def send_email(episode, event, details=None):
     message = EmailMessage()
     message["From"] = sender
     message["To"] = recipient
+    message["Message-ID"] = make_msgid()
+    message["Date"] = formatdate(localtime=False, usegmt=True)
     subject = f"Muhtemel Aşk {episode}. Bölüm" if episode is not None else "Muhtemel Aşk"
     message["Subject"] = f"{subject} - {event}"
     message.set_content(
@@ -32,8 +36,14 @@ def send_email(episode, event, details=None):
         try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
                 smtp.login(sender, os.environ["MAS_GMAIL_APP_PASSWORD"])
-                smtp.send_message(message)
-            return {"status": "sent", "recipient": recipient}
+                refused = smtp.send_message(message)
+                if refused:
+                    raise smtplib.SMTPRecipientsRefused(refused)
+            return {"status": "sent", "recipient": recipient,
+                    "message_id": message["Message-ID"]}
+        except (smtplib.SMTPAuthenticationError, smtplib.SMTPRecipientsRefused,
+                smtplib.SMTPSenderRefused):
+            raise RuntimeError("email authentication or recipient rejected; not retried") from None
         except (OSError, smtplib.SMTPException) as exc:
             last_error = exc
             if attempt < 3:
@@ -43,7 +53,14 @@ def send_email(episode, event, details=None):
 
 def notify(episode, event, details=None):
     try:
-        return send_email(episode, event, details)
+        result = send_email(episode, event, details)
     except Exception as exc:
-        print(f"[EMAIL WARNING] {exc}")
-        return {"status": "failed", "error": str(exc)}
+        error = str(exc)
+        for key in ("MAS_GMAIL_APP_PASSWORD", "RUNPOD_API_KEY"):
+            value = os.getenv(key)
+            if value:
+                error = error.replace(value, "<redacted>")
+        result = {"status": "failed", "error": error}
+    print("[EMAIL] " + json.dumps({"episode": episode, "event": event, **result},
+                                 ensure_ascii=False), flush=True)
+    return result

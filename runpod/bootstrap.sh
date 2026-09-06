@@ -39,12 +39,13 @@ if ! command -v rclone >/dev/null 2>&1; then
     https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-linux-amd64.zip \
     --output "$archive"
   python3 -m zipfile -e "$archive" "$extract"
-  install -m 755 "$extract/rclone-v1.75.0-linux-amd64/rclone" /usr/local/bin/rclone
+  install -m 755 "$extract/rclone-v1.75.0-linux-amd64/rclone" "$MAS_BIN_DIR/rclone"
 fi
 
 command -v uv >/dev/null 2>&1 || {
-  export UV_INSTALL_DIR=/usr/local/bin
+  export UV_INSTALL_DIR="$MAS_BIN_DIR"
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+    --connect-timeout 15 --max-time 300 --retry 3 \
     https://astral.sh/uv/0.8.14/install.sh | sh
 }
 

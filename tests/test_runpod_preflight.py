@@ -109,6 +109,8 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert 'MAS_BIN_DIR="${MAS_BIN_DIR:-/workspace/.local/bin}"' in script
     assert "denoland/deno/releases/download/v2.9.5" in script
     assert "sha256sum --check --status" in script
+    assert '"$MAS_BIN_DIR/rclone"' in script
+    assert 'export UV_INSTALL_DIR="$MAS_BIN_DIR"' in script
     assert 'if [[ ! -x "$VENV/bin/python" ]]; then' in script
     assert (
         'uv pip install --python "$VENV/bin/python" '

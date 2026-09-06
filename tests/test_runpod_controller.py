@@ -1,12 +1,14 @@
 import hashlib
 import io
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from mas import cli
 from mas import runpod_controller
+from mas.reliability import BudgetExceeded
 
 
 def test_local_tr_return_must_match_current_pack(tmp_path, monkeypatch):
@@ -239,6 +241,52 @@ def test_capacity_migration_can_select_from_bounded_gpu_pool(monkeypatch):
     assert client.payload["gpuTypePriority"] == "availability"
 
 
+@pytest.mark.parametrize("maximum", ["NaN", "inf", "-1", "invalid"])
+def test_invalid_cost_ceiling_fails_before_provider_mutation(monkeypatch, maximum):
+    monkeypatch.setenv("MAS_RUNPOD_GPU_TYPE_ID", "NVIDIA A40")
+    monkeypatch.delenv("MAS_RUNPOD_GPU_TYPE_IDS", raising=False)
+    monkeypatch.setenv("MAS_RUNPOD_MAX_COST_PER_HR", maximum)
+    with pytest.raises(runpod_controller.RunPodControllerError, match="finite and positive"):
+        runpod_controller._migrate_capacity_bound_pod(object(), {})
+
+
+@pytest.mark.parametrize("metadata", [
+    {"networkVolumeId": "wrong", "costPerHr": 0.5},
+    {"networkVolumeId": "volume123", "costPerHr": "NaN"},
+    {"networkVolumeId": "volume123", "costPerHr": "invalid"},
+])
+def test_replacement_metadata_failure_cleans_up_created_pod(monkeypatch, metadata):
+    monkeypatch.setenv("MAS_RUNPOD_NETWORK_VOLUME_ID", "volume123")
+    monkeypatch.setenv("MAS_RUNPOD_DATA_CENTER_ID", "EU-RO-1")
+    monkeypatch.setenv("MAS_RUNPOD_GPU_TYPE_ID", "NVIDIA A40")
+    monkeypatch.setenv("MAS_RUNPOD_MAX_COST_PER_HR", "0.75")
+    monkeypatch.delenv("MAS_RUNPOD_GPU_TYPE_IDS", raising=False)
+    stopped = []
+
+    class Client:
+        pod_id, api_key, timeout, attempts = "old", "secret", 15, 3
+        sleep = staticmethod(lambda _: None)
+        def get_network_volume(self, _):
+            return {"id": "volume123", "dataCenterId": "EU-RO-1"}
+        def terminate(self):
+            pass
+        def create_pod(self, _):
+            return {"id": "new", **metadata}
+
+    class Replacement:
+        def __init__(self, *args, **kwargs):
+            pass
+        def terminate(self):
+            stopped.append("new")
+
+    monkeypatch.setattr(runpod_controller, "RunPodClient", Replacement)
+    with pytest.raises((runpod_controller.RunPodControllerError, ValueError)):
+        runpod_controller._migrate_capacity_bound_pod(Client(), {
+            "desiredStatus": "EXITED", "networkVolumeId": "volume123",
+            "volumeInGb": 0, "imageName": "runpod/image"})
+    assert stopped == ["new"]
+
+
 def test_wait_requires_running_ip_and_ssh_mapping():
     assert runpod_controller._ssh_endpoint({"desiredStatus": "RUNNING"}) is None
     assert runpod_controller._ssh_endpoint(
@@ -262,6 +310,119 @@ def test_safe_network_command_retries_with_backoff(monkeypatch):
     assert runpod_controller._network_retry(["ssh", "host", "true"]) == b"ok"
     assert len(calls) == 3
     assert sleeps == [1, 2]
+
+
+def test_network_retries_share_total_budget(monkeypatch):
+    clock = [0.0]
+    budgets = []
+
+    def network(*args, **kwargs):
+        budgets.append(kwargs["total_timeout"])
+        clock[0] += 8
+        raise runpod_controller.RunPodControllerError("timeout")
+
+    monkeypatch.setattr(runpod_controller, "_network", network)
+    monkeypatch.setattr(runpod_controller.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runpod_controller.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    with pytest.raises(runpod_controller.RunPodControllerError, match="total retry budget"):
+        runpod_controller._network_retry(["ssh", "host"], total_timeout=10)
+    assert budgets == [10, 1]
+
+
+def test_verified_transfer_cannot_reset_episode_budget(monkeypatch, tmp_path):
+    elapsed = [0.0]
+    calls = []
+    source = tmp_path / "return.zip"
+    source.write_bytes(b"returned")
+
+    class Budget:
+        def check(self):
+            if elapsed[0] >= 10:
+                raise BudgetExceeded("episode expired")
+            return 10 - elapsed[0]
+
+    def network(command, **kwargs):
+        calls.append((command, kwargs["total_timeout"]))
+        elapsed[0] += min(4, kwargs["total_timeout"])
+        if elapsed[0] >= 10:
+            raise runpod_controller.RunPodControllerError("timeout")
+        return b""
+
+    monkeypatch.setattr(runpod_controller, "_network", network)
+    monkeypatch.setattr(runpod_controller.time, "monotonic", lambda: elapsed[0])
+    with pytest.raises(BudgetExceeded, match="episode expired"):
+        runpod_controller._upload_episode_file_verified(
+            source, "/remote/return.zip", ssh=["ssh"], scp=["scp"], host="host", budget=Budget())
+    assert [timeout for _, timeout in calls] == [10, 6, 2]
+    assert not any("mv -f" in command[-1] for command, _ in calls)
+
+
+def test_provider_request_uses_remaining_episode_time(monkeypatch):
+    timeouts = []
+
+    class Budget:
+        def check(self):
+            return 0.5
+
+    def open_request(request, timeout):
+        timeouts.append(timeout)
+        return _Response({"desiredStatus": "RUNNING"})
+
+    monkeypatch.setattr(runpod_controller.urllib.request, "urlopen", open_request)
+    client = runpod_controller.RunPodClient("pod", "secret", budget=Budget())
+    client.get()
+    assert timeouts == [0.5]
+
+
+def test_ssh_probe_is_capped_to_remaining_readiness_time(monkeypatch, tmp_path):
+    timeouts = []
+    monkeypatch.setattr(runpod_controller.time, "monotonic", lambda: 0)
+
+    def run(command, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(runpod_controller.subprocess, "run", run)
+    runpod_controller._wait_for_ssh(tmp_path / "key", "host", "22", timeout=0.5)
+    assert timeouts == [0.5]
+
+
+def test_invalid_local_return_fails_before_provider_access(monkeypatch, tmp_path):
+    monkeypatch.setattr(runpod_controller, "_required_environment", lambda: {})
+    monkeypatch.setattr(runpod_controller, "_local_preflight", lambda _: ("a" * 40, tmp_path))
+    monkeypatch.setattr(runpod_controller, "_validate_local_tr_return", lambda *_: (_ for _ in ()).throw(
+        runpod_controller.RunPodControllerError("stale return")))
+    monkeypatch.setattr(runpod_controller, "RunPodClient", lambda *_: pytest.fail("provider access"))
+    with pytest.raises(runpod_controller.RunPodControllerError, match="stale return"):
+        runpod_controller.run_remote_episode(11)
+
+
+def test_episode_budget_anchors_existing_logs_across_retries(monkeypatch, tmp_path):
+    monkeypatch.delenv("MAS_EPISODE_BUDGET_SECONDS", raising=False)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    first = datetime.now(timezone.utc) - timedelta(hours=5)
+    (logs / "run-original.log").write_text(json.dumps({
+        "event": "run_started", "episode": 11, "timestamp": first.isoformat()
+    }) + "\n", encoding="utf-8")
+    for _ in range(2):
+        with pytest.raises(BudgetExceeded):
+            runpod_controller._episode_budget(tmp_path, 11)
+    saved = json.loads((tmp_path / "work" / "controller_budget.json").read_text())
+    assert saved["data"]["started_at"] == first.isoformat()
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "21600")
+    assert runpod_controller._episode_budget(tmp_path, 11).remaining() > 0
+
+
+def test_episode_budget_checkpoint_tampering_fails(monkeypatch, tmp_path):
+    monkeypatch.delenv("MAS_EPISODE_BUDGET_SECONDS", raising=False)
+    runpod_controller._episode_budget(tmp_path, 11)
+    path = tmp_path / "work" / "controller_budget.json"
+    saved = json.loads(path.read_text())
+    saved["data"]["started_at"] = datetime.now(timezone.utc).isoformat()
+    path.write_text(json.dumps(saved))
+    with pytest.raises(runpod_controller.RunPodControllerError, match="integrity"):
+        runpod_controller._episode_budget(tmp_path, 11)
 
 
 def test_network_capture_returns_readback_without_streaming(monkeypatch):
@@ -322,6 +483,7 @@ def test_audio_review_overrides_upload_requires_partial_and_final_readback(
         == {
             "idle_timeout": 60,
             "total_timeout": 300,
+            "budget": None,
             **({"capture": True} if _command[-1].startswith("set -euo pipefail; stat") else {}),
         }
         for _command, kwargs in calls
@@ -508,7 +670,20 @@ def test_local_preflight_rejects_dirty_repository(monkeypatch, tmp_path):
         )
 
 
-def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_path):
+def test_local_preflight_rejects_malformed_cookie_before_compute(monkeypatch, tmp_path):
+    key, cookie = tmp_path / "key", tmp_path / "cookie"
+    key.write_text("key")
+    cookie.write_text("not a Netscape cookie file")
+    monkeypatch.setattr(runpod_controller.shutil, "which", lambda name: name)
+    monkeypatch.setattr(runpod_controller.subprocess, "run", lambda *a, **kw:
+                        type("Result", (), {"returncode": 0, "stdout": ""})())
+    with pytest.raises(RuntimeError, match="Netscape"):
+        runpod_controller._local_preflight({"MAS_RUNPOD_SSH_KEY": str(key),
+                                            "MAS_YTDLP_COOKIES": str(cookie)})
+
+
+@pytest.mark.parametrize("failure", ["start_response", "shutdown_get", "readiness"])
+def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_path, failure):
     key = tmp_path / "key"
     cookie = tmp_path / "cookie"
     config = tmp_path / "rclone.conf"
@@ -531,17 +706,22 @@ def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_pa
             self.stopped = False
 
         def get(self):
+            if self.running and failure == "shutdown_get":
+                raise runpod_controller.RunPodControllerError("GET unavailable")
             return {"desiredStatus": "RUNNING" if self.running else "EXITED"}
 
         def start(self):
             self.running = True
-            raise runpod_controller.RunPodControllerError("response lost")
+            if failure != "readiness":
+                raise runpod_controller.RunPodControllerError("response lost")
 
         def stop(self):
             self.running = False
             self.stopped = True
 
         def wait(self, predicate, description, *, timeout):
+            if description == "startup":
+                raise runpod_controller.RunPodControllerError("startup timed out")
             value = self.get()
             assert predicate(value)
             return value
@@ -550,7 +730,11 @@ def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_pa
     monkeypatch.setattr(runpod_controller, "RunPodClient", lambda *args: client)
     monkeypatch.setattr(runpod_controller, "_required_environment", lambda: values)
     monkeypatch.setattr(runpod_controller, "_local_preflight", lambda values: ("a" * 40, config))
+    monkeypatch.setattr(runpod_controller, "_validate_local_tr_return", lambda *_: None)
+    monkeypatch.setattr(runpod_controller, "episode_dir", lambda _: tmp_path)
+    monkeypatch.setenv("MAS_RUNPOD_AUTO_MIGRATE", "1")
+    monkeypatch.setattr(runpod_controller, "_migrate_capacity_bound_pod", lambda *_: pytest.fail("non-capacity migration"))
 
-    with pytest.raises(runpod_controller.RunPodControllerError, match="response lost"):
+    with pytest.raises(runpod_controller.RunPodControllerError, match="response lost|startup timed out"):
         runpod_controller.run_remote_episode(11)
     assert client.stopped is True

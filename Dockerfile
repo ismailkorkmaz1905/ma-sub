@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 COPY --from=uv /uv /usr/local/bin/uv
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git procps rclone \
+    && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git procps rclone \
     && rm -rf /var/lib/apt/lists/* \
     && uv python install 3.11 \
     && uv venv --python 3.11 /opt/venv

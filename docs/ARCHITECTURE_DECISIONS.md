@@ -32,7 +32,9 @@ Strict artifacts and markers live under `final/`. Emergency artifacts and marker
 
 Final files publish through `rclone` or a provider API using a temporary name. PASS requires reading the remote bytes back and matching both exact byte count and SHA-256 before the exact final name is published. A mounted path, copy exit code, or metadata-only hash is insufficient.
 
-Drive is not a workspace or repository mirror. The strict publisher uploads only the final MKV, Turkish SRT, and Indonesian SRT files under `EPISODES/Muhtemel Ask N.Bolum/`. Source media, code, logs, reports, credentials, and intermediate artifacts remain outside Drive.
+Drive is not a workspace or repository mirror. As authorized on 2026-09-06, the strict publisher uploads the final MP4 with Indonesian subtitles burned into the image under `EPISODES/Muhtemel Ask N.Bolum/`. Source media, both SRTs, the legacy verified softsub MKV, code, logs, reports, credentials, and intermediate artifacts remain local evidence. Existing Drive files are retained until a separately authorized cleanup.
+
+The original strict finalizer still verifies all source, correction, acoustic, translation and subtitle gates before MP4 creation. Burned video necessarily has different encoded video bytes: a separate encoding receipt binds immutable source and ID SRT hashes, style, encoder, output bytes/SHA-256, dimensions, duration and H.264/AAC stream checks. The strict stage binds that receipt and the original finalization report. This encoding check is not perceptual subtitle acceptance. Default production encoding is NVENC; QSV or libx264 must be explicitly selected with `MAS_MP4_ENCODER`. The main Drive publish set is now MP4 only; input-bound filenames preserve prior versions.
 
 ## ADR-009: Network work is bounded
 

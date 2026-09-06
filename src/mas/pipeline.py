@@ -36,12 +36,14 @@ from .engine.id_translation import (
     load_default_id_translation_glossary,
 )
 from .engine.media import extract_audio
+from .engine.burned_mp4 import burn_indonesian_mp4, SUBTITLE_STYLE
+from .engine.episode_archive import file_record
 from .engine.tr_correction import create_tr_correction_pack, read_tr_correction_pack, validate_tr_correction_output
 
 
 WAIT_TR = 20
 WAIT_ID = 21
-STRICT_DRIVE_OUTPUTS = ("mkv", "tr_srt", "id_srt")
+STRICT_DRIVE_OUTPUTS = ("mp4",)
 STAGE_NOTIFICATION_NAMES = {
     "download": "kaynak dosyası kontrolü",
     "audio": "ses dosyası hazırlığı",
@@ -535,8 +537,23 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             religious_config=config_dir / "religious_terms.yaml")
         if report.get("status") != "PASS":
             raise RuntimeError("strict finalization did not PASS")
+        id_srt = root / report["outputs"]["id_srt"]["relative_path"]
+        encoder = os.getenv("MAS_MP4_ENCODER", "h264_nvenc")
+        identity = sha256_json({"source": sha256_file(download.video_path),
+                                "id_srt": sha256_file(id_srt),
+                                "style": SUBTITLE_STYLE, "encoder": encoder})[:12]
+        mp4 = dirs["final"] / f"{name}.id.{identity}.mp4"
+        burn_indonesian_mp4(download.video_path, id_srt, mp4, encoder=encoder)
+        delivery = {"format": "mas-burned-mp4-delivery-1", "mode": "strict",
+                    "strict_finalization_sha256": sha256_file(report_path),
+                    "encoding_receipt_sha256": sha256_file(mp4.with_suffix('.burn.json')),
+                    "outputs": {"mp4": file_record(mp4, root)}}
+        delivery_path = dirs["final"] / "burned_mp4_delivery.json"
+        atomic_write_json(delivery_path, delivery)
+        holder["delivery"] = delivery
         holder["final_report"] = report
-        return {"report": str(report_path), "sha256": sha256_file(report_path)}
+        return {"report": str(report_path), "sha256": sha256_file(report_path),
+                "delivery": str(delivery_path), "delivery_sha256": sha256_file(delivery_path)}
     _stage(state_path, state, "finalize", finalize)
     report = holder["final_report"]
 
@@ -548,7 +565,10 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     def publish():
         receipts = []
         for key in STRICT_DRIVE_OUTPUTS:
-            local = root / report["outputs"][key]["relative_path"]
+            record = holder["delivery"]["outputs"][key]
+            local = root / record["relative_path"]
+            if local.stat().st_size != record["size_bytes"] or sha256_file(local) != record["sha256"]:
+                raise RuntimeError("burned MP4 changed after final verification")
             receipts.append(upload_verified(local, f"{remote_root.rstrip('/')}/{name}/{local.name}"))
         atomic_write_json(receipt_path, {"status": "PASS", "mode": "strict", "files": receipts})
         return {"receipt": str(receipt_path), "sha256": sha256_file(receipt_path)}

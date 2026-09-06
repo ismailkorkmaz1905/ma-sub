@@ -50,7 +50,7 @@ The final controller review found two additional cost risks: malformed JSON on t
 
 ## Notifications and environment
 
-Fourteen historical SMTP warnings in `run-20260905T122525.001811Z-4672.log` report folded header linefeeds. Commit `d3aec98` had already repaired that header bug. This review adds sent/disabled/failed event records and Message-ID so later submission can be audited. SMTP acceptance does not prove inbox delivery; user-side receipt remains UNKNOWN. No test mail was sent during this review.
+Fourteen historical SMTP warnings in `run-20260905T122525.001811Z-4672.log` report folded header linefeeds. Commit `d3aec98` had already repaired that header bug. This review adds sent/disabled/failed event records and Message-ID so later submission can be audited. SMTP acceptance does not prove inbox delivery; user-side receipt remains UNKNOWN. At the user's explicit request, the full review, log inventory and GPT evaluation were sent through the configured Gmail account after push. SMTP submission returned `sent` at `2026-09-06T02:11:30.783650+00:00` (10:11:30.783650 SGT), Message-ID `<178866068704.14068.993023191302042252@DESKTOP-3L7O2K0>`. This is submission evidence, not inbox readback.
 
 Cookie format validation now happens before compute, but cannot determine whether YouTube has revoked browser credentials. Retained yt-dlp logs report invalid cookies. A new episode still requires working authentication.
 
@@ -91,3 +91,5 @@ Paid compute remains prohibited. Eventual command: `.\mas.ps1 run 11`. The persi
 - `git diff --check`: PASS.
 - Doctor: Python, Git and rclone available; ffmpeg, ffprobe and torch missing. Docker and Bash unavailable on PATH. Static runtime/script inspection only; no Linux image build or GPU run.
 - Local schema and hash checks do not establish remote corrected-return consumption, SMTP inbox delivery, Drive readback or billing closure.
+
+Code commits `651cdff`, `cd7dafa`, `d12c46a`, `0bea93a` and report commit `a0f08f1` were pushed to `origin/main`. The notification receipt is retained in a subsequent documentation-only commit. Paid continuation remains BLOCKED on renewed explicit budget permission and missing acoustic/speaker evidence, not on local test execution.

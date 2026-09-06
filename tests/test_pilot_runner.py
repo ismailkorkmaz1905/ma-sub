@@ -14,6 +14,48 @@ def account(balance=3.75):
             "isAutoPayEnabled": False}
 
 
+def test_provider_identifies_client_without_exposing_key(monkeypatch):
+    import io
+    import urllib.request
+    from mas.subtitle.pilot_runner import RunPodPilotProvider
+
+    def respond(request, timeout):
+        assert request.get_header("User-agent") == "ma-sub-pilot/1.0"
+        assert request.get_header("Accept") == "application/json"
+        assert timeout == 7
+        return io.BytesIO(b'{"data":{"myself":{"clientBalance":3.7}}}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", respond)
+    assert RunPodPilotProvider("pod", "private-test-key").account(7)["clientBalance"] == 3.7
+
+
+def test_provider_accepts_empty_successful_start_response(monkeypatch):
+    import io
+    import urllib.request
+    from mas.subtitle.pilot_runner import RunPodPilotProvider
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *args, **kwargs: io.BytesIO(b""))
+    assert RunPodPilotProvider("pod", "private-test-key").start(7) == {}
+    with pytest.raises(IntegrityError, match="JSONDecodeError"):
+        RunPodPilotProvider("pod", "private-test-key").pod(7)
+
+
+def test_provider_http_failure_preserves_safe_reason_only(monkeypatch):
+    import io
+    import urllib.request
+    import urllib.error
+    from mas.subtitle.pilot_runner import RunPodPilotProvider, PilotProviderError
+
+    def fail(*args, **kwargs):
+        raise urllib.error.HTTPError('https://example/?key=secret', 500, 'secret', {},
+                                     io.BytesIO(b'not enough free GPUs; secret'))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    with pytest.raises(PilotProviderError) as raised:
+        RunPodPilotProvider("pod", "private-test-key").start(7)
+    assert raised.value.safe_details == {"http_status": 500, "category": "capacity", "method": "POST"}
+    assert "secret" not in str(raised.value)
+
+
 def pod(status="EXITED"):
     return {"costPerHr": 0.74, "desiredStatus": status}
 

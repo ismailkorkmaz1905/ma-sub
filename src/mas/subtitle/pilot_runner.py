@@ -16,16 +16,36 @@ from pathlib import Path
 from ..reliability import IntegrityError, atomic_json, digest, file_digest
 
 
+class PilotProviderError(IntegrityError):
+    def __init__(self, details):
+        self.safe_details = details
+        super().__init__("RunPod provider request failed: " + json.dumps(details, sort_keys=True))
+
+
 class RunPodPilotProvider:
     def __init__(self, pod_id, api_key):
         self.pod_id, self.api_key = pod_id, api_key
 
     def _json(self, request, timeout):
+        request.add_header("User-Agent", "ma-sub-pilot/1.0")
+        request.add_header("Accept", "application/json")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.load(response)
+                payload = response.read()
+                if not payload and request.get_method() in ("POST", "DELETE"):
+                    return {}
+                return json.loads(payload)
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read(4096).decode("utf-8", "replace").lower()
+            except OSError:
+                detail = ""
+            category = "capacity" if "not enough free gpu" in detail else "http_error"
+            raise PilotProviderError({"http_status": exc.code, "category": category,
+                                      "method": request.get_method()}) from None
         except (OSError, ValueError) as exc:
-            raise IntegrityError("RunPod provider request failed") from None
+            raise PilotProviderError({"error_type": type(exc).__name__,
+                                      "method": request.get_method()}) from None
 
     def account(self, timeout=15):
         query = json.dumps({"query": "query { myself { clientBalance currentSpendPerHr isAutoPayEnabled } }"}).encode()

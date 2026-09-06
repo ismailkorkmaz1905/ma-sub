@@ -89,7 +89,23 @@ def test_network_failure_after_ready_triggers_stop(tmp_path):
     provider.account = account
     receipt = guard_lease(path, provider)
     assert receipt["trigger"] == "guardian_error"
-    assert provider.actions == ["start", "stop", "wait"]
+    assert provider.actions == ["stop", "wait"]
+    assert receipt["error_details"]["operation"] == "pre_start_revalidation"
+
+
+def test_balance_change_after_ready_prevents_start(tmp_path):
+    path = tmp_path / "guardian-state.json"
+    state(path, parent_pid=os.getpid(), stop_at=time.time() + 60)
+    saved = json.loads(path.read_text())["data"]
+    request = {"format": "mas-pilot-guardian-start-1", "state_sha256": digest(saved),
+               "pod_id": "pod-safe"}
+    atomic_json(tmp_path / "guardian-start.json", {"data": request, "sha256": digest(request)})
+    provider = Provider()
+    balances = iter([2.0, 1.05, 1.05])
+    provider.account = lambda timeout=10: {"clientBalance": next(balances)}
+    receipt = guard_lease(path, provider)
+    assert provider.actions == ["stop", "wait"]
+    assert receipt["error_details"]["operation"] == "pre_start_revalidation"
 
 
 def test_arm_waits_for_ready_and_overrides_stale_child_pod_env(tmp_path, monkeypatch):

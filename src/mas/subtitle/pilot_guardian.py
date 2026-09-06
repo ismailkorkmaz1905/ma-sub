@@ -101,6 +101,8 @@ def guard_lease(state_path, provider, *, clock=time.time, monotonic=time.monoton
              "observed_epoch": clock()}
     atomic_json(ready_path, {"data": ready, "sha256": digest(ready)})
     next_cost_check = 0.0
+    error_details = None
+    operation = "await_start_request"
     try:
         while not start_path.exists():
             if not _pid_alive(body["parent_pid"]):
@@ -121,13 +123,25 @@ def guard_lease(state_path, provider, *, clock=time.time, monotonic=time.monoton
                 raise IntegrityError("pilot guardian start request mismatch")
             if not _pid_alive(body["parent_pid"]) or clock() >= body["stop_at_epoch"]:
                 raise IntegrityError("pilot guardian lease expired before start")
+            operation = "pre_start_revalidation"
+            account, current_pod = provider.account(10), provider.pod(10)
+            if (current_pod.get("id") != body["pod_id"]
+                    or current_pod.get("desiredStatus") != "EXITED"
+                    or _provider_amount(current_pod.get("costPerHr"), "Pod rate") > body["maximum_pod_rate_usd_per_hour"]
+                    or _provider_amount(account.get("clientBalance"), "balance") <= body["minimum_balance_usd"]):
+                raise IntegrityError("pilot guardian pre-start revalidation failed")
+            if not _pid_alive(body["parent_pid"]) or clock() >= body["stop_at_epoch"]:
+                raise IntegrityError("pilot guardian lease expired during revalidation")
+            operation = "provider_start"
             provider.start(min(15, max(0.001, body["stop_at_epoch"] - clock())))
+            operation = "observe_started_pod"
             started_pod = provider.pod(10)
             started = {"format": "mas-pilot-guardian-started-1", "state_sha256": state_sha256,
                        "pod_id": body["pod_id"], "pod": _safe_pod(started_pod),
                        "observed_epoch": clock()}
             atomic_json(started_path, {"data": started, "sha256": digest(started)})
         while trigger is None:
+            operation = "monitor_lease"
             if clock() >= next_cost_check:
                 account, current_pod = provider.account(10), provider.pod(10)
                 if (_provider_amount(account.get("clientBalance"), "balance") <= body["minimum_balance_usd"]
@@ -147,8 +161,10 @@ def guard_lease(state_path, provider, *, clock=time.time, monotonic=time.monoton
                 trigger = "lease_deadline"
                 break
             sleep(min(body["poll_seconds"], max(0.01, body["stop_at_epoch"] - clock())))
-    except Exception:
+    except Exception as exc:
         trigger = "guardian_error"
+        error_details = {"operation": operation, "error_type": type(exc).__name__,
+                         "provider": getattr(exc, "safe_details", None)}
     shutdown_error = None
     if trigger != "externally_confirmed_exit":
         shutdown_deadline = monotonic() + body["shutdown_timeout_seconds"]
@@ -165,6 +181,7 @@ def guard_lease(state_path, provider, *, clock=time.time, monotonic=time.monoton
     except Exception:
         balance = None
     receipt = {"format": "mas-pilot-guardian-receipt-1", "trigger": trigger,
+               "error_details": error_details,
                "state_sha256": state_sha256, "pod_id": body["pod_id"],
                "pod": _safe_pod(pod),
                "balance_usd": balance, "shutdown_error": shutdown_error,

@@ -1806,6 +1806,46 @@ def _resolve_alignment_overlaps(
             return
         options[uid].append((mode, words))
 
+    def select_component(component_uids: Sequence[str]) -> bool:
+        option_sets = [options[uid] for uid in component_uids]
+        outside_words = [
+            word
+            for uid, words in selected.items()
+            if uid not in component_uids
+            for word in words
+        ]
+        best: tuple[Any, ...] | None = None
+        best_joint_count = -1
+        for combination in itertools.product(*option_sets):
+            trial_words = [word for _, words in combination for word in words]
+            if _unsafe_word_overlaps(trial_words):
+                continue
+            trial_start = min(int(word["start_ms"]) for word in trial_words)
+            trial_end = max(int(word["end_ms"]) for word in trial_words)
+            nearby = [
+                word
+                for word in outside_words
+                if int(word["end_ms"]) > trial_start
+                and int(word["start_ms"]) < trial_end
+            ]
+            boundary_overlaps = [
+                overlap
+                for overlap in _unsafe_word_overlaps(nearby + trial_words)
+                if str(overlap[0]["utterance_uid"]) in component_uids
+                or str(overlap[1]["utterance_uid"]) in component_uids
+            ]
+            if boundary_overlaps:
+                continue
+            joint_count = sum(mode == "joint" for mode, _ in combination)
+            if joint_count > best_joint_count:
+                best = combination
+                best_joint_count = joint_count
+        if best is None:
+            return False
+        for uid, (_, words) in zip(component_uids, best):
+            selected[uid] = words
+        return True
+
     adaptive_candidate_count = 0
     for component_index, component_uids in enumerate(initial_components, start=1):
         group = [by_uid[uid] for uid in component_uids]
@@ -1875,6 +1915,8 @@ def _resolve_alignment_overlaps(
                     adaptive_candidate_count += 1
         except Exception:
             pass
+        if select_component(component_uids):
+            continue
         for item in group:
             uid = str(item["utterance_uid"])
             for padding_ms in (400, 300, 200, 100, 0):
@@ -1907,6 +1949,7 @@ def _resolve_alignment_overlaps(
                     continue
                 add_option(uid, f"padding-{padding_ms}", words)
                 adaptive_candidate_count += 1
+        select_component(component_uids)
 
     anchors: list[int] = []
     for item in source:
@@ -1918,9 +1961,12 @@ def _resolve_alignment_overlaps(
         (anchors[position - 1] + anchors[position]) // 2
         for position in range(1, len(anchors))
     ]
+    residual_before_partition = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
     conflict_uids = {
         str(word["utterance_uid"])
-        for overlap in initial_overlaps
+        for overlap in residual_before_partition
         for word in overlap
     }
     partition_uids = set(conflict_uids)

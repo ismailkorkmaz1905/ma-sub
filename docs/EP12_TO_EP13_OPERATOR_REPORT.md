@@ -1,10 +1,6 @@
-> FINAL CLEANUP STATE, 2026-09-06: The local encoder and upload waiter were stopped on user request because the PC became overloaded. No complete burned MP4 or new Drive delivery exists. Both temporary MP4 Pods were externally ABSENT; last balance USD 3.1442612121, retained Pod EXITED, volume preserved. All older active-job statements below are historical. Native terminal works. Full local suite: 742 passed, 5 skipped in 217.43 seconds. No perceptual quality acceptance is claimed.
+> DELIVERY COMPLETE, 2026-09-06: Episode 12 1080p H.264/AAC MP4 with Indonesian subtitles burned in is complete and published. Drive object 1FAkmN0Z9HWcRrbfOT8C-ftmSXXiDdA2I was fully read before and after metadata-only rename: both actual reads match 8,978,040,872 bytes and SHA-256 3069df576bcf5d9ec88b1176ed3f016c2f210e511adcd216d38bf4b021f22675. Transport PASS; subtitle/perceptual quality remains REVIEW_REQUIRED. All owned MP4 Pods are externally ABSENT, retained Pod EXITED, volume preserved. Last balance USD 2.8764311039 at 14:01 UTC. No active GPU, encoder or delivery job remains.
 >
-> Previous `var/` and `EPISODES/` evidence is now under `C:/Users/Ismail/CodeBase/ma-sub-archive-20260906/`. Generated media/model caches (405 files, 5,661,294,122 bytes) were moved to Windows Recycle Bin; source MKV, final review subtitles/MKV and compact evidence remain archived. See [plain-language outcome and Episode 13 checklist](SON_DURUM_VE_BOLUM_13.md). Episode 13 has not started. Do not launch heavy local encoding. The next remote job needs a successful short connectivity/encoding check first.
-
-# Latest delivery update, 2026-09-06
-
-The user authorized a high-quality 1080p Indonesian burned-in MP4 with a 12:40 UTC deadline. Stage-10 local QSV work is active under `var/ep12-delivery-20260906T121211Z` and is not complete. A fresh NVENC attempt is active under `var/ep12-delivery-20260906T122631Z`. The earlier GPU alignment Pod `hvapadbtpxaz5j` failed SSH after a 90-second SRT SHA check and was externally confirmed ABSENT at 12:24:59 UTC. No Drive PASS exists. The final target is the burned-in MP4; internal MKV and SRT artifacts remain evidence and must retain their source, translation, timing and QA bindings. Review quality remains REVIEW_REQUIRED until the final MP4 is locally verified and Drive byte-count/SHA-256 readback succeeds.
+> Local MP4: C:/Users/Ismail/CodeBase/ma-sub-archive-20260906/deliverables/Muhtemel Ask 12.Bolum.id.BURNED.REVIEW.mp4. Evidence: mp4-final-20260906T125824Z/recovery-complete.json under that archive. Earlier var/ and EPISODES/ paths also resolve under the archive. SSH -n -T and CUDA AV1 decode are in main; last local suite 742 passed, 5 skipped in 57.59 seconds. Pip/uv installer caches and failed video intermediates were cleaned; models, venv, sources and final artifacts preserved. Native single-stream download and direct-ID readback recovered the shared Google quota failure. Episode 13 has NOT started; use the updated desktop launcher and [plain-language report](SON_DURUM_VE_BOLUM_13.md). Earlier stopped/incomplete/active-job statements below are historical.
 
 # Episode 12 sonucu ve Episode 13 hazırlığı
 
@@ -55,8 +51,8 @@ Sıralama `src/mas/pipeline.py` ve [11 aşamalı mimari incelemesi](ELEVEN_STAGE
 | 7. forced_alignment | Tüm ham segmentlerde GPU CTC denendi; yalnız güvenilir ve yeni komşu çakışma yaratmayan adaylar alındı. | Karma CTC/ASR zamanlaması; tam strict hizalama PASS değil. |
 | 8. id_pack | Kesin cue/metin/hash bağı olan Endonezce taslak paketleri hazırlandı. | Review sözleşmesi doğrulandı; strict paketle aynı şey değil. |
 | 9. id_return | Sol çevirileri, ana agent düzeltmeleri ve hızlı okunan satırlar için kısaltmalar; bütünlük kontrolleri. | Paket bütünlüğü doğrulandı; tüm konuşmanın anlam doğruluğu dinleyerek kabul edilmedi. |
-| 10. finalize | Ayrı REVIEW SRT'ler; satır/süre/okuma hızı bayrakları ve softsub MKV doğrulaması. | Son dosya kanıtları aşağıda; kalite bayrakları gizlenmez. |
-| 11. drive_readback | Eski nesneler envanterlendi; benzersiz REVIEW hedefine ilk upload denendi. | BLOCKED: Google ortak istemci dakika kotası, HTTP 403. Remote byte/SHA PASS yok. |
+| 10. finalize | REVIEW SRT/MKV kanıtları ve tam 1080p gömülü altyazılı MP4 tamamlandı. | Görüntü/süre/codec kontrolleri geçti; dinleyerek kalite kabulü yok. |
+| 11. drive_readback | MP4 yüklendi; son adlandırmadan önce ve sonra tam dosya geri okundu. | Transport PASS: 8.978.040.872 byte ve SHA-256 eşleşti. Kalite REVIEW_REQUIRED. |
 
 Gmail ve RunPod kapanışı bu adımlara eşlik eden işlerdir. Gmail `550 5.4.5 Daily user sending limit exceeded` hatası nedeniyle sonraki bildirimleri kabul etmedi. Bu aşamalar yerelde BLOCKED olarak kaydedildi; gönderildi denmedi.
 

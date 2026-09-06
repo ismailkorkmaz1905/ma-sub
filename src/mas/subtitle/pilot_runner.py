@@ -10,6 +10,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..reliability import IntegrityError, atomic_json, digest, file_digest
@@ -121,6 +122,8 @@ def lease_preflight(account, pod, plan):
 
 def convert_source_flac(source_flac, output_wav, provenance_path, *, ffmpeg="ffmpeg"):
     source_flac, output_wav = Path(source_flac), Path(output_wav)
+    started_at = datetime.now(timezone.utc).isoformat()
+    started_monotonic = time.monotonic()
     before = file_digest(source_flac)
     if output_wav.exists() or Path(provenance_path).exists():
         raise IntegrityError("conversion output exists; preserve it and choose a new path")
@@ -134,6 +137,7 @@ def convert_source_flac(source_flac, output_wav, provenance_path, *, ffmpeg="ffm
     version = subprocess.run([ffmpeg, "-version"], check=True, capture_output=True,
                              text=True, timeout=15).stdout.splitlines()[0]
     body = {"format": "mas-pilot-source-conversion-1", "source_path": str(source_flac.resolve()),
+            "started_at": started_at, "elapsed_seconds": time.monotonic() - started_monotonic,
             "source_sha256": before, "source_bytes": source_flac.stat().st_size,
             "output_path": str(output_wav.resolve()), "output_sha256": file_digest(output_wav),
             "output_bytes": output_wav.stat().st_size, "ffmpeg_version": version,
@@ -255,6 +259,7 @@ def run_bounded_pilot(provider, command, progress_path, artifact_paths, output_d
 
     started = False
     result = None
+    guardian = None
     stage = "preflight"
     try:
         record("preflight", "START", {})
@@ -265,9 +270,22 @@ def run_bounded_pilot(provider, command, progress_path, artifact_paths, output_d
         record("startup", "START", {"timeout_seconds": plan.startup_timeout_seconds})
         account, pod = provider.account(), provider.pod()
         lease = lease_preflight(account, pod, plan)
+        if isinstance(provider, RunPodPilotProvider):
+            from .pilot_guardian import GuardianProcess
+            guardian = GuardianProcess(
+                output_dir, provider.pod_id,
+                time.time() + plan.startup_timeout_seconds + plan.requested_work_seconds
+                + plan.artifact_reserve_seconds + math.ceil(8 * plan.notification_timeout_seconds),
+                plan.shutdown_reserve_seconds, lease["minimum_final_balance_usd"],
+                lease["pod_rate_usd_per_hour"])
+            startup_deadline = time.monotonic() + plan.startup_timeout_seconds
+            guardian.arm(provider.api_key, timeout=max(0.001, startup_deadline - time.monotonic()))
         started = True
-        startup_deadline = time.monotonic() + plan.startup_timeout_seconds
-        provider.start(plan.startup_timeout_seconds)
+        if guardian is not None:
+            guardian.start(max(0.001, startup_deadline - time.monotonic()))
+        else:
+            startup_deadline = time.monotonic() + plan.startup_timeout_seconds
+            provider.start(max(0.001, startup_deadline - time.monotonic()))
         running = provider.wait_running(max(0.001, startup_deadline - time.monotonic()))
         if running.get("desiredStatus") != "RUNNING":
             raise IntegrityError("external observer did not confirm RUNNING")
@@ -313,6 +331,8 @@ def run_bounded_pilot(provider, command, progress_path, artifact_paths, output_d
                            "events_sha256": file_digest(output_dir / "events.json")}
                 atomic_json(output_dir / "shutdown-receipt.json",
                             {"data": receipt, "sha256": digest(receipt)})
+                if guardian is not None:
+                    guardian.disarm_after_exit(max(0.001, shutdown_deadline - time.monotonic()))
             except Exception as exc:
                 record("shutdown", "FAIL", {"error_type": type(exc).__name__, "error": str(exc)})
                 raise

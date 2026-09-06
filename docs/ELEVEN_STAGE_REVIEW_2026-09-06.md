@@ -120,3 +120,5 @@ Fix direction: derive a definitely different timestamp from the saved value (for
 5. Only after Episode 11 pilot review, assess authorization/readiness for a fresh episode against the four-hour target. Episode 12 remains out of scope now.
 
 The review does not implement these changes. The pilot is blocked by source/model/runtime access, not merely by the former USD 0.50 ceiling. A larger spending allowance alone does not remove those prerequisites.
+
+Report delivery: review commit `b9f2240` was pushed to main. The full review and Sol execution record were submitted through configured Gmail SMTP, which returned `sent` with Message-ID `<178866435238.11016.12288491156374941672@DESKTOP-3L7O2K0>`. This is SMTP acceptance, not inbox/read confirmation.

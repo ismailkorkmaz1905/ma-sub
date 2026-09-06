@@ -4,6 +4,16 @@
 
 # Astra handoff
 
+Latest Episode 13 takeover, 2026-09-07 Singapore: [preflight evidence and exact
+remaining work](EP13_RUN_2026-09-07.md). BLOCKED_SOURCE_URL; operator was asked
+for the official full-episode link. No paid compute or download started. External
+inventory shows only retained Pod 781ct55zv4gkle EXITED and volume xgogcmey5o
+50 GB. Balance observed at 2026-09-06 17:12:38 UTC: 2.8569866595 USD. SMTP quota
+retry fix 8f2891b passed 744 local tests, 5 skipped; one status email was accepted.
+Resume through `.\mas.ps1 run 13` only after the report's source, owned temporary
+Pod, budget and sample prerequisites. Episode 12 remains unchanged. Earlier
+Episode 11/12 next-action instructions below are historical.
+
 Current pilot result, 2026-09-06: [five-clip Episode 11 ASR/SRT evidence](EP11_PILOT_RESULT_2026-09-06.md) supersedes runtime-only pilot status. Five real clips completed CUDA ASR; the final 54-cue draft remains REVIEW_REQUIRED with unresolved timing/readability/speaker review and no perceptual listening. Episode 12 was not started. Current blocker is acoustic/text acceptance of the produced candidate, not missing ASR output. Use its local `review.html` and retained raw evidence; the linked report gives the exact local replay command. Do not start another Pod merely to regenerate the draft. All five new pilot Pods were externally verified ABSENT; retained Pod 781ct55zv4gkle remains EXITED and volume xgogcmey5o is preserved. Gmail is blocked by its daily sending quota. Local cue repair has 706 passing tests, 5 skipped; no CI, acoustic or delivery PASS is implied. No new independent review round is requested by this continuation.
 
 Current override, 2026-09-06: [Astra review](ASTRA_REVIEW_2026-09-06.md) supersedes the historical status and resume instructions below. Local repairs are not Episode 11 completion. Missing production speaker evidence and stale review binding remain blockers. No paid compute or Drive mutation without renewed explicit permission.

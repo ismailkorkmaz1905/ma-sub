@@ -1977,11 +1977,25 @@ def _resolve_alignment_overlaps(
         if math.prod(len(option_set) for option_set in option_sets) > 200_000:
             component_uids = list(seed_uids)
             option_sets = [options[uid] for uid in component_uids]
+        envelope_start = min(
+            int(word["start_ms"])
+            for option_set in option_sets
+            for _, words in option_set
+            for word in words
+        )
+        envelope_end = max(
+            int(word["end_ms"])
+            for option_set in option_sets
+            for _, words in option_set
+            for word in words
+        )
         outside_words = [
             word
             for uid, words in selected.items()
             if uid not in component_uids
             for word in words
+            if int(word["end_ms"]) > envelope_start
+            and int(word["start_ms"]) < envelope_end
         ]
         best: tuple[Any, ...] | None = None
         best_score: tuple[int, int, int] | None = None

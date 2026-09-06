@@ -176,6 +176,17 @@ def main(argv=None):
     doctor_parser.add_argument("--strict-runpod", action="store_true")
     commands.add_parser("test")
     commands.add_parser("notify-test")
+    pilot_parser = commands.add_parser("subtitle-pilot")
+    pilot_parser.add_argument("episode", type=int)
+    pilot_parser.add_argument("--pack")
+    pilot_parser.add_argument("--uid", action="append", default=[])
+    pilot_parser.add_argument("--audio")
+    pilot_parser.add_argument("--evidence")
+    pilot_parser.add_argument("--model-dir")
+    pilot_parser.add_argument("--diarization-model-dir")
+    pilot_parser.add_argument("--source-sha256")
+    pilot_parser.add_argument("--source-audio")
+    pilot_parser.add_argument("--offset-ms", type=int, default=0)
     review_audio_parser = commands.add_parser("review-audio")
     review_audio_parser.add_argument("episode", type=int)
     clean_parser = commands.add_parser("clean")
@@ -198,6 +209,9 @@ def main(argv=None):
                 result = test()
             elif args.command == "notify-test":
                 result = notify_test()
+            elif args.command == "subtitle-pilot":
+                from .subtitle.pilot_command import run_pilot_command
+                result = run_pilot_command(args)
             elif args.command == "review-audio":
                 result = run_audio_review_ui(args.episode)
             else:
@@ -208,14 +222,16 @@ def main(argv=None):
         except Exception as exc:
             if run_log:
                 run_log.record_exception()
-            if getattr(args, "episode", None) and _should_notify_run_failure(exc):
+            if args.command != "subtitle-pilot" and getattr(args, "episode", None) and _should_notify_run_failure(exc):
                 details = f"Sonuç: çalıştırma tamamlanamadı.\nHata: {type(exc).__name__}: {exc}"
                 if run_log:
                     details += f"\nLog: {run_log.path}"
                 details += f"\nSonraki adım: logu inceleyip ./mas run {args.episode} komutuyla güvenli devam edin."
                 notify(args.episode, "çalıştırma başarısız", details)
             print(f"FAILED STAGE: {args.command.upper()}\nCAUSE: {exc}\nCHECKPOINT PRESERVED: yes", file=sys.stderr)
-            if getattr(args, "episode", None):
+            if args.command == "subtitle-pilot":
+                print("PILOT ONLY: no automatic full-run retry; inspect preserved evidence", file=sys.stderr)
+            elif getattr(args, "episode", None):
                 print(f"SAFE RETRY:\n./mas run {args.episode}", file=sys.stderr)
             if run_log:
                 run_log.finish(1)

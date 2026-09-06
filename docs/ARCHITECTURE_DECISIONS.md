@@ -58,6 +58,10 @@ Successful alignment calls are journaled under exact transcript/options, audio h
 
 The controller's default 14,400-second wall deadline is anchored to the earliest retained episode start and a checksum-bound persisted origin. Restarting does not reset it. Precompute and network waits share the remaining allowance; bounded shutdown/diagnostic grace remains available after expiry. Extending the total allowance requires operator approval, not deletion of history. This is a wall-time guard, not a GPU billing measurement or a demonstrated four-hour performance result.
 
+## ADR-015: Evaluate cue drafts without relabeling strict evidence
+
+The user authorized a natural cue-based workflow pilot on Episode 11 before Episode 12. `subtitle-pilot` preserves estimated speech intervals and separate speaker text, persists raw ASR/diarization independently, and emits a review-required draft. It never represents estimated timestamps as verified CTC evidence or publishes into strict paths. Existing strict contracts remain unchanged pending measured acoustic review and explicit consumer migration. See [pilot scope](SUBTITLE_PILOT.md). No full-run or four-hour acceptance follows from synthetic tests.
+
 ## Provider references (historical)
 
 - [RunPod Stop a Pod REST API](https://docs.runpod.io/api-reference/pods/POST/pods/podId/stop)

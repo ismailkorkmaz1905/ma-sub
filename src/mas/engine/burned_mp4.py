@@ -239,31 +239,37 @@ def qualify_encoding(source_video, output_dir, *, encoder='h264_nvenc', target_s
     return receipt_path
 
 
-def _tree_bytes(root, timeout_seconds=60):
+def _tree_bytes(root, timeout_seconds=180):
     total = 0
     seen = set()
     deadline = time.monotonic() + timeout_seconds
-    def failed(error):
-        raise error
-    for base, dirs, files in os.walk(root, followlinks=False, onerror=failed):
+    pending = [os.fspath(root)]
+    while pending:
         if time.monotonic() > deadline:
             raise TimeoutError('Network volume usage inspection exceeded its time bound')
-        dirs[:] = [name for name in dirs if not (Path(base) / name).is_symlink()]
-        for name in files:
-            if time.monotonic() > deadline:
-                raise TimeoutError('Network volume usage inspection exceeded its time bound')
-            path = Path(base) / name
-            if not path.is_symlink():
-                stat = path.stat()
-                identity = (stat.st_dev, stat.st_ino)
-                if identity not in seen:
-                    seen.add(identity)
-                    total += stat.st_size
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if time.monotonic() > deadline:
+                    raise TimeoutError('Network volume usage inspection exceeded its time bound')
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                    continue
+                if entry.is_file(follow_symlinks=False):
+                    stat = entry.stat(follow_symlinks=False)
+                    if not stat.st_ino:
+                        stat = os.stat(entry.path, follow_symlinks=False)
+                    identity = (stat.st_dev, stat.st_ino)
+                    if identity not in seen:
+                        seen.add(identity)
+                        total += stat.st_size
     return total
 
 
 def inspect_encoding_storage(path, *, network_volume_root=None, network_volume_quota_bytes=None,
-                             usage_timeout_seconds=60):
+                             usage_timeout_seconds=180):
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(path)
@@ -279,10 +285,12 @@ def inspect_encoding_storage(path, *, network_volume_root=None, network_volume_q
             raise ValueError('Declared network volume requires its actual quota in bytes')
         if not 0 < usage_timeout_seconds <= 300:
             raise ValueError('Network volume usage inspection requires a bounded timeout')
+        scan_started = time.monotonic()
         actual = _tree_bytes(root, usage_timeout_seconds)
         result.update({'network_volume_root': str(root), 'network_volume_quota_bytes': network_volume_quota_bytes,
                        'network_volume_used_bytes': actual,
-                       'network_volume_free_bytes': max(0, network_volume_quota_bytes - actual)})
+                       'network_volume_free_bytes': max(0, network_volume_quota_bytes - actual),
+                       'network_volume_scan_elapsed_seconds': round(time.monotonic() - scan_started, 3)})
     return result
 
 

@@ -94,6 +94,7 @@ def test_network_volume_storage_uses_declared_quota_and_actual_tree_bytes(tmp_pa
                                       network_volume_quota_bytes=100)
     assert result['network_volume_used_bytes'] == 9
     assert result['network_volume_free_bytes'] == 91
+    assert result['network_volume_scan_elapsed_seconds'] >= 0
     with pytest.raises(ValueError, match='actual quota'):
         inspect_encoding_storage(tmp_path, network_volume_root=tmp_path)
 
@@ -107,10 +108,23 @@ def test_network_volume_usage_deduplicates_hardlinks_and_surfaces_stat_error(tmp
     except OSError:
         pytest.skip('hardlinks unavailable')
     assert _tree_bytes(tmp_path) == 5
-    original = Path.stat
-    monkeypatch.setattr(Path, 'stat', lambda self, *args, **kwargs:
-                        (_ for _ in ()).throw(PermissionError('denied'))
-                        if self.name == 'first' else original(self, *args, **kwargs))
+    original = os.scandir
+    class Entry:
+        def __init__(self, entry):
+            self.entry = entry
+            self.name, self.path = entry.name, entry.path
+        def is_symlink(self): return self.entry.is_symlink()
+        def is_dir(self, **kwargs): return self.entry.is_dir(**kwargs)
+        def is_file(self, **kwargs): return self.entry.is_file(**kwargs)
+        def stat(self, **kwargs):
+            if self.name == 'first':
+                raise PermissionError('denied')
+            return self.entry.stat(**kwargs)
+    class Scan:
+        def __init__(self, path): self.scan = original(path)
+        def __enter__(self): return [Entry(entry) for entry in self.scan.__enter__()]
+        def __exit__(self, *args): return self.scan.__exit__(*args)
+    monkeypatch.setattr(os, 'scandir', Scan)
     with pytest.raises(PermissionError, match='denied'):
         _tree_bytes(tmp_path)
 

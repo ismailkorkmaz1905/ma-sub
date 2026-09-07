@@ -156,6 +156,7 @@ class RunPodClient:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
+            "User-Agent": "ma-sub-pilot/1.0",
         }
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")

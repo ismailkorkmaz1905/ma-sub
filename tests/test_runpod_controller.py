@@ -76,6 +76,7 @@ def test_client_uses_bounded_authenticated_rest_request(monkeypatch):
     def open_request(request, timeout):
         captured["url"] = request.full_url
         captured["authorization"] = request.headers["Authorization"]
+        captured["user_agent"] = request.get_header("User-agent")
         captured["timeout"] = timeout
         return _Response({"desiredStatus": "EXITED"})
 
@@ -85,6 +86,7 @@ def test_client_uses_bounded_authenticated_rest_request(monkeypatch):
     assert captured == {
         "url": "https://rest.runpod.io/v1/pods/pod123",
         "authorization": "Bearer secret",
+        "user_agent": "ma-sub-pilot/1.0",
         "timeout": 7,
     }
 

@@ -705,14 +705,23 @@ def test_local_preflight_rejects_malformed_cookie_before_compute(monkeypatch, tm
                                             "MAS_YTDLP_COOKIES": str(cookie)})
 
 
-@pytest.mark.parametrize("failure", ["start_response", "shutdown_get", "readiness",
-                                     "malformed_json", "non_object_json"])
-def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_path, failure):
+@pytest.mark.parametrize("failure", [RuntimeError("response lost"), TimeoutError("work expired"),
+                                     KeyboardInterrupt()])
+def test_session_failure_releases_owned_lease(monkeypatch, tmp_path, failure):
     key = tmp_path / "key"
     cookie = tmp_path / "cookie"
     config = tmp_path / "rclone.conf"
     for path in (key, cookie, config):
         path.write_text("value", encoding="utf-8")
+    key.with_suffix(".pub").write_text("ssh-ed25519 test", encoding="utf-8")
+    quote_path = tmp_path / "storage-quote.json"
+    quote = {"observed_at_utc": datetime.now(timezone.utc).isoformat(),
+             "source_url": "https://docs.runpod.io/pods/storage/types",
+             "network_volume_usd_per_gb_month": 0.07,
+             "container_storage_usd_per_gb_month": 0.10}
+    quote_path.write_text(json.dumps({"data": quote,
+                                      "sha256": runpod_controller.digest(quote)}), encoding="utf-8")
+    monkeypatch.setenv("MAS_RUNPOD_STORAGE_QUOTE", str(quote_path))
     values = {
         "RUNPOD_POD_ID": "pod123",
         "RUNPOD_API_KEY": "api",
@@ -724,49 +733,40 @@ def test_start_timeout_still_stops_a_pod_that_became_running(monkeypatch, tmp_pa
         "MAS_DRIVE_STRICT_REMOTE": "gdrive:path",
     }
 
-    class Client(runpod_controller.RunPodClient):
-        def __init__(self, *args):
-            super().__init__("pod123", "secret", attempts=1)
-            self.running = False
-            self.stopped = False
+    class Provider:
+        def __init__(self, *_):
+            pass
 
-        def get(self):
-            if self.running and failure in {"malformed_json", "non_object_json"}:
-                return super().get()
-            if self.running and failure == "shutdown_get":
-                raise runpod_controller.RunPodControllerError("GET unavailable")
-            return {"desiredStatus": "RUNNING" if self.running else "EXITED"}
+        def get_pod(self, *_):
+            return {"imageName": "test-image"}
 
-        def start(self):
-            self.running = True
-            if failure != "readiness":
-                raise runpod_controller.RunPodControllerError("response lost")
+        def get_volume(self, *_):
+            return {"size": 50}
 
-        def stop(self):
-            self.running = False
-            self.stopped = True
+    events = []
 
-        def wait(self, predicate, description, *, timeout):
-            if description == "startup":
-                raise runpod_controller.RunPodControllerError("startup timed out")
-            value = self.get()
-            assert predicate(value)
-            return value
+    class Lease:
+        pod = {"id": "owned-new"}
 
-    client = Client()
-    class MalformedResponse(_Response):
-        def read(self):
-            return b"not JSON" if failure == "malformed_json" else b"[]"
-    monkeypatch.setattr(runpod_controller.urllib.request, "urlopen",
-                        lambda *a, **kw: MalformedResponse(None))
-    monkeypatch.setattr(runpod_controller, "RunPodClient", lambda *args: client)
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            events.append("acquired")
+            return self
+
+        def __exit__(self, *_):
+            events.append("externally_absent")
+
+    monkeypatch.setattr(runpod_controller, "CapacityProvider", Provider)
+    monkeypatch.setattr(runpod_controller, "CapacityLease", Lease)
+    monkeypatch.setattr(runpod_controller, "ROOT", tmp_path)
     monkeypatch.setattr(runpod_controller, "_required_environment", lambda: values)
     monkeypatch.setattr(runpod_controller, "_local_preflight", lambda values: ("a" * 40, config))
     monkeypatch.setattr(runpod_controller, "_validate_local_tr_return", lambda *_: None)
     monkeypatch.setattr(runpod_controller, "episode_dir", lambda _: tmp_path)
-    monkeypatch.setenv("MAS_RUNPOD_AUTO_MIGRATE", "1")
-    monkeypatch.setattr(runpod_controller, "_migrate_capacity_bound_pod", lambda *_: pytest.fail("non-capacity migration"))
-
-    with pytest.raises(runpod_controller.RunPodControllerError, match="response lost|startup timed out"):
+    monkeypatch.setattr(runpod_controller, "_prepare_official_source", lambda *_: "https://example.com")
+    monkeypatch.setattr(runpod_controller, "_run_remote_session", lambda *_a, **_k: (_ for _ in ()).throw(failure))
+    with pytest.raises(type(failure)):
         runpod_controller.run_remote_episode(11)
-    assert client.stopped is True
+    assert events == ["acquired", "externally_absent"]

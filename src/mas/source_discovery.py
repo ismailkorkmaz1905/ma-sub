@@ -79,7 +79,7 @@ def _list_channel_videos(cookies_file, *, idle_timeout, total_timeout):
     return entries
 
 
-def discover_episode_source(
+def discover_episode_metadata(
     episode,
     *,
     cookies_file=None,
@@ -110,4 +110,11 @@ def discover_episode_source(
         raise SourceDiscoveryError(
             f"multiple exact full episode {episode} sources were found on the official channel"
         )
-    return urls.pop()
+    url = urls.pop()
+    return {"episode": episode, "url": url, "title": matches[0]["title"],
+            "channel_url": CHANNEL_VIDEOS_URL}
+
+
+def discover_episode_source(episode, *, cookies_file=None, idle_timeout=30, total_timeout=300):
+    return discover_episode_metadata(episode, cookies_file=cookies_file,
+                                     idle_timeout=idle_timeout, total_timeout=total_timeout)["url"]

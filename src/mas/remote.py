@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 
@@ -140,7 +141,8 @@ class _RcloneProgress:
         return advanced
 
 
-def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600):
+def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600,
+                    preservation_receipt=None):
     deadline = time.monotonic() + total_timeout
 
     def remaining():
@@ -157,10 +159,50 @@ def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600):
     if not shutil.which("rclone"):
         raise RemoteVerificationError("rclone is required for Drive upload verification")
     expected_size, expected_sha = _file_signature(path, deadline=deadline)
-    partial = remote + f".partial-{os.getpid()}"
+    partial = remote + f".partial-{uuid.uuid4().hex}"
     common = ["--contimeout", "30s", "--timeout", "2m", "--retries", "3",
               "--low-level-retries", "3", "--stats", "10s", "--use-json-log",
               "--stats-log-level", "NOTICE"]
+    if preservation_receipt is not None:
+        from .reliability import atomic_json
+        parent, filename = remote.rsplit("/", 1)
+        _run_watchdog(["rclone", "mkdir", parent, *common],
+                      idle_timeout=idle_timeout, total_timeout=remaining())
+        listing = json.loads(_run_watchdog(
+            ["rclone", "lsjson", parent, "--files-only", "--max-depth", "1", *common],
+            idle_timeout=idle_timeout, total_timeout=remaining()))
+        matches = [item for item in listing if item.get("Name") == filename]
+        if len(matches) > 1:
+            raise RemoteVerificationError("ambiguous duplicate Drive filename; preserve all objects")
+        prior = None
+        if matches:
+            old_size, old_sha = _remote_signature(
+                ["rclone", "cat", remote, *common], idle_timeout=idle_timeout,
+                total_timeout=remaining())
+            prior = {"remote": remote, "bytes": old_size, "sha256": old_sha,
+                     "object_id": matches[0].get("ID")}
+        evidence = {"destination": remote, "prior": prior, "status": "INVENTORIED"}
+        # Each attempt keeps its own inventory, including failures after a remote move.
+        evidence_path = Path(preservation_receipt)
+        attempt_path = evidence_path.with_name(evidence_path.stem + "-" + uuid.uuid4().hex + ".json")
+        atomic_json(attempt_path, evidence)
+        atomic_json(evidence_path, evidence)
+        if prior and (old_size, old_sha) == (expected_size, expected_sha):
+            return {"bytes": expected_size, "sha256": expected_sha, "remote": remote}
+        if prior:
+            retained = f"{parent}/.retained/{old_sha}-{uuid.uuid4().hex}/{filename}"
+            evidence.update(status="PRESERVATION_PLANNED", retained_remote=retained)
+            atomic_json(attempt_path, evidence)
+            atomic_json(evidence_path, evidence)
+            _run_watchdog(["rclone", "moveto", remote, retained, "--immutable", *common],
+                          idle_timeout=idle_timeout, total_timeout=remaining())
+            preserved = _remote_signature(["rclone", "cat", retained, *common],
+                                          idle_timeout=idle_timeout, total_timeout=remaining())
+            if preserved != (old_size, old_sha):
+                raise RemoteVerificationError("retained Drive byte/SHA-256 readback mismatch")
+            evidence["status"] = "PRESERVED"
+            atomic_json(attempt_path, evidence)
+            atomic_json(evidence_path, evidence)
     _run_watchdog(["rclone", "copyto", str(path), partial, *common],
                   idle_timeout=idle_timeout, total_timeout=remaining(),
                   progress_observer=_RcloneProgress())

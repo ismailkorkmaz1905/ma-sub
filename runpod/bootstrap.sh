@@ -53,5 +53,20 @@ mkdir -p "$UV_CACHE_DIR"
 if [[ ! -x "$VENV/bin/python" ]]; then
   uv venv --python 3.11 "$VENV"
 fi
-uv pip install --python "$VENV/bin/python" --index-strategy unsafe-best-match --requirements requirements.lock
+timeout 1800 uv pip install --python "$VENV/bin/python" --index-strategy unsafe-best-match --requirements requirements.lock
+timeout 120 uv cache clean
+if [[ -n "${MAS_NETWORK_VOLUME_QUOTA_BYTES:-}" && -n "${MAS_EPISODE:-}" ]]; then
+  PYTHONPATH="$ROOT/src" "$VENV/bin/python" -c '
+import os
+from pathlib import Path
+from mas.engine.burned_mp4 import inspect_encoding_storage
+from mas.reliability import atomic_json
+evidence = inspect_encoding_storage("/workspace", network_volume_root="/workspace",
+    network_volume_quota_bytes=int(os.environ["MAS_NETWORK_VOLUME_QUOTA_BYTES"]))
+target = Path("/workspace/ma-sub/EPISODES") / ("Muhtemel Ask " + str(int(os.environ["MAS_EPISODE"])) + ".Bolum")
+atomic_json(target / "work" / "storage-preflight.json", evidence)
+if evidence["network_volume_free_bytes"] < 1000000000:
+    raise RuntimeError("Network volume has less than 1 GB available for source/audio preparation")
+'
+fi
 PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod

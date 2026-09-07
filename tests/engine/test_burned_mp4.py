@@ -85,6 +85,23 @@ def test_plan_rejects_bool_nan_duration_and_unapproved_option(tmp_path, monkeypa
         plan_encoding_settings(source)
 
 
+def test_nvenc_default_uses_target_bitrate_without_cq_and_explicit_cq_changes_identity(
+        tmp_path, monkeypatch):
+    source = tmp_path / 'source.mp4'
+    source.write_bytes(b'source')
+    monkeypatch.setattr(burned_module, '_probe', lambda _: {
+        'format': {'duration': '3600'},
+        'streams': [{'codec_type': 'video', 'codec_name': 'av1', 'pix_fmt': 'yuv420p',
+                     'width': 1920, 'height': 1080}]})
+    default, _ = plan_encoding_settings(source, encoder='h264_nvenc', target_size_gb=3.0)
+    explicit, _ = plan_encoding_settings(
+        source, encoder='h264_nvenc', target_size_gb=3.0,
+        encoder_options=['-preset', 'p4', '-rc', 'vbr', '-cq', '19'])
+    assert default['encoder_options'] == ['-preset', 'p4', '-rc', 'vbr']
+    assert '-cq' not in default['encoder_options']
+    assert explicit['identity_sha256'] != default['identity_sha256']
+
+
 def test_network_volume_storage_uses_declared_quota_and_actual_tree_bytes(tmp_path):
     (tmp_path / 'one').write_bytes(b'1234')
     nested = tmp_path / 'nested'

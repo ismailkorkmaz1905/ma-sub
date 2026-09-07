@@ -1,5 +1,9 @@
 # Episode 13 code preparation, 2026-09-07
 
+Subsequent user-authorized paid technical testing and fixes are recorded in
+[the RunPod smoke report](RUNPOD_SMOKE_2026-09-07.md). The no-paid-run statements
+below describe the initial preparation, before that separate authorization.
+
 The user confirmed Episode 13 has not been published. This work changes the
 production code, not the episode's acceptance state. Initial HEAD: `192a19b`.
 Episode 12 MP4, archived media, ignored evidence and recorded source hashes
@@ -42,8 +46,10 @@ publication was started for this preparation.
 
 Default target is **3,000,000,000 bytes**, not a hard ceiling. The video bitrate
 plan derives from source duration, subtracting the AAC 192,000 bit/second budget.
-The production encoder remains H.264 NVENC p4/VBR/CQ 19, with the derived bitrate
-instead of `-b:v 0`. There is no file-size truncation or maximum-size acceptance
+The production encoder uses H.264 NVENC p4/VBR with the derived bitrate
+instead of `-b:v 0`. The initial CQ 19 default was removed after the real smoke
+showed it overrode the size objective; explicit quality overrides remain
+available and require fresh reviewed samples. There is no file-size truncation or maximum-size acceptance
 rule. Resolution is preserved; the code does not upscale a lower-resolution
 source or silently switch GPU production to a CPU encoder.
 

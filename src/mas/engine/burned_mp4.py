@@ -15,7 +15,7 @@ from ..progress import mark_work_progress
 
 SUBTITLE_STYLE = 'FontName=Arial,FontSize=14,Outline=0.7,Shadow=0,MarginV=14,MarginL=26,MarginR=26'
 ENCODERS = {
-    'h264_nvenc': ['-preset', 'p4', '-rc', 'vbr', '-cq', '19'],
+    'h264_nvenc': ['-preset', 'p4', '-rc', 'vbr'],
     'h264_qsv': ['-preset', 'veryfast', '-global_quality', '18'],
     'libx264': ['-preset', 'fast', '-crf', '18'],
 }

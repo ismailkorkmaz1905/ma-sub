@@ -4,6 +4,14 @@
 
 # Workflow repair progress
 
+## Episode 13 preparation, 2026-09-07
+
+Episode 13 is unpublished; no paid episode run was started. The new temporary-Pod
+capacity lease, detached job monitor, soft 3 GB MP4 planning and sample gates are
+documented in [the code preparation report](EP13_CODE_PREPARATION_2026-09-07.md).
+Episode 12 artifacts remain unchanged. Earlier encoder/capacity limitations in
+this chronological log describe their respective historical commits.
+
 ## Latest Episode 12 delivery progress, 2026-09-06
 
 The user authorized a high-quality 1080p Indonesian burned-in MP4 with a 12:40 UTC deadline. Stage 10 burned-MP4 work is active under unique local QSV evidence `var/ep12-delivery-20260906T121211Z`; it is not complete. A fresh NVENC GPU attempt is active under `var/ep12-delivery-20260906T122631Z`; no Drive PASS exists. The earlier alignment Pod `hvapadbtpxaz5j` failed SSH after a 90-second SRT SHA check and was externally confirmed ABSENT at 12:24:59 UTC. Stage 11 is intended to publish only the MP4 while retaining internal MKV and SRT proof. Existing strict QA, source hashes, translation bindings and review flags remain unchanged. Do not claim final completion, quality PASS or Drive delivery before local MP4 verification and remote byte-count/SHA-256 readback.

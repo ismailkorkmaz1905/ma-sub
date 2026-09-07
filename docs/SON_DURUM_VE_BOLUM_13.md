@@ -22,6 +22,13 @@ Tarihler Singapur saatine göredir. Aşağıdaki sıra Git kayıtlarına ve ger�
 
 ## Ana programda ne değişti?
 
+2026-09-07 güncellemesi: Bölüm 13 henüz yayımlanmadı. Yaklaşık 3 GB boyut
+hedefi artık ana koda bağlı, kesin tavan değil. Geçici Pod seçimi, tek iş
+başlatma, bağlantı kopunca durumdan izleme ve örnek sahne kapıları eklendi.
+Güncel davranış, testler ve gerçek koşu önkoşulları
+[hazırlık raporunda](EP13_CODE_PREPARATION_2026-09-07.md). Aşağıdaki eski test
+sayıları ve henüz uygulanmamış ayar notları tarihsel kayıttır.
+
 - Son teslim artık Endonezce yazısı görüntünün içinde olan MP4 olacak. Türkçe ses ve kaynak çözünürlüğü korunacak.
 - Uzak bağlantı terminalden giriş beklemeyecek. AV1 görüntünün açılması da ekran kartında yapılacak; yalnız son kodlama değil.
 - Yazı sade beyaz, ince siyah kenarlı ve ekranın alt ortasında olacak. Bu seçilmiş bir görünüm; bütün sinemaların tek zorunlu standardı olduğu iddia edilmiyor.

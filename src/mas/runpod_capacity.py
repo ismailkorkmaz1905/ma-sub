@@ -85,6 +85,15 @@ class CapacityReadinessError(RuntimeError):
     pass
 
 
+def _record_create_error(attempt, exc):
+    attempt["create_error_type"] = type(exc).__name__
+    if isinstance(exc, PilotProviderError):
+        for key in ("category", "http_status", "method"):
+            value = exc.safe_details.get(key)
+            if isinstance(value, (str, int)) and not isinstance(value, bool):
+                attempt["create_provider_" + key] = value
+
+
 class CapacityPlan:
     def __init__(self, *, episode, maximum_rate_usd_per_hour,
                  gpu_type_ids=DEFAULT_GPU_TYPE_IDS,
@@ -301,6 +310,7 @@ class CapacityLease:
             try:
                 created = self.provider.create(payload, self._left(20))
             except PilotProviderError as exc:
+                _record_create_error(attempt, exc)
                 if exc.safe_details.get("category") == "capacity":
                     attempt["status"] = "UNAMBIGUOUS_NO_CREATE"
                     self._save()
@@ -309,6 +319,7 @@ class CapacityLease:
                 self._save()
                 matches = self._reconcile(name)
             except BaseException as exc:
+                _record_create_error(attempt, exc)
                 attempt["status"] = "AMBIGUOUS_RECONCILING"
                 self._save()
                 matches = self._reconcile(name)

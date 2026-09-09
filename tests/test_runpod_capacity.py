@@ -124,6 +124,25 @@ def test_unresolved_ambiguous_create_never_falls_back(tmp_path):
         lease.cleanup()
     saved = json.loads((tmp_path / "audit" / "capacity-state.json").read_text())
     assert saved["data"]["status"] in ("CREATE_REQUESTED", "AMBIGUOUS_UNRESOLVED")
+    assert saved["data"]["attempts"][0]["create_error_type"] == "TimeoutError"
+
+
+def test_ambiguous_provider_error_records_only_allowlisted_safe_details(tmp_path):
+    provider = Provider()
+    provider.create_results = [PilotProviderError({
+        "category": "http_error", "http_status": 500, "method": "POST",
+        "url": "https://example.invalid/?api_key=private-key", "message": "private-key"})]
+    with pytest.raises(IntegrityError, match="reconcile"):
+        CapacityLease(provider, BASE, tmp_path / "audit", plan(),
+                      nonce="0123456789abcdef").acquire()
+    saved_text = (tmp_path / "audit" / "capacity-state.json").read_text()
+    attempt = json.loads(saved_text)["data"]["attempts"][0]
+    assert attempt["create_error_type"] == "PilotProviderError"
+    assert attempt["create_provider_category"] == "http_error"
+    assert attempt["create_provider_http_status"] == 500
+    assert attempt["create_provider_method"] == "POST"
+    assert "private-key" not in saved_text
+    assert "url" not in attempt and "message" not in attempt
 
 
 def test_active_unrelated_pod_refuses_all_create(tmp_path):

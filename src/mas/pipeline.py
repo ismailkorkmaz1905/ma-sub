@@ -399,6 +399,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         return {"source": str(result.video_path), "sha256": digest, "resumed": result.resumed}
     _stage(state_path, state, "download", acquire)
     download = holder["download"]
+    if stop_after == 1:
+        return 75
 
     def prepare_audio():
         _source_guard(state, download.video_path)
@@ -407,6 +409,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         return {"path": str(result.audio_path), "sha256": sha256_file(result.audio_path), "resumed": result.resumed}
     _stage(state_path, state, "audio", prepare_audio)
     audio = holder["audio"]
+    if stop_after == 2:
+        return 75
 
     tr_pack = dirs["translation_input"] / f"{name}_TR_CORRECTION_PACK.zip"
     tr_text = dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip"
@@ -433,6 +437,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         return {"path": str(path), "sha256": sha256_file(path), "resumed": data.get("resumed", False)}
     _stage(state_path, state, "raw_asr", transcribe)
     raw = holder["raw"]
+    if stop_after == 3:
+        return 75
 
     def make_tr_pack():
         manifest = create_tr_correction_pack(

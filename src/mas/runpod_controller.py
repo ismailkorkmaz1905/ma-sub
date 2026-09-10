@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from .config import ROOT, episode_dir
 from .engine.tr_correction import validate_tr_correction_output
 from .id_return_preflight import preflight_local_id_return
-from .engine.download import _validated_cookie_file
+from .engine.download import _validated_cookie_file, validate_download
 from .remote import RemoteVerificationError, _run_watchdog
 from .reliability import BudgetExceeded, RunBudget, atomic_json, digest
 from .delivery import READY_FOR_DELIVERY, WAIT_MP4_SAMPLE, publish_local_delivery, safe_relative, validate_delivery
@@ -551,7 +551,17 @@ def _remote_file_signature(ssh, remote_path, *, budget=None):
     return int(match.group(1)), match.group(2).decode("ascii")
 
 
-def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host, budget=None, immutable=False):
+def _upload_episode_file_verified(
+    source,
+    remote_path,
+    *,
+    ssh,
+    scp,
+    host,
+    budget=None,
+    immutable=False,
+    transfer_timeout=300,
+):
     source = Path(source)
     expected_size = source.stat().st_size
     digest = hashlib.sha256()
@@ -587,7 +597,7 @@ def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host, budget
     _network_retry(
         scp + [str(source), f"root@{host}:{partial}"],
         idle_timeout=60,
-        total_timeout=300,
+        total_timeout=transfer_timeout,
         budget=budget,
     )
     partial_size, partial_sha256 = _remote_file_signature(ssh, partial, budget=budget)
@@ -612,6 +622,72 @@ def _upload_episode_file_verified(source, remote_path, *, ssh, scp, host, budget
             "installed episode file byte/SHA-256 readback mismatch"
         )
     return {"bytes": expected_size, "sha256": expected_sha256}
+
+
+def _upload_verified_local_source(
+    local_root,
+    remote_root,
+    source_url,
+    *,
+    ssh,
+    scp,
+    host,
+    temporary,
+    budget=None,
+):
+    source_dir = Path(local_root) / "source"
+    marker_path = source_dir / "download.done.json"
+    if not marker_path.is_file():
+        return None
+    if not validate_download(marker_path, url=source_url):
+        raise RunPodControllerError("local source checkpoint is invalid; refusing remote seed")
+
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    outputs = marker.get("outputs")
+    if not isinstance(outputs, dict) or set(outputs) - {"video", "metadata", "captions"}:
+        raise RunPodControllerError("local source checkpoint has unexpected outputs")
+
+    local_source_root = source_dir.resolve()
+    remote_outputs = {}
+    receipts = {}
+    for key, record in outputs.items():
+        if not isinstance(record, dict):
+            raise RunPodControllerError("local source checkpoint output is invalid")
+        source = Path(str(record.get("path", "")))
+        if source.is_symlink() or source.resolve().parent != local_source_root:
+            raise RunPodControllerError("local source checkpoint path is outside the source directory")
+        remote_path = f"{remote_root}/source/{source.name}"
+        receipts[key] = _upload_episode_file_verified(
+            source,
+            remote_path,
+            ssh=ssh,
+            scp=scp,
+            host=host,
+            budget=budget,
+            immutable=True,
+            transfer_timeout=1800,
+        )
+        remote_record = dict(record)
+        remote_record["path"] = remote_path
+        remote_outputs[key] = remote_record
+
+    remote_marker = dict(marker)
+    remote_marker["outputs"] = remote_outputs
+    seed_marker = Path(temporary) / "download.done.json"
+    seed_marker.write_text(
+        json.dumps(remote_marker, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    receipts["marker"] = _upload_episode_file_verified(
+        seed_marker,
+        f"{remote_root}/source/download.done.json",
+        ssh=ssh,
+        scp=scp,
+        host=host,
+        budget=budget,
+        immutable=True,
+    )
+    return receipts
 
 
 def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host, budget=None):
@@ -1230,6 +1306,22 @@ def _run_remote_session(episode, source_url, *, values, commit, rclone_config, b
             for filename in ("source.url", "official-source.json"):
                 _upload_episode_file_verified(local_root / "source" / filename,
                     f"{remote_root}/source/{filename}", ssh=ssh, scp=scp, host=host, budget=budget, immutable=True)
+            source_receipts = _upload_verified_local_source(
+                local_root,
+                remote_root,
+                source_url,
+                ssh=ssh,
+                scp=scp,
+                host=host,
+                temporary=temporary,
+                budget=budget,
+            )
+            if source_receipts is not None:
+                print(
+                    "[RUNPOD] local source seed verified: "
+                    f"video_bytes={source_receipts['video']['bytes']} "
+                    f"video_sha256={source_receipts['video']['sha256']}"
+                )
             for filename in (f"{name}_TR_TEXT_CORRECTED.zip", f"{name}_ID_TRANSLATED.zip"):
                 local_return = local_root / "translation_output" / filename
                 if local_return.is_file():

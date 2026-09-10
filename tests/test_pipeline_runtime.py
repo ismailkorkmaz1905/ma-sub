@@ -24,6 +24,36 @@ def test_offline_fixture_interruption_and_resume(tmp_path, monkeypatch):
     assert resumed["stages"]["fixture_verify"]["status"] == "pass"
 
 
+def test_production_stop_after_download_does_not_start_audio(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "episode_dir", lambda episode: tmp_path / str(episode))
+    monkeypatch.setattr(
+        pipeline,
+        "_load_configs",
+        lambda: (tmp_path, {"whisper_model": "model"}, {"canonical_names": []}, {"terms": []}),
+    )
+    monkeypatch.setattr(pipeline, "_guard_existing_source", lambda *args: None)
+    monkeypatch.setattr(pipeline, "_resolve_source_url", lambda *args: "https://example.test/13")
+
+    def download(url, source_dir, **kwargs):
+        video = source_dir / "source.mkv"
+        video.write_bytes(b"source")
+        return SimpleNamespace(video_path=video, resumed=False, captions_path=None)
+
+    monkeypatch.setattr(pipeline, "download_source", download)
+    monkeypatch.setattr(
+        pipeline,
+        "extract_audio",
+        lambda *args, **kwargs: pytest.fail("audio stage must not start"),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_stage",
+        lambda path, state, name, action: action(),
+    )
+
+    assert pipeline.run(13, stop_after=1) == 75
+
+
 @pytest.mark.parametrize("change", ["text", "vad", "code", "audio", "output", "missing_marker"])
 def test_alignment_checkpoint_rejects_changed_bindings(tmp_path, monkeypatch, change):
     audio = tmp_path / "audio.wav"

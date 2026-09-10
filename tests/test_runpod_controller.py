@@ -377,6 +377,97 @@ def test_verified_transfer_cannot_reset_episode_budget(monkeypatch, tmp_path):
     assert not any("mv -f" in command[-1] for command, _ in calls)
 
 
+def test_verified_local_source_uploads_outputs_then_rewritten_marker(monkeypatch, tmp_path):
+    local_root = tmp_path / "episode"
+    source_dir = local_root / "source"
+    source_dir.mkdir(parents=True)
+    video = source_dir / "source.mkv"
+    metadata = source_dir / "source.metadata.json"
+    video.write_bytes(b"video")
+    metadata.write_text("{}", encoding="utf-8")
+    marker = {
+        "stage": "download",
+        "outputs": {
+            "video": {"path": str(video), "size_bytes": 5, "sha256": "a" * 64},
+            "metadata": {"path": str(metadata), "size_bytes": 2, "sha256": "b" * 64},
+        },
+    }
+    (source_dir / "download.done.json").write_text(json.dumps(marker), encoding="utf-8")
+    calls = []
+
+    monkeypatch.setattr(runpod_controller, "validate_download", lambda *args, **kwargs: True)
+
+    def upload(source, remote_path, **kwargs):
+        calls.append((Path(source), remote_path, kwargs, Path(source).read_bytes()))
+        return {"bytes": Path(source).stat().st_size, "sha256": "c" * 64}
+
+    monkeypatch.setattr(runpod_controller, "_upload_episode_file_verified", upload)
+    receipts = runpod_controller._upload_verified_local_source(
+        local_root,
+        "/workspace/episode",
+        "https://www.youtube.com/watch?v=episode",
+        ssh=["ssh"],
+        scp=["scp"],
+        host="host",
+        temporary=tmp_path,
+    )
+
+    assert [call[1] for call in calls] == [
+        "/workspace/episode/source/source.mkv",
+        "/workspace/episode/source/source.metadata.json",
+        "/workspace/episode/source/download.done.json",
+    ]
+    assert all(call[2]["immutable"] for call in calls)
+    assert [call[2].get("transfer_timeout", 300) for call in calls] == [1800, 1800, 300]
+    remote_marker = json.loads(calls[-1][3])
+    assert remote_marker["outputs"]["video"]["path"] == "/workspace/episode/source/source.mkv"
+    assert remote_marker["outputs"]["metadata"]["path"] == (
+        "/workspace/episode/source/source.metadata.json"
+    )
+    assert receipts["video"]["sha256"] == "c" * 64
+
+
+def test_verified_local_source_rejects_path_outside_source(monkeypatch, tmp_path):
+    local_root = tmp_path / "episode"
+    source_dir = local_root / "source"
+    source_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.mkv"
+    outside.write_bytes(b"video")
+    (source_dir / "download.done.json").write_text(
+        json.dumps({"outputs": {"video": {"path": str(outside)}}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(runpod_controller, "validate_download", lambda *args, **kwargs: True)
+
+    with pytest.raises(runpod_controller.RunPodControllerError, match="outside"):
+        runpod_controller._upload_verified_local_source(
+            local_root,
+            "/workspace/episode",
+            "https://www.youtube.com/watch?v=episode",
+            ssh=["ssh"],
+            scp=["scp"],
+            host="host",
+            temporary=tmp_path,
+        )
+
+
+def test_missing_local_source_marker_does_not_touch_remote(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        runpod_controller,
+        "_upload_episode_file_verified",
+        lambda *args, **kwargs: pytest.fail("upload"),
+    )
+
+    assert runpod_controller._upload_verified_local_source(
+        tmp_path,
+        "/workspace/episode",
+        "https://www.youtube.com/watch?v=episode",
+        ssh=["ssh"],
+        scp=["scp"],
+        host="host",
+        temporary=tmp_path,
+    ) is None
+
+
 def test_provider_request_uses_remaining_episode_time(monkeypatch):
     timeouts = []
 

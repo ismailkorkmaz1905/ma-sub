@@ -55,6 +55,21 @@ def test_strict_runpod_doctor_passes_without_printing_secrets(tmp_path, monkeypa
     assert "rclone_remote: OK" in combined
 
 
+def test_strict_runpod_doctor_allows_public_source_without_cookies(tmp_path, monkeypatch, capsys):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.delenv("MAS_YTDLP_COOKIES")
+
+    def fake_run(command, **kwargs):
+        if command[1] == "listremotes":
+            return subprocess.CompletedProcess(command, 0, stdout="gdrive:\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert cli.doctor(strict_runpod=True) == 0
+    assert "youtube_cookies: NOT_SET" in capsys.readouterr().out
+
+
 def test_strict_runpod_doctor_fails_before_remote_check(tmp_path, monkeypatch, capsys):
     _configure(monkeypatch, tmp_path)
     monkeypatch.delenv("RUNPOD_API_KEY")

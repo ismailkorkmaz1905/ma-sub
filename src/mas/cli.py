@@ -22,7 +22,6 @@ def _runpod_preflight():
     for name in (
         "MAS_GMAIL_ADDRESS",
         "MAS_GMAIL_APP_PASSWORD",
-        "MAS_YTDLP_COOKIES",
         "MAS_DRIVE_STRICT_REMOTE",
         "RUNPOD_POD_ID",
         "RUNPOD_API_KEY",
@@ -30,8 +29,9 @@ def _runpod_preflight():
         if not os.getenv(name):
             failures.append(f"{name}: MISSING")
 
+    cookie_value = os.getenv("MAS_YTDLP_COOKIES")
     try:
-        cookie_path = _validated_cookie_file(os.getenv("MAS_YTDLP_COOKIES"))
+        cookie_path = _validated_cookie_file(cookie_value)
         records = []
         if cookie_path:
             records = [
@@ -39,7 +39,9 @@ def _runpod_preflight():
                 for line in Path(cookie_path).read_text(encoding="utf-8").splitlines()
                 if line and not line.startswith("#")
             ]
-        if not records or not any("youtube.com" in line.split("\t", 1)[0] for line in records):
+        if cookie_path is None:
+            print("youtube_cookies: NOT_SET")
+        elif not records or not any("youtube.com" in line.split("\t", 1)[0] for line in records):
             failures.append("youtube_cookies: no YouTube cookie records")
         else:
             print("youtube_cookies: OK")

@@ -269,7 +269,6 @@ def _required_environment():
         "RUNPOD_POD_ID",
         "RUNPOD_API_KEY",
         "MAS_RUNPOD_SSH_KEY",
-        "MAS_YTDLP_COOKIES",
         "MAS_GMAIL_ADDRESS",
         "MAS_GMAIL_APP_PASSWORD",
         "MAS_NOTIFY_TO",
@@ -287,6 +286,11 @@ def _required_environment():
             values[name] = value
     if missing:
         raise RunPodControllerError("missing environment: " + ", ".join(missing))
+    cookie = os.getenv("MAS_YTDLP_COOKIES")
+    if cookie:
+        if "\r" in cookie or "\n" in cookie:
+            raise RunPodControllerError("MAS_YTDLP_COOKIES must not contain line breaks")
+        values["MAS_YTDLP_COOKIES"] = cookie
     return values
 
 
@@ -302,10 +306,14 @@ def _local_preflight(values):
     for executable in ("git", "ssh", "scp"):
         if not shutil.which(executable):
             raise RunPodControllerError(f"required executable is missing: {executable}")
-    for name in ("MAS_RUNPOD_SSH_KEY", "MAS_YTDLP_COOKIES"):
-        path = Path(values[name]).resolve()
+    key = Path(values["MAS_RUNPOD_SSH_KEY"]).resolve()
+    if not key.is_file() or key.stat().st_size == 0:
+        raise RunPodControllerError(f"MAS_RUNPOD_SSH_KEY file is missing or empty: {key}")
+    cookie = values.get("MAS_YTDLP_COOKIES")
+    if cookie:
+        path = Path(cookie).resolve()
         if not path.is_file() or path.stat().st_size == 0:
-            raise RunPodControllerError(f"{name} file is missing or empty: {path}")
+            raise RunPodControllerError(f"MAS_YTDLP_COOKIES file is missing or empty: {path}")
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=ROOT,
@@ -318,7 +326,7 @@ def _local_preflight(values):
         raise RunPodControllerError("git status failed")
     if result.stdout.strip():
         raise RunPodControllerError("repository must be clean before a RunPod episode run")
-    _validated_cookie_file(values["MAS_YTDLP_COOKIES"])
+    _validated_cookie_file(cookie)
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=ROOT,
@@ -692,7 +700,6 @@ def _write_runtime_env(path, values, commit):
         "MAS_GMAIL_APP_PASSWORD": values["MAS_GMAIL_APP_PASSWORD"],
         "MAS_NOTIFY_TO": values["MAS_NOTIFY_TO"],
         "MAS_DRIVE_STRICT_REMOTE": values["MAS_DRIVE_STRICT_REMOTE"],
-        "MAS_YTDLP_COOKIES": "/workspace/.mas-secrets/youtube-cookies.txt",
         "RCLONE_CONFIG": "/workspace/.mas-secrets/rclone.conf",
         "MAS_RCLONE_CONFIG": "/workspace/.mas-secrets/rclone.conf",
         "MAS_GIT_COMMIT": commit,
@@ -708,6 +715,8 @@ def _write_runtime_env(path, values, commit):
     for name in ("MAS_NETWORK_VOLUME_QUOTA_BYTES", "MAS_EPISODE"):
         if name in values:
             remote_values[name] = values[name]
+    if values.get("MAS_YTDLP_COOKIES"):
+        remote_values["MAS_YTDLP_COOKIES"] = "/workspace/.mas-secrets/youtube-cookies.txt"
     for name in ("MAS_MAX_RUNTIME_SECONDS", "MAS_IDLE_TIMEOUT_SECONDS", "MAS_MP4_TARGET_GB",
                  "MAS_MP4_ENCODER", "MAS_MP4_ENCODER_OPTIONS"):
         if os.getenv(name):
@@ -821,7 +830,9 @@ def run_remote_episode(episode, source_url=None):
             # A transfer-only retry must never reacquire paid compute.
             return publish_local_delivery(local_root, episode, values["MAS_DRIVE_STRICT_REMOTE"])
         try:
-            source_url = _prepare_official_source(local_root, episode, source_url, values["MAS_YTDLP_COOKIES"])
+            source_url = _prepare_official_source(
+                local_root, episode, source_url, values.get("MAS_YTDLP_COOKIES")
+            )
         except Exception:
             # Source preflight cannot spend compute; retain that distinction without resetting a run.
             latest = local_root / "logs" / "LATEST"
@@ -1152,7 +1163,7 @@ def _run_remote_session(episode, source_url, *, values, commit, rclone_config, b
     name = f"Muhtemel Ask {episode}.Bolum"
     local_root = episode_dir(episode)
     key = Path(values["MAS_RUNPOD_SSH_KEY"]).resolve()
-    cookie = Path(values["MAS_YTDLP_COOKIES"]).resolve()
+    cookie = Path(values["MAS_YTDLP_COOKIES"]).resolve() if values.get("MAS_YTDLP_COOKIES") else None
     client = RunPodClient(values["RUNPOD_POD_ID"], values["RUNPOD_API_KEY"])
     client.budget = budget
     started_at = time.monotonic()
@@ -1189,7 +1200,11 @@ def _run_remote_session(episode, source_url, *, values, commit, rclone_config, b
             _network_retry(ssh + ["install -d -m 700 /workspace/.mas-secrets /workspace/.mas-upload"], budget=budget)
             _network_retry(scp + [str(archive), f"root@{host}:/workspace/.mas-upload/release.tar.gz"], budget=budget)
             _network_retry(scp + [str(runtime_env), f"root@{host}:/workspace/.mas-secrets/runtime.env"], budget=budget)
-            _network_retry(scp + [str(cookie), f"root@{host}:/workspace/.mas-secrets/youtube-cookies.txt"], budget=budget)
+            if cookie is not None:
+                _network_retry(
+                    scp + [str(cookie), f"root@{host}:/workspace/.mas-secrets/youtube-cookies.txt"],
+                    budget=budget,
+                )
             _network_retry(scp + [str(rclone_config), f"root@{host}:/workspace/.mas-secrets/rclone.conf"], budget=budget)
 
             deploy_command = (

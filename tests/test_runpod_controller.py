@@ -651,13 +651,19 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(tmp_path):
     content = target.read_text(encoding="utf-8")
     assert "export RUNPOD_API_KEY='api secret'" in content
     assert "MAS_GIT_COMMIT=" + "a" * 40 in content
-    assert "youtube-cookies.txt" in content
+    assert "MAS_YTDLP_COOKIES" not in content
     assert "UV_CACHE_DIR=/workspace/.cache/uv" in content
     assert "UV_HTTP_TIMEOUT=120" in content
     assert "UV_HTTP_RETRIES=3" in content
     assert "UV_CONCURRENT_DOWNLOADS=4" in content
     assert "HF_HOME=/workspace/.cache/huggingface" in content
     assert b"\r" not in target.read_bytes()
+
+    values["MAS_YTDLP_COOKIES"] = "C:/private/cookies.txt"
+    runpod_controller._write_runtime_env(target, values, "a" * 40)
+    content = target.read_text(encoding="utf-8")
+    assert "MAS_YTDLP_COOKIES=/workspace/.mas-secrets/youtube-cookies.txt" in content
+    assert "C:/private/cookies.txt" not in content
 
 
 def test_cli_dispatches_production_run_to_controller(monkeypatch, tmp_path):
@@ -705,6 +711,26 @@ def test_local_preflight_rejects_malformed_cookie_before_compute(monkeypatch, tm
     with pytest.raises(RuntimeError, match="Netscape"):
         runpod_controller._local_preflight({"MAS_RUNPOD_SSH_KEY": str(key),
                                             "MAS_YTDLP_COOKIES": str(cookie)})
+
+
+def test_local_preflight_allows_public_source_without_cookie(monkeypatch, tmp_path):
+    key = tmp_path / "key"
+    config = tmp_path / "rclone.conf"
+    key.write_text("key")
+    config.write_text("config")
+    monkeypatch.setattr(runpod_controller.shutil, "which", lambda name: name)
+    def run(command, **kwargs):
+        output = "" if command[1] == "status" else "a" * 40
+        return type("Result", (), {"returncode": 0, "stdout": output})()
+    monkeypatch.setattr(runpod_controller.subprocess, "run", run)
+    monkeypatch.setattr(runpod_controller, "_rclone_config", lambda: config)
+
+    commit, observed_config = runpod_controller._local_preflight(
+        {"MAS_RUNPOD_SSH_KEY": str(key)}
+    )
+
+    assert commit == "a" * 40
+    assert observed_config == config
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("response lost"), TimeoutError("work expired"),

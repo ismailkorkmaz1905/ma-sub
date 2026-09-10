@@ -129,6 +129,12 @@ evidence, not a committed current-price configuration. Quotes and affordability
 are recorded in the capacity audit. Actual run duration/cost still require the
 new episode's measured scenes. The 2-4 hour and 1-2 USD planning aims are not SLAs.
 
+For a public official source, cookies are optional. When a cookie file is
+configured it retains the existing Netscape validation and verified transfer.
+When it is absent, source discovery and download remain bounded and fail closed
+if YouTube actually requires authentication; no empty or fabricated cookie file
+is substituted.
+
 ## Validation and remaining work
 
 Final local full suite: 813 passed, 11 skipped in 112.81 seconds.

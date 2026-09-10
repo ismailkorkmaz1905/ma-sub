@@ -98,7 +98,7 @@ class CapacityPlan:
     def __init__(self, *, episode, maximum_rate_usd_per_hour,
                  gpu_type_ids=DEFAULT_GPU_TYPE_IDS,
                  total_seconds, startup_seconds=300, shutdown_seconds=120,
-                 reserve_usd=1.0, billing_margin_usd=0.10,
+                 reserve_usd=0.0, billing_margin_usd=0.0,
                  storage_quote=None,
                  protected_pod_id="781ct55zv4gkle",
                  network_volume_id="xgogcmey5o", data_center_id="EU-RO-1"):
@@ -109,12 +109,15 @@ class CapacityPlan:
                 or any(not re.fullmatch(r"[A-Za-z0-9 ._-]+", value or "")
                        for value in gpu_type_ids)):
             raise ValueError("GPU types must be 1-8 unique provider IDs")
-        numbers = (maximum_rate_usd_per_hour, reserve_usd, billing_margin_usd)
+        if (not isinstance(maximum_rate_usd_per_hour, (int, float))
+                or isinstance(maximum_rate_usd_per_hour, bool)
+                or not math.isfinite(maximum_rate_usd_per_hour)
+                or maximum_rate_usd_per_hour <= 0):
+            raise ValueError("capacity maximum rate must be finite and positive")
         if any(not isinstance(value, (int, float)) or isinstance(value, bool)
-               or not math.isfinite(value) or value <= 0 for value in numbers):
-            raise ValueError("capacity USD limits must be finite and positive")
-        if reserve_usd < 1 or billing_margin_usd < 0.10:
-            raise ValueError("capacity reserve requires 1 USD plus 0.10 USD margin")
+               or not math.isfinite(value) or value < 0
+               for value in (reserve_usd, billing_margin_usd)):
+            raise ValueError("capacity reserves must be finite and nonnegative")
         if (not isinstance(storage_quote, dict)
                 or storage_quote.get("source_url") != STORAGE_PRICING_URL
                 or storage_quote.get("sha256") != digest(

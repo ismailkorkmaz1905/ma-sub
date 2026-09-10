@@ -106,8 +106,9 @@ no cyclic retry.
 ## Live cost prerequisite
 
 Before spending, the code refreshes account balance/spend, Pod inventory, volume
-identity/allocation and GPU offers. It keeps at least 1 USD plus a 0.10 USD margin,
-and reserves 120 seconds for shutdown. Affordability uses the allowed maximum
+identity/allocation and GPU offers. The user's 2026-09-10 instruction removed the
+1 USD balance floor and additional billing margin; the controller still reserves
+120 seconds of lease time for shutdown. Affordability uses the allowed maximum
 GPU rate and storage, so a more expensive allocation cannot reuse a cheaper
 offer's duration. Auto-pay must be disabled. No top-up is performed.
 

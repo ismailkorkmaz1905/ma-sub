@@ -153,13 +153,25 @@ def test_active_unrelated_pod_refuses_all_create(tmp_path):
     assert provider.actions == []
 
 
-def test_balance_preserves_one_dollar_plus_margin(tmp_path):
+def test_explicit_balance_reserve_is_enforced(tmp_path):
     provider = Provider()
     provider.account = lambda timeout: {"clientBalance": 1.09, "currentSpendPerHr": 0,
                                         "isAutoPayEnabled": False}
     with pytest.raises(IntegrityError, match="protected reserve"):
-        CapacityLease(provider, BASE, tmp_path / "audit", plan()).acquire()
+        CapacityLease(provider, BASE, tmp_path / "audit",
+                      plan(reserve_usd=1.0, billing_margin_usd=0.10)).acquire()
     assert provider.actions == []
+
+
+def test_default_plan_uses_full_balance_without_a_protected_reserve(tmp_path):
+    provider = Provider()
+    provider.account = lambda timeout: {"clientBalance": 0.50, "currentSpendPerHr": 0,
+                                        "isAutoPayEnabled": False}
+    with CapacityLease(provider, BASE, tmp_path / "audit", plan(),
+                       nonce="0123456789abcdef") as lease:
+        assert lease.work_budget_seconds > 0
+    saved = json.loads((tmp_path / "audit" / "capacity-state.json").read_text())
+    assert saved["data"]["minimum_balance_usd"] == 0
 
 
 def test_worker_failure_still_deletes_only_owned_pod(tmp_path):
@@ -208,7 +220,8 @@ def test_lease_is_reduced_to_affordable_work_budget(tmp_path):
     provider.account = lambda timeout: {"clientBalance": 1.4, "currentSpendPerHr": 0,
                                         "isAutoPayEnabled": False}
     with CapacityLease(provider, BASE, tmp_path / "audit",
-                       plan(total_seconds=14400), nonce="0123456789abcdef") as lease:
+                       plan(total_seconds=14400, reserve_usd=1.0, billing_margin_usd=0.10),
+                       nonce="0123456789abcdef") as lease:
         assert 1700 < lease.work_budget_seconds < 1800
         assert 0 < lease.remaining_work_seconds() <= lease.work_budget_seconds
 
@@ -262,7 +275,8 @@ def test_second_create_uses_refreshed_lower_balance(tmp_path):
         readiness_calls.append(pod["id"])
         raise CapacityReadinessError("bounded readiness failure")
     with pytest.raises(IntegrityError, match="affordable"):
-        with CapacityLease(provider, BASE, tmp_path / "audit", plan(), ready=ready,
+        with CapacityLease(provider, BASE, tmp_path / "audit",
+                           plan(reserve_usd=1.0, billing_margin_usd=0.10), ready=ready,
                            nonce="0123456789abcdef"):
             pass
     assert len([item for item in provider.actions if item[0] == "create"]) == 1

@@ -72,7 +72,7 @@ Mevcut sistemde yeni bölüm hedefi **toplam 2-4 saat**. Bu süre garanti veya k
 
 Hesapta son gerçek pilotta görülen **L4 0,49 USD/saat** fiyatı kullanıldı. ASR, CTC, hedefli onarım ve MP4 üretiminin ölçülen toplamı yaklaşık 41 dakika ve teorik çıplak karşılığı yaklaşık **0,34 USD**. Kaynak hazırlığı GPU açıkken yapılırsa yaklaşık 0,02 USD daha eklenir. Pod açılışı, dosya aktarımı, bekleme, kısa testler ve hata payı bunun üstüne gelir. Bölüm 12'nin tam ASR başlangıcı ile son dış gözlem arasında hesap bakiyesi **3,6165304786 USD'den 2,8764311039 USD'ye**, yani yaklaşık **0,74 USD** düştü; bu bir fatura dökümü değil, aynı hesaptaki iki bakiye gözlemidir.
 
-Yeni bölüm için pratik planlama bütçesi **1-2 USD**. L4 dört saat boyunca hiç kapatılmazsa yalnız GPU yaklaşık **1,96 USD** tutar; bu yüzden çeviri veya insan bekleme sırasında GPU açık bırakılmamalı. Son bakiye eski olduğu için her koşudan hemen önce fiyat ve bakiye yeniden sorgulanmalı; 1 USD ve kapanış payı korunmalı.
+Yeni bölüm için pratik planlama bütçesi **1-2 USD**. L4 dört saat boyunca hiç kapatılmazsa yalnız GPU yaklaşık **1,96 USD** tutar; bu yüzden çeviri veya insan bekleme sırasında GPU açık bırakılmamalı. Son bakiye eski olduğu için her koşudan hemen önce fiyat ve bakiye yeniden sorgulanmalı. Kullanıcı 10 Eylül'de 1 USD ve ek kapanış payı alt sınırını kaldırdı.
 
 ## Cuma başlamadan önce
 
@@ -81,7 +81,7 @@ Yeni bölüm için pratik planlama bütçesi **1-2 USD**. L4 dört saat boyunca 
 - **YouTube çerezini yenile.** Cuma hâlâ çalışacağı garanti değil.
 - **Drive bağlantısını kontrol et.** Ortak Google bağlantısında kota hatası yaşandı. Kendi Google bağlantı kimliğine geçmek gerekiyor; kullanıcı hesabıyla yetkilendirme gerekebilir.
 - **Gmail'i bir kez dene.** Bugün günlük gönderim sınırına takıldı. Bildirimlerin gittiğini varsayma.
-- **Bakiye ve bağlantıyı kontrol et.** Son görülen bakiye yaklaşık 2,88 USD; tam değer 2,8764311039 USD (6 Eylül 14:01 UTC). Geçici GPU'nun silindiği dışarıdan doğrulandı; eski makine kapalı. Saklanan disk ücret yazmaya devam ediyor: son gözlem 0,005 USD/saat. En az 1 USD ve kapanış payı korunacak.
+- **Bakiye ve bağlantıyı kontrol et.** Son görülen bakiye yaklaşık 2,88 USD; tam değer 2,8764311039 USD (6 Eylül 14:01 UTC). Geçici GPU'nun silindiği dışarıdan doğrulandı; eski makine kapalı. Saklanan disk ücret yazmaya devam ediyor: son gözlem 0,005 USD/saat. Güncel bakiye ve fiyat sorgulanacak; zorunlu bakiye rezervi yok.
 - **Önce küçük uzak dönüşüm denemesi.** Bağlantı ve örnek MP4 gerçekten tamamlanmadan uzun iş başlatılmayacak. Yerel bilgisayarda ağır dönüşüm yapılmayacak.
 
 Masaüstündeki **Muhtemel Ask - Episode 13 Astra** kısayolu güncel promptu okuyacak. Başka bölüm için `tools/Start-Episode.ps1 -Episode X` içindeki sayıyı değiştirmen yeterli.

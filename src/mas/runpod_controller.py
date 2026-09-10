@@ -486,7 +486,14 @@ def _stream(chunk, target):
     target.flush()
 
 
-def _network(command, *, idle_timeout=180, total_timeout=1800, capture=False):
+def _network(
+    command,
+    *,
+    idle_timeout=180,
+    total_timeout=1800,
+    capture=False,
+    progress_probe=None,
+):
     try:
         return _run_watchdog(
             command,
@@ -494,6 +501,7 @@ def _network(command, *, idle_timeout=180, total_timeout=1800, capture=False):
             total_timeout=total_timeout,
             stdout_handler=None if capture else lambda chunk: _stream(chunk, sys.stdout),
             stderr_handler=None if capture else lambda chunk: _stream(chunk, sys.stderr),
+            progress_probe=progress_probe,
         )
     except RemoteVerificationError as exc:
         raise RunPodControllerError(str(exc)) from exc
@@ -501,7 +509,7 @@ def _network(command, *, idle_timeout=180, total_timeout=1800, capture=False):
 
 def _network_retry(
     command, *, attempts=3, idle_timeout=60, total_timeout=1800, capture=False, budget=None,
-    deadline=None,
+    deadline=None, progress_probe=None,
 ):
     operation_deadline = time.monotonic() + total_timeout
     deadline = min(deadline, operation_deadline) if deadline is not None else operation_deadline
@@ -517,6 +525,7 @@ def _network_retry(
                 idle_timeout=idle_timeout,
                 total_timeout=remaining,
                 capture=capture,
+                progress_probe=progress_probe,
             )
         except RunPodControllerError:
             if attempt == attempts:
@@ -551,6 +560,31 @@ def _remote_file_signature(ssh, remote_path, *, budget=None):
     return int(match.group(1)), match.group(2).decode("ascii")
 
 
+def _remote_growth_probe(ssh, remote_path, *, budget=None):
+    last_size = -1
+    quoted = shlex.quote(remote_path)
+
+    def probe():
+        nonlocal last_size
+        try:
+            output = _network_retry(
+                ssh + [f"stat -c %s -- {quoted}"],
+                attempts=1,
+                idle_timeout=15,
+                total_timeout=30,
+                capture=True,
+                budget=budget,
+            ).strip()
+            size = int(output)
+        except (RunPodControllerError, ValueError):
+            return False
+        advanced = size > last_size
+        last_size = size
+        return advanced
+
+    return probe
+
+
 def _upload_episode_file_verified(
     source,
     remote_path,
@@ -561,6 +595,7 @@ def _upload_episode_file_verified(
     budget=None,
     immutable=False,
     transfer_timeout=300,
+    monitor_remote_growth=False,
 ):
     source = Path(source)
     expected_size = source.stat().st_size
@@ -594,11 +629,19 @@ def _upload_episode_file_verified(
         total_timeout=300,
         budget=budget,
     )
+    transfer_options = {
+        "idle_timeout": 60,
+        "total_timeout": transfer_timeout,
+        "budget": budget,
+    }
+    if monitor_remote_growth:
+        transfer_options.update(
+            attempts=1,
+            progress_probe=_remote_growth_probe(ssh, partial, budget=budget),
+        )
     _network_retry(
         scp + [str(source), f"root@{host}:{partial}"],
-        idle_timeout=60,
-        total_timeout=transfer_timeout,
-        budget=budget,
+        **transfer_options,
     )
     partial_size, partial_sha256 = _remote_file_signature(ssh, partial, budget=budget)
     if (partial_size, partial_sha256) != (expected_size, expected_sha256):
@@ -666,6 +709,7 @@ def _upload_verified_local_source(
             budget=budget,
             immutable=True,
             transfer_timeout=1800,
+            monitor_remote_growth=True,
         )
         remote_record = dict(record)
         remote_record["path"] = remote_path

@@ -274,6 +274,17 @@ def test_network_watchdog_total_timeout_survives_closed_pipes():
         )
 
 
+def test_network_watchdog_accepts_external_byte_progress_for_silent_process():
+    progress = iter((True, True, True, True, True))
+    _run_watchdog(
+        [sys.executable, "-c", "import time; time.sleep(0.35)"],
+        idle_timeout=0.1,
+        total_timeout=1,
+        progress_probe=lambda: next(progress, False),
+        progress_probe_interval=0.05,
+    )
+
+
 def test_repeated_rclone_stats_do_not_count_as_transfer_progress():
     from mas.remote import _RcloneProgress
     observe = _RcloneProgress()

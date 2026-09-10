@@ -22,6 +22,8 @@ def _run_watchdog(
     stdout_handler=None,
     stderr_handler=None,
     progress_observer=None,
+    progress_probe=None,
+    progress_probe_interval=10,
 ):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     events = queue.Queue()
@@ -40,11 +42,16 @@ def _run_watchdog(
                for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))]
     for thread in threads:
         thread.start()
-    started = last_progress = time.monotonic()
+    started = last_progress = last_probe = time.monotonic()
     closed = set()
     try:
         while len(closed) < 2 or process.poll() is None:
             now = time.monotonic()
+            if progress_probe is not None and now - last_probe >= progress_probe_interval:
+                if progress_probe():
+                    last_progress = time.monotonic()
+                last_probe = time.monotonic()
+                now = last_probe
             if now - last_progress > idle_timeout or now - started > total_timeout:
                 raise RemoteVerificationError("network progress watchdog expired")
             wait_timeout = max(

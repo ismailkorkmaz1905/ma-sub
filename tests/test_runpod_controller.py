@@ -419,6 +419,7 @@ def test_verified_local_source_uploads_outputs_then_rewritten_marker(monkeypatch
     ]
     assert all(call[2]["immutable"] for call in calls)
     assert [call[2].get("transfer_timeout", 300) for call in calls] == [1800, 1800, 300]
+    assert [call[2].get("monitor_remote_growth", False) for call in calls] == [True, True, False]
     remote_marker = json.loads(calls[-1][3])
     assert remote_marker["outputs"]["video"]["path"] == "/workspace/episode/source/source.mkv"
     assert remote_marker["outputs"]["metadata"]["path"] == (
@@ -466,6 +467,16 @@ def test_missing_local_source_marker_does_not_touch_remote(monkeypatch, tmp_path
         host="host",
         temporary=tmp_path,
     ) is None
+
+
+def test_remote_growth_probe_reports_only_increasing_size(monkeypatch):
+    sizes = iter((b"0\n", b"10\n", b"10\n"))
+    monkeypatch.setattr(runpod_controller, "_network_retry", lambda *args, **kwargs: next(sizes))
+    probe = runpod_controller._remote_growth_probe(["ssh"], "/remote/partial")
+
+    assert probe() is True
+    assert probe() is True
+    assert probe() is False
 
 
 def test_provider_request_uses_remaining_episode_time(monkeypatch):

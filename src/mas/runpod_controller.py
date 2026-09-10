@@ -585,6 +585,23 @@ def _remote_growth_probe(ssh, remote_path, *, budget=None):
     return probe
 
 
+def _local_growth_probe(path):
+    path = Path(path)
+    last_size = -1
+
+    def probe():
+        nonlocal last_size
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False
+        advanced = size > last_size
+        last_size = size
+        return advanced
+
+    return probe
+
+
 def _upload_episode_file_verified(
     source,
     remote_path,
@@ -1081,6 +1098,13 @@ def _download_record(record, local_root, remote_root, scp, host, budget, *, chec
     size = record.get("size_bytes", record.get("bytes"))
     if not re.fullmatch(r"[0-9a-f]{64}", expected or "") or type(size) is not int or size < 0:
         raise RunPodControllerError("invalid transfer manifest signature")
+    local_episode_file = safe_relative(local_root, relative)
+    if checkpoint and record.get("immutable_source") and local_episode_file.is_file():
+        if local_episode_file.is_symlink():
+            raise RunPodControllerError("local immutable source path is unsafe")
+        if local_episode_file.stat().st_size != size or sha256_file(local_episode_file) != expected:
+            raise RunPodControllerError("local immutable source identity differs; preserve it")
+        return local_episode_file
     if checkpoint:
         destination = local_root / "work" / "remote-checkpoints" / expected / Path(relative).name
     if destination.is_file():
@@ -1094,8 +1118,20 @@ def _download_record(record, local_root, remote_root, scp, host, budget, *, chec
     if (not remote_path.startswith(remote_root + "/") and remote_path != external) or "/../" in remote_path:
         raise RunPodControllerError("remote transfer path escapes episode")
     partial = destination.with_name(destination.name + ".partial")
-    _network_retry(scp + [f"root@{host}:{remote_path}", str(partial)],
-                   idle_timeout=60, total_timeout=min(1800, budget.check()), budget=budget)
+    transfer_options = {
+        "idle_timeout": 60,
+        "total_timeout": min(1800, budget.check()),
+        "budget": budget,
+    }
+    if size >= 64 * 1024 * 1024:
+        transfer_options.update(
+            attempts=1,
+            progress_probe=_local_growth_probe(partial),
+        )
+    _network_retry(
+        scp + [f"root@{host}:{remote_path}", str(partial)],
+        **transfer_options,
+    )
     if partial.stat().st_size != size or sha256_file(partial) != expected:
         raise RunPodControllerError("downloaded checkpoint/artifact byte/SHA-256 mismatch")
     os.replace(partial, destination)

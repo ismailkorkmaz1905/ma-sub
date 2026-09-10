@@ -479,6 +479,80 @@ def test_remote_growth_probe_reports_only_increasing_size(monkeypatch):
     assert probe() is False
 
 
+def test_local_growth_probe_reports_only_increasing_size(tmp_path):
+    partial = tmp_path / "file.partial"
+    probe = runpod_controller._local_growth_probe(partial)
+
+    assert probe() is False
+    partial.write_bytes(b"a")
+    assert probe() is True
+    assert probe() is False
+    partial.write_bytes(b"ab")
+    assert probe() is True
+
+
+def test_remote_checkpoint_reuses_matching_local_immutable_source(monkeypatch, tmp_path):
+    source = tmp_path / "source" / "episode.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"source")
+    record = {
+        "relative_path": "source/episode.mkv",
+        "snapshot_path": "/workspace/episode/source/episode.mkv",
+        "size_bytes": source.stat().st_size,
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "immutable_source": True,
+    }
+    monkeypatch.setattr(
+        runpod_controller,
+        "_network_retry",
+        lambda *args, **kwargs: pytest.fail("matching source must not be downloaded"),
+    )
+
+    assert runpod_controller._download_record(
+        record,
+        tmp_path,
+        "/workspace/episode",
+        ["scp"],
+        "host",
+        None,
+        checkpoint=True,
+    ) == source
+
+
+def test_large_remote_download_has_single_attempt_and_byte_growth_probe(monkeypatch, tmp_path):
+    calls = []
+
+    class Budget:
+        def check(self):
+            return 1800
+
+    def transfer(command, **kwargs):
+        calls.append(kwargs)
+        Path(command[-1]).parent.mkdir(parents=True, exist_ok=True)
+        Path(command[-1]).write_bytes(b"partial")
+        return b""
+
+    monkeypatch.setattr(runpod_controller, "_network_retry", transfer)
+    record = {
+        "relative_path": "final/episode.mp4",
+        "size_bytes": 64 * 1024 * 1024,
+        "sha256": "a" * 64,
+    }
+
+    with pytest.raises(runpod_controller.RunPodControllerError, match="mismatch"):
+        runpod_controller._download_record(
+            record,
+            tmp_path,
+            "/workspace/episode",
+            ["scp"],
+            "host",
+            Budget(),
+        )
+
+    assert calls[0]["attempts"] == 1
+    assert callable(calls[0]["progress_probe"])
+
+
 def test_provider_request_uses_remaining_episode_time(monkeypatch):
     timeouts = []
 

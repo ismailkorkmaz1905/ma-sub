@@ -1108,7 +1108,7 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
     remote_root = f"/workspace/ma-sub/EPISODES/Muhtemel Ask {episode}.Bolum"
     prefix = ("source /workspace/.mas-secrets/runtime.env; "
               f"export MAS_MAX_RUNTIME_SECONDS={runtime_seconds}; cd {release}; "
-              "PYTHONPATH=src /workspace/ma-sub/.venv/bin/python -m mas.remote_job ")
+              "exec env PYTHONPATH=src /workspace/ma-sub/.venv/bin/python -m mas.remote_job ")
     resume_files = sorted((local_root / "translation_output").glob("*.zip"))
     resume_files += [local_root / "review" / "audio_review_overrides.json",
                      local_root / "review" / "mp4-sample-approval.json"]

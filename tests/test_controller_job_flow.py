@@ -47,6 +47,7 @@ def test_lost_start_response_starts_once_then_only_monitors(monkeypatch, tmp_pat
     assert result == 0
     assert len(starts) == 1
     assert " start --root " in starts[0]
+    assert "; exec env PYTHONPATH=src " in starts[0]
 
 
 def test_resume_only_never_sends_start(monkeypatch, tmp_path):

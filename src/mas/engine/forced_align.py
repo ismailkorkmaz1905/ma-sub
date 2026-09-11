@@ -2029,6 +2029,16 @@ def _resolve_alignment_overlaps(
         end = min(len(source), max(positions) + radius + 1)
         return [str(item["utterance_uid"]) for item in source[start:end]]
 
+    def component_has_unsafe_overlap(component_uids: Sequence[str]) -> bool:
+        uid_set = set(component_uids)
+        return any(
+            str(left["utterance_uid"]) in uid_set
+            or str(right["utterance_uid"]) in uid_set
+            for left, right in _unsafe_word_overlaps(
+                [word for words in selected.values() for word in words]
+            )
+        )
+
     for component_index, component_uids in enumerate(initial_components, start=1):
         group = [by_uid[uid] for uid in component_uids]
         atomically_selected = add_joint_component_options(
@@ -2085,25 +2095,37 @@ def _resolve_alignment_overlaps(
     )
     residual_components = _overlap_components(residual_before_partition, order)
     for component_index, seed_uids in enumerate(residual_components, start=1):
+        component_resolved = not component_has_unsafe_overlap(seed_uids)
         seen_contexts: set[tuple[tuple[str, ...], int | None]] = set()
         for radius in (1, 2, 4, 8):
+            if component_resolved:
+                break
             context_uids = contextual_component_uids(seed_uids, radius=radius)
             context_key = (tuple(context_uids), None)
             if context_key in seen_contexts:
                 continue
             seen_contexts.add(context_key)
-            add_joint_component_options(
+            selected_joint = add_joint_component_options(
                 context_uids,
                 context_uids,
                 f"residual-{component_index}-radius-{radius}",
             )
+            component_resolved = (
+                selected_joint and not component_has_unsafe_overlap(seed_uids)
+            )
+        if component_resolved:
+            continue
         for uid in sorted(seed_uids, key=order.__getitem__):
+            if component_resolved:
+                break
             position = order[uid]
             for start, end, label in (
                 (max(0, position - 1), position + 1, "left"),
                 (max(0, position - 1), min(len(source), position + 2), "center"),
                 (position, min(len(source), position + 2), "right"),
             ):
+                if component_resolved:
+                    break
                 context_uids = [
                     str(item["utterance_uid"]) for item in source[start:end]
                 ]
@@ -2112,13 +2134,19 @@ def _resolve_alignment_overlaps(
                     if len(context_uids) < 2 or context_key in seen_contexts:
                         continue
                     seen_contexts.add(context_key)
-                    add_joint_component_options(
+                    selected_joint = add_joint_component_options(
                         context_uids,
                         context_uids,
                         f"residual-{component_index}-{order[uid] + 1}-{label}"
                         f"-padding-{padding_ms}",
                         padding_ms=padding_ms,
                     )
+                    component_resolved = (
+                        selected_joint
+                        and not component_has_unsafe_overlap(seed_uids)
+                    )
+                    if component_resolved:
+                        break
     conflict_uids = {
         str(word["utterance_uid"])
         for overlap in residual_before_partition

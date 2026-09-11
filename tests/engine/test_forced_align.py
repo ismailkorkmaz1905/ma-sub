@@ -268,6 +268,31 @@ class _ContextualOverlapWhisperX(_FakeWhisperX):
         )
 
 
+class _ResidualEarlyStopWhisperX(_FakeWhisperX):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def align(self, transcript, *args, **kwargs):
+        text = transcript[0]["text"]
+        self.align_calls.append({"text": text})
+        if text == "Alpha Bravo":
+            return _result([{"word": "Alpha", "start": 1.1, "end": 1.9}])
+        if text == "Context Alpha Bravo":
+            return _result(
+                [
+                    {"word": "Context", "start": 0.5, "end": 0.8},
+                    {"word": "Alpha", "start": 1.1, "end": 1.4},
+                    {"word": "Bravo", "start": 1.5, "end": 1.8},
+                ]
+            )
+        start, end = {
+            "Context": (0.5, 0.8),
+            "Alpha": (1.1, 2.0),
+            "Bravo": (1.3, 2.2),
+        }[text]
+        return _result([{"word": text, "start": start, "end": end}])
+
+
 def _result(
     words: list[dict[str, Any]], *, add_default_scores: bool = True
 ) -> dict[str, Any]:
@@ -781,6 +806,39 @@ class ForcedAlignmentTests(unittest.TestCase):
             [(500, 800), (1100, 1500), (2300, 2600), (2655, 2800)],
         )
         validate_forced_alignment_data(partial)
+
+    def test_residual_joint_recovery_stops_after_component_is_resolved(self) -> None:
+        coarse = [
+            {
+                "start_ms": start,
+                "end_ms": end,
+                "text": text,
+                "asr_text": text,
+                "deletion_audio_reviewed": False,
+                "utterance_uid": f"utt-{text.lower()}",
+                "speaker_id": "speaker-a",
+            }
+            for start, end, text in (
+                (400, 900, "Context"),
+                (1000, 2500, "Alpha"),
+                (1200, 2800, "Bravo"),
+            )
+        ]
+        fake = _ResidualEarlyStopWhisperX()
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory),
+                coarse,
+                whisperx_module=fake,
+            )
+
+        texts = [call["text"] for call in fake.align_calls]
+        self.assertEqual(texts.count("Context Alpha Bravo"), 1)
+        self.assertNotIn("Context Alpha", texts)
+        self.assertEqual(
+            data["provenance"]["overlap_resolution"]["final_overlap_count"], 0
+        )
+        validate_forced_alignment_data(data)
 
     def test_reviewed_dialogue_does_not_establish_distinct_speakers(self) -> None:
         coarse = [

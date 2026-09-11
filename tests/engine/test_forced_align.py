@@ -521,6 +521,12 @@ class ForcedAlignmentTests(unittest.TestCase):
             "Hicbir sey yapmadim Ben ona ne yaptim",
             [call["text"] for call in fake.align_calls],
         )
+        self.assertGreaterEqual(
+            [call["text"] for call in fake.align_calls].count(
+                "Hicbir sey yapmadim Ben ona ne yaptim"
+            ),
+            4,
+        )
         resolution = data["provenance"]["overlap_resolution"]
         self.assertEqual(resolution["selected_mode_counts"], {"joint": 4})
         self.assertEqual(resolution["final_overlap_count"], 0)

@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v7"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v8"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 DURATION_VAD_FIELDS = frozenset(
     {
@@ -1858,6 +1858,8 @@ def _resolve_alignment_overlaps(
         target_uids: Sequence[str],
         context_uids: Sequence[str],
         component_index: str,
+        *,
+        padding_ms: int | None = None,
     ) -> None:
         nonlocal adaptive_candidate_count
         joint_diagnostics["attempts"] += 1
@@ -1865,6 +1867,15 @@ def _resolve_alignment_overlaps(
         group = [by_uid[uid] for uid in context_uids]
         joint_start = min(int(item["start_ms"]) for item in group)
         joint_end = max(int(item["end_ms"]) for item in group)
+        if padding_ms is not None:
+            joint_start = max(
+                joint_start,
+                min(int(item["coarse_start_ms"]) for item in group) - padding_ms,
+            )
+            joint_end = min(
+                joint_end,
+                max(int(item["coarse_end_ms"]) for item in group) + padding_ms,
+            )
         joint_text = " ".join(str(item["text"]) for item in group)
         try:
             joint_raw = align(
@@ -2013,10 +2024,10 @@ def _resolve_alignment_overlaps(
     )
     residual_components = _overlap_components(residual_before_partition, order)
     for component_index, seed_uids in enumerate(residual_components, start=1):
-        seen_contexts: set[tuple[str, ...]] = set()
+        seen_contexts: set[tuple[tuple[str, ...], int | None]] = set()
         for radius in (1, 2, 4, 8):
             context_uids = contextual_component_uids(seed_uids, radius=radius)
-            context_key = tuple(context_uids)
+            context_key = (tuple(context_uids), None)
             if context_key in seen_contexts:
                 continue
             seen_contexts.add(context_key)
@@ -2035,15 +2046,18 @@ def _resolve_alignment_overlaps(
                 context_uids = [
                     str(item["utterance_uid"]) for item in source[start:end]
                 ]
-                context_key = tuple(context_uids)
-                if len(context_uids) < 2 or context_key in seen_contexts:
-                    continue
-                seen_contexts.add(context_key)
-                add_joint_component_options(
-                    context_uids,
-                    context_uids,
-                    f"residual-{component_index}-{order[uid] + 1}-{label}",
-                )
+                for padding_ms in (None, 300, 100, 0):
+                    context_key = (tuple(context_uids), padding_ms)
+                    if len(context_uids) < 2 or context_key in seen_contexts:
+                        continue
+                    seen_contexts.add(context_key)
+                    add_joint_component_options(
+                        context_uids,
+                        context_uids,
+                        f"residual-{component_index}-{order[uid] + 1}-{label}"
+                        f"-padding-{padding_ms}",
+                        padding_ms=padding_ms,
+                    )
     conflict_uids = {
         str(word["utterance_uid"])
         for overlap in residual_before_partition

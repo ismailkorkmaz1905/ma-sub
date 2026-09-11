@@ -51,8 +51,9 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v8"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v9"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
+MAX_INDEPENDENT_CONTEXT_RECOVERIES = 32
 DURATION_VAD_FIELDS = frozenset(
     {
         "duration_context",
@@ -68,6 +69,10 @@ DURATION_VAD_FIELDS = frozenset(
 
 class ForcedAlignmentError(RuntimeError):
     """Raised when corrected text cannot be aligned without guessed timing."""
+
+
+class _RecoverableIndependentAlignmentError(ForcedAlignmentError):
+    pass
 
 
 def _alignment_model_text(value: str) -> str:
@@ -726,7 +731,7 @@ def _normalize_aligned_words(
                     for neighbor_score in neighbor_scores
                 )
             ):
-                raise ForcedAlignmentError(
+                raise _RecoverableIndependentAlignmentError(
                     f"{utterance_uid} word {canonical_text!r} alignment score "
                     f"{score:.6f} is below the required minimum "
                     f"{min_word_score:.6f} without adjacent unchanged-word support"
@@ -1754,6 +1759,7 @@ def _resolve_alignment_overlaps(
     max_word_duration_ms: int,
     max_outward_drift_ms: int,
     vad_regions: Sequence[Mapping[str, Any]],
+    initial_modes: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str], dict[str, Any]]:
     by_uid = {str(item["utterance_uid"]): item for item in source}
     order = {str(item["utterance_uid"]): index for index, item in enumerate(source)}
@@ -1762,10 +1768,14 @@ def _resolve_alignment_overlaps(
         [word for words in selected.values() for word in words]
     )
     initial_components = _overlap_components(initial_overlaps, order)
+    initial_modes = initial_modes or {}
     options: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {
-        uid: [("independent", words)] for uid, words in independent.items()
+        uid: [(initial_modes.get(uid, "independent"), words)]
+        for uid, words in independent.items()
     }
-    selected_mode_by_uid = {uid: "independent" for uid in selected}
+    selected_mode_by_uid = {
+        uid: initial_modes.get(uid, "independent") for uid in selected
+    }
     joint_diagnostics: dict[str, Any] = {
         "attempts": 0,
         "align_failures": 0,
@@ -2404,7 +2414,8 @@ def align_corrected_segments(
     independent_by_uid: dict[str, list[dict[str, Any]]] = {}
     raw_punctuation_only_count = 0
     next_word_index = 1
-    alignment_issues = []
+    alignment_issues: dict[str, str] = {}
+    recoverable_issues: set[str] = set()
     for segment_index, coarse in enumerate(source, start=1):
         if segment_index > 1:
             mark_work_progress("forced_alignment", completed=segment_index - 1)
@@ -2439,7 +2450,10 @@ def align_corrected_segments(
                 vad_regions=trusted_vad_regions,
             )
         except ForcedAlignmentError as exc:
-            alignment_issues.append(f"{coarse['utterance_uid']}: {exc}")
+            utterance_uid = str(coarse["utterance_uid"])
+            alignment_issues[utterance_uid] = f"{utterance_uid}: {exc}"
+            if isinstance(exc, _RecoverableIndependentAlignmentError):
+                recoverable_issues.add(utterance_uid)
             continue
         raw_punctuation_only_count += punctuation_count
         next_word_index += len(words)
@@ -2469,8 +2483,9 @@ def align_corrected_segments(
             deletion_audio_reviewed=bool(coarse["deletion_audio_reviewed"]),
         )
         if exceeds_default_drift and drift_context is None:
-            alignment_issues.append(
-                f"{coarse['utterance_uid']} exceeds max_outward_drift_ms "
+            utterance_uid = str(coarse["utterance_uid"])
+            alignment_issues[utterance_uid] = (
+                f"{utterance_uid} exceeds max_outward_drift_ms "
                 f"{max_outward_drift_ms}: {drift_audit}"
             )
             continue
@@ -2506,10 +2521,110 @@ def align_corrected_segments(
             }
         )
 
+    initial_modes = {uid: "independent" for uid in independent_by_uid}
+    if 0 < len(recoverable_issues) <= MAX_INDEPENDENT_CONTEXT_RECOVERIES:
+        source_order = {
+            str(item["utterance_uid"]): index for index, item in enumerate(source)
+        }
+        for utterance_uid in sorted(recoverable_issues, key=source_order.__getitem__):
+            position = source_order[utterance_uid]
+            item = source[position]
+            ranges = [
+                (max(0, position - 1), position + 1),
+                (position, min(len(source), position + 2)),
+                (max(0, position - 1), min(len(source), position + 2)),
+            ]
+            for radius in (2, 4, 8):
+                ranges.append(
+                    (max(0, position - radius), min(len(source), position + radius + 1))
+                )
+            seen_ranges: set[tuple[int, int]] = set()
+            for start, end in ranges:
+                if (start, end) in seen_ranges or end - start < 2:
+                    continue
+                seen_ranges.add((start, end))
+                group = source[start:end]
+                if any(
+                    int(left["coarse_end_ms"]) > int(right["coarse_start_ms"])
+                    for left, right in zip(group, group[1:])
+                ):
+                    continue
+                joint_start = min(int(context["start_ms"]) for context in group)
+                joint_end = max(int(context["end_ms"]) for context in group)
+                try:
+                    raw_result = align(
+                        [
+                            {
+                                "start": joint_start / 1000.0,
+                                "end": joint_end / 1000.0,
+                                "text": _alignment_model_text(
+                                    " ".join(str(context["text"]) for context in group)
+                                ),
+                            }
+                        ],
+                        align_model,
+                        align_metadata,
+                        audio,
+                        device,
+                        **call_kwargs,
+                    )
+                    raw_words = _raw_aligned_words(
+                        raw_result, f"independent-context-{utterance_uid}"
+                    )
+                    counts = [
+                        len(_canonical_lexical_surfaces(str(context["text"])))
+                        for context in group
+                    ]
+                    if len(raw_words) != sum(counts):
+                        continue
+                    target_offset = sum(counts[: position - start])
+                    expanded = dict(item)
+                    expanded["start_ms"] = joint_start
+                    expanded["end_ms"] = joint_end
+                    words, punctuation_count = _normalize_aligned_words(
+                        {
+                            "word_segments": raw_words[
+                                target_offset : target_offset + counts[position - start]
+                            ]
+                        },
+                        expanded,
+                        segment_index=position + 1,
+                        first_word_index=1,
+                        min_word_score=min_word_score,
+                        max_word_duration_ms=max_word_duration_ms,
+                        vad_regions=trusted_vad_regions,
+                    )
+                    drift = _segment_drift_audit(
+                        words,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                    )
+                    context = _bounded_drift_context(
+                        words,
+                        drift,
+                        window_start_ms=joint_start,
+                        window_end_ms=joint_end,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                        max_outward_drift_ms=max_outward_drift_ms,
+                    )
+                    if (
+                        drift["early_outward_drift_ms"] > max_outward_drift_ms
+                        or drift["late_outward_drift_ms"] > max_outward_drift_ms
+                    ) and context is None:
+                        continue
+                except Exception:
+                    continue
+                independent_by_uid[utterance_uid] = words
+                initial_modes[utterance_uid] = "joint-recovery"
+                raw_punctuation_only_count += punctuation_count
+                alignment_issues.pop(utterance_uid, None)
+                break
+
     if alignment_issues:
         raise ForcedAlignmentError(
             f"independent alignment failed for {len(alignment_issues)} utterances:\n"
-            + "\n".join(alignment_issues)
+            + "\n".join(alignment_issues.values())
         )
 
     selected_by_uid, assigned_speakers, overlap_resolution = (
@@ -2526,6 +2641,7 @@ def align_corrected_segments(
             max_word_duration_ms=max_word_duration_ms,
             max_outward_drift_ms=max_outward_drift_ms,
             vad_regions=trusted_vad_regions,
+            initial_modes=initial_modes,
         )
     )
     aligned_segments = []

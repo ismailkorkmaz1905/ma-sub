@@ -406,6 +406,97 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertIn("failed for 2 utterances", str(raised.exception))
         self.assertIn("utt-1", str(raised.exception))
         self.assertIn("utt-2", str(raised.exception))
+        self.assertEqual(len(fake.align_calls), 3)
+
+    def test_low_independent_score_recovers_from_disjoint_joint_context(self):
+        coarse = [
+            {
+                "start_ms": 500,
+                "end_ms": 1_500,
+                "text": "Once",
+                "asr_text": "Once",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-before",
+            },
+            {
+                "start_ms": 1_500,
+                "end_ms": 3_000,
+                "text": "Beni anliyor",
+                "asr_text": "Beni anliyor",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-target",
+            },
+            {
+                "start_ms": 3_000,
+                "end_ms": 4_000,
+                "text": "Sonra",
+                "asr_text": "Sonra",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-after",
+            },
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result([{"word": "Once", "start": 0.6, "end": 1.0}]),
+                _result([
+                    {"word": "Beni", "start": 1.7, "end": 2.0},
+                    {"word": "anliyor", "start": 2.1, "end": 2.6, "score": 0.218},
+                ]),
+                _result([{"word": "Sonra", "start": 3.2, "end": 3.6}]),
+                _result([
+                    {"word": "Once", "start": 0.6, "end": 1.0},
+                    {"word": "Beni", "start": 1.7, "end": 2.0},
+                    {"word": "anliyor", "start": 2.1, "end": 2.6},
+                ]),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory), coarse, whisperx_module=fake
+            )
+
+        self.assertEqual(len(fake.align_calls), 4)
+        self.assertEqual(
+            data["provenance"]["overlap_resolution"]["selected_mode_counts"],
+            {"independent": 2, "joint-recovery": 1},
+        )
+        self.assertEqual(data["segments"][1]["end_ms"], 2_600)
+        validate_forced_alignment_data(data)
+
+    def test_low_score_recovery_does_not_serialize_overlapping_context(self):
+        coarse = [
+            {
+                "start_ms": 1_000,
+                "end_ms": 2_500,
+                "text": "Merhaba",
+                "asr_text": "Merhaba",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-a",
+                "speaker_id": "speaker-a",
+            },
+            {
+                "start_ms": 1_200,
+                "end_ms": 2_800,
+                "text": "Anliyor",
+                "asr_text": "Anliyor",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-b",
+                "speaker_id": "speaker-b",
+            },
+        ]
+        fake = _FakeWhisperX(
+            [
+                _result([{"word": "Merhaba", "start": 1.1, "end": 2.0}]),
+                _result([
+                    {"word": "Anliyor", "start": 1.3, "end": 2.2, "score": 0.218}
+                ]),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ForcedAlignmentError, "below the required minimum"):
+                align_corrected_segments(
+                    self._audio(directory), coarse, whisperx_module=fake
+                )
         self.assertEqual(len(fake.align_calls), 2)
 
     def test_joint_alignment_resolves_unknown_speaker_overlap(self) -> None:

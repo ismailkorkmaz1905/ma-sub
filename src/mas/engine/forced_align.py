@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v4"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v5"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 DURATION_VAD_FIELDS = frozenset(
     {
@@ -1949,10 +1949,12 @@ def _resolve_alignment_overlaps(
             record_joint_failure(f"{component_index}: {exc}")
             return
 
-    def contextual_component_uids(component_uids: Sequence[str]) -> list[str]:
+    def contextual_component_uids(
+        component_uids: Sequence[str], *, radius: int = 2
+    ) -> list[str]:
         positions = [order[uid] for uid in component_uids]
-        start = max(0, min(positions) - 2)
-        end = min(len(source), max(positions) + 3)
+        start = max(0, min(positions) - radius)
+        end = min(len(source), max(positions) + radius + 1)
         return [str(item["utterance_uid"]) for item in source[start:end]]
 
     for component_index, component_uids in enumerate(initial_components, start=1):
@@ -2011,12 +2013,13 @@ def _resolve_alignment_overlaps(
     )
     residual_components = _overlap_components(residual_before_partition, order)
     for component_index, seed_uids in enumerate(residual_components, start=1):
-        context_uids = contextual_component_uids(seed_uids)
-        add_joint_component_options(
-            context_uids,
-            context_uids,
-            f"residual-{component_index}",
-        )
+        for radius in (1, 2, 4, 8):
+            context_uids = contextual_component_uids(seed_uids, radius=radius)
+            add_joint_component_options(
+                context_uids,
+                context_uids,
+                f"residual-{component_index}-radius-{radius}",
+            )
     conflict_uids = {
         str(word["utterance_uid"])
         for overlap in residual_before_partition

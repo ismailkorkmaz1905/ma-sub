@@ -1003,6 +1003,91 @@ class ForcedAlignmentTests(unittest.TestCase):
         )
         validate_forced_alignment_data(data)
 
+    def test_edge_partition_preserves_long_cue_tail_context(self) -> None:
+        source = [
+            {
+                "start_ms": 500,
+                "end_ms": 5400,
+                "coarse_start_ms": 1000,
+                "coarse_end_ms": 5000,
+                "text": "Left",
+                "utterance_uid": "utt-left",
+            },
+            {
+                "start_ms": 4500,
+                "end_ms": 5900,
+                "coarse_start_ms": 5000,
+                "coarse_end_ms": 5500,
+                "text": "Right",
+                "utterance_uid": "utt-right",
+            },
+        ]
+        independent = {
+            "utt-left": [
+                {
+                    "utterance_uid": "utt-left",
+                    "word": "Left",
+                    "start_ms": 4800,
+                    "end_ms": 5200,
+                }
+            ],
+            "utt-right": [
+                {
+                    "utterance_uid": "utt-right",
+                    "word": "Right",
+                    "start_ms": 5100,
+                    "end_ms": 5300,
+                }
+            ],
+        }
+        edge_windows = {
+            "utt-left": (500, 5000, 4800, 4950),
+            "utt-right": (5000, 5900, 5050, 5300),
+        }
+
+        def candidate(item, *, window_start_ms, window_end_ms, **kwargs):
+            expected_start, expected_end, word_start, word_end = edge_windows[
+                item["utterance_uid"]
+            ]
+            if (window_start_ms, window_end_ms) != (expected_start, expected_end):
+                raise ForcedAlignmentError("synthetic non-edge candidate rejected")
+            return [
+                {
+                    "utterance_uid": item["utterance_uid"],
+                    "word": item["text"],
+                    "start_ms": word_start,
+                    "end_ms": word_end,
+                }
+            ]
+
+        with patch("mas.engine.forced_align._alignment_candidate", side_effect=candidate):
+            selected, _, resolution = forced_align._resolve_alignment_overlaps(
+                source,
+                independent,
+                align=lambda *args, **kwargs: _result(
+                    [{"word": "Left", "start": 4.8, "end": 5.2}]
+                ),
+                align_model=object(),
+                align_metadata={},
+                audio=object(),
+                device="cuda",
+                call_kwargs={},
+                min_word_score=DEFAULT_MIN_WORD_SCORE,
+                max_word_duration_ms=DEFAULT_MAX_WORD_DURATION_MS,
+                max_outward_drift_ms=DEFAULT_MAX_OUTWARD_DRIFT_MS,
+                vad_regions=[],
+            )
+
+        self.assertEqual(resolution["final_overlap_count"], 0)
+        self.assertEqual(
+            [(word["start_ms"], word["end_ms"]) for word in selected["utt-left"]],
+            [(4800, 4950)],
+        )
+        self.assertEqual(
+            [(word["start_ms"], word["end_ms"]) for word in selected["utt-right"]],
+            [(5100, 5300)],
+        )
+
     def test_bounded_overlap_search_forward_checks_late_conflict(self) -> None:
         component_uids = [f"utt-{index}" for index in range(8)]
         options = {}

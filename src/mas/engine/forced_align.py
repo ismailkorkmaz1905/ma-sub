@@ -2231,6 +2231,15 @@ def _resolve_alignment_overlaps(
         (anchors[position - 1] + anchors[position]) // 2
         for position in range(1, len(anchors))
     ]
+    edge_boundaries: list[int] = []
+    for position in range(1, len(source)):
+        boundary = (
+            int(source[position - 1]["coarse_end_ms"])
+            + int(source[position]["coarse_start_ms"])
+        ) // 2
+        if edge_boundaries:
+            boundary = max(boundary, edge_boundaries[-1] + 2)
+        edge_boundaries.append(boundary)
     residual_before_partition = _unsafe_word_overlaps(
         [word for words in selected.values() for word in words]
     )
@@ -2296,39 +2305,46 @@ def _resolve_alignment_overlaps(
     partition_uids = set(conflict_uids)
     for component_uids in residual_components:
         partition_uids.update(contextual_component_uids(component_uids))
-    for uid in sorted(partition_uids, key=order.__getitem__):
-        position = order[uid]
-        item = by_uid[uid]
-        window_start = max(
-            int(item["start_ms"]), boundaries[position - 1] if position else 0
-        )
-        window_end = min(
-            int(item["end_ms"]),
-            boundaries[position] if position < len(boundaries) else int(item["end_ms"]),
-        )
-        if window_end <= window_start:
-            continue
-        try:
-            words = _alignment_candidate(
-                item,
-                window_start_ms=window_start,
-                window_end_ms=window_end,
-                segment_index=position + 1,
-                align=align,
-                align_model=align_model,
-                align_metadata=align_metadata,
-                audio=audio,
-                device=device,
-                call_kwargs=call_kwargs,
-                min_word_score=min_word_score,
-                max_word_duration_ms=max_word_duration_ms,
-                max_outward_drift_ms=max_outward_drift_ms,
-                vad_regions=vad_regions,
+    for mode, partition_boundaries in (
+        ("partition", boundaries),
+        ("edge-partition", edge_boundaries),
+    ):
+        for uid in sorted(partition_uids, key=order.__getitem__):
+            position = order[uid]
+            item = by_uid[uid]
+            window_start = max(
+                int(item["start_ms"]),
+                partition_boundaries[position - 1] if position else 0,
             )
-        except Exception:
-            continue
-        add_option(uid, "partition", words)
-        adaptive_candidate_count += 1
+            window_end = min(
+                int(item["end_ms"]),
+                partition_boundaries[position]
+                if position < len(partition_boundaries)
+                else int(item["end_ms"]),
+            )
+            if window_end <= window_start:
+                continue
+            try:
+                words = _alignment_candidate(
+                    item,
+                    window_start_ms=window_start,
+                    window_end_ms=window_end,
+                    segment_index=position + 1,
+                    align=align,
+                    align_model=align_model,
+                    align_metadata=align_metadata,
+                    audio=audio,
+                    device=device,
+                    call_kwargs=call_kwargs,
+                    min_word_score=min_word_score,
+                    max_word_duration_ms=max_word_duration_ms,
+                    max_outward_drift_ms=max_outward_drift_ms,
+                    vad_regions=vad_regions,
+                )
+            except Exception:
+                continue
+            add_option(uid, mode, words)
+            adaptive_candidate_count += 1
 
     resolved_component_count = 0
     for seed_uids in residual_components:

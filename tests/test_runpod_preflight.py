@@ -155,8 +155,8 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert 'FFMPEG_SHA256="$(sha256sum "$ffmpeg_path"' in script
     assert 'cmp -s -- "$RUNTIME_MARKER" "$observed_marker"' in script
     assert 'MAS_ALLOW_C0E3_VENV_ADOPTION:-}" == "1"' in script
-    assert '"$VENV" == "/workspace/ma-sub/.venv"' in script
-    assert '"$REQUIREMENTS_SHA256" == "$C0E3_REQUIREMENTS_SHA256"' in script
+    assert '"$VENV" != "/workspace/ma-sub/.venv"' in script
+    assert '"$REQUIREMENTS_SHA256" != "$C0E3_REQUIREMENTS_SHA256"' in script
     assert 'c0e3c8e40def2d7672a5dd201cd5d65fde086d6f' in script
     expected_requirements_sha = (
         "1a47075cdac4e504a915ac23badeb0524baaede883fb0608c874acab5206918f"
@@ -172,6 +172,7 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert 'timeout 300 uv pip check --python "$VENV/bin/python"' in script
     assert 'torch.ones(1, device="cuda")' in script
     assert 'ctranslate2.get_cuda_device_count() <= 0' in script
+    assert 'c0e3 direct requirement mismatch:' in script
     assert 'stale_candidates=("$VENV".rebuild.*)' in script
     assert 'remove_rebuild_tree "$stale_candidate"' in script
     assert '"$VENV".previous.*)' not in script.split('stale_candidates=', 1)[1]
@@ -187,13 +188,28 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     pre_clean = script.index(cache_clean)
     post_clean = script.index(cache_clean, pre_clean + 1)
     assert script.count(cache_clean) == 2
-    assert pre_clean < script.index('&& validate_c0e3_venv; then')
+    assert pre_clean < script.index('if ! validate_c0e3_venv; then')
     assert script.index('uv pip install --python "$candidate/bin/python"') < post_clean
     assert post_clean < script.index('if [[ -n "${MAS_NETWORK_VOLUME_QUOTA_BYTES:-}"')
     assert post_clean < script.index('PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod')
     assert script.count('uv venv --python 3.11 --relocatable "$candidate"') == 1
     assert "uv pip sync" not in script
     assert 'PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod' in script
+
+    opt_in_branch = script.split(
+        'if [[ "${MAS_ALLOW_C0E3_VENV_ADOPTION:-}" == "1" ]]; then', 1
+    )[1].split('  else\n    candidate=', 1)[0]
+    assert 'uv venv' not in opt_in_branch
+    assert opt_in_branch.count("exit 1") >= 6
+    for diagnostic in (
+        "venv expected=/workspace/ma-sub/.venv",
+        "requirements expected=$C0E3_REQUIREMENTS_SHA256",
+        "release directory missing or unsafe",
+        "existing venv missing or unsafe",
+        "runtime marker already exists",
+        "validation failed; refusing candidate rebuild",
+    ):
+        assert diagnostic in opt_in_branch
 
     runner = (ROOT / "runpod" / "run-episode.sh").read_text(encoding="utf-8")
     assert 'export PATH="${MAS_BIN_DIR:-/workspace/.local/bin}:$PATH"' in runner

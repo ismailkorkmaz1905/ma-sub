@@ -199,14 +199,20 @@ installed = {
         str(distribution.version)
     for distribution in importlib.metadata.distributions()
 }
-if {
+version_mismatches = {
     name: (version, installed.get(name))
     for name, version in requirements.items()
     if installed.get(name) is None
     or not SpecifierSet(f"=={version}").contains(
         installed[name], prereleases=True
     )
-}:
+}
+if version_mismatches:
+    for name, (locked, actual) in sorted(version_mismatches.items()):
+        print(
+            f"c0e3 direct requirement mismatch: {name} locked={locked} installed={actual}",
+            file=sys.stderr,
+        )
     raise RuntimeError("Existing c0e3 venv does not match exact direct requirements")
 
 for module in (
@@ -254,13 +260,31 @@ rm -f -- "$observed_marker"
 
 if [[ "$runtime_reusable" -ne 1 ]]; then
   timeout 120 uv cache clean
-  if [[ "${MAS_ALLOW_C0E3_VENV_ADOPTION:-}" == "1" \
-      && "$VENV" == "/workspace/ma-sub/.venv" \
-      && "$REQUIREMENTS_SHA256" == "$C0E3_REQUIREMENTS_SHA256" \
-      && -d "$C0E3_RELEASE" && ! -L "$C0E3_RELEASE" \
-      && -d "$VENV" && ! -L "$VENV" && -x "$VENV/bin/python" \
-      && ! -e "$RUNTIME_MARKER" && ! -L "$RUNTIME_MARKER" ]] \
-      && validate_c0e3_venv; then
+  if [[ "${MAS_ALLOW_C0E3_VENV_ADOPTION:-}" == "1" ]]; then
+    if [[ "$VENV" != "/workspace/ma-sub/.venv" ]]; then
+      echo "c0e3 adoption guard failed: venv expected=/workspace/ma-sub/.venv actual=$VENV" >&2
+      exit 1
+    fi
+    if [[ "$REQUIREMENTS_SHA256" != "$C0E3_REQUIREMENTS_SHA256" ]]; then
+      echo "c0e3 adoption guard failed: requirements expected=$C0E3_REQUIREMENTS_SHA256 actual=$REQUIREMENTS_SHA256" >&2
+      exit 1
+    fi
+    if [[ ! -d "$C0E3_RELEASE" || -L "$C0E3_RELEASE" ]]; then
+      echo "c0e3 adoption guard failed: release directory missing or unsafe: $C0E3_RELEASE" >&2
+      exit 1
+    fi
+    if [[ ! -d "$VENV" || -L "$VENV" || ! -x "$VENV/bin/python" ]]; then
+      echo "c0e3 adoption guard failed: existing venv missing or unsafe: $VENV" >&2
+      exit 1
+    fi
+    if [[ -e "$RUNTIME_MARKER" || -L "$RUNTIME_MARKER" ]]; then
+      echo "c0e3 adoption guard failed: runtime marker already exists: $RUNTIME_MARKER" >&2
+      exit 1
+    fi
+    if ! validate_c0e3_venv; then
+      echo "c0e3 adoption validation failed; refusing candidate rebuild" >&2
+      exit 1
+    fi
     write_runtime_marker "$VENV/bin/python" "$RUNTIME_MARKER"
   else
     candidate="$(mktemp -d "$VENV.rebuild.XXXXXX")"

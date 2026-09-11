@@ -52,7 +52,7 @@ AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
 OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v1"
-MAX_OVERLAP_COMBINATIONS = 4096
+MAX_OVERLAP_COMBINATIONS = 131_072
 DURATION_VAD_FIELDS = frozenset(
     {
         "duration_context",

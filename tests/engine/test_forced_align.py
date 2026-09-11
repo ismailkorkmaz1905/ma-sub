@@ -313,7 +313,7 @@ class ForcedAlignmentTests(unittest.TestCase):
             {"start_ms": 1000, "end_ms": 2500, "text": "Merhaba.",
              "asr_text": "Merhaba.", "deletion_audio_reviewed": False,
              "utterance_uid": f"utt-{i}"}
-            for i in range(13)
+            for i in range(18)
         ]
         independent = _result([{"word": "Merhaba.", "start": 1.1, "end": 2.0}])
         joint = _result([
@@ -321,9 +321,11 @@ class ForcedAlignmentTests(unittest.TestCase):
         ])
         fake = _FakeWhisperX([independent] * len(coarse) + [joint])
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ForcedAlignmentError, "8192 combinations.*limit 4096"):
+            with self.assertRaisesRegex(
+                ForcedAlignmentError, "262144 combinations.*limit 131072"
+            ):
                 align_corrected_segments(self._audio(directory), coarse, whisperx_module=fake)
-        self.assertEqual(len(fake.align_calls), 14)
+        self.assertEqual(len(fake.align_calls), 19)
 
     def test_all_independent_utterance_failures_are_reported_in_one_pass(self):
         fake = _FakeWhisperX([

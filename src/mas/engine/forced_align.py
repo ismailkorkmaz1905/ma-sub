@@ -1972,7 +1972,7 @@ def _resolve_alignment_overlaps(
             joint_diagnostics["align_failures"] += 1
             record_joint_failure(f"{component_index}: {exc}")
             return False
-        if set(joint_candidates) != target_uid_set:
+        if not joint_candidates:
             return False
         active_coarse: list[Mapping[str, Any]] = []
         for item in sorted(group, key=lambda value: int(value["coarse_start_ms"])):
@@ -1990,26 +1990,33 @@ def _resolve_alignment_overlaps(
             ):
                 return False
             active_coarse.append(item)
+        candidate_uid_set = set(joint_candidates)
         outside_words = [
             word
             for uid, words in selected.items()
-            if uid not in target_uid_set
+            if uid not in candidate_uid_set
             for word in words
         ]
         trial_words = outside_words + [
-            word for uid in target_uids for word in joint_candidates[uid]
+            word for words in joint_candidates.values() for word in words
         ]
         if any(
-            str(left["utterance_uid"]) in target_uid_set
-            or str(right["utterance_uid"]) in target_uid_set
+            str(left["utterance_uid"]) in candidate_uid_set
+            or str(right["utterance_uid"]) in candidate_uid_set
             for left, right in _unsafe_word_overlaps(trial_words)
         ):
             return False
-        for uid in target_uids:
-            selected[uid] = joint_candidates[uid]
+        for uid, words in joint_candidates.items():
+            selected[uid] = words
             selected_mode_by_uid[uid] = "joint"
         joint_diagnostics["atomic_selections"] += 1
-        return True
+        return not any(
+            str(left["utterance_uid"]) in target_uid_set
+            or str(right["utterance_uid"]) in target_uid_set
+            for left, right in _unsafe_word_overlaps(
+                [word for words in selected.values() for word in words]
+            )
+        )
 
     def contextual_component_uids(
         component_uids: Sequence[str], *, radius: int = 2

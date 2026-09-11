@@ -180,6 +180,27 @@ class _TwoPairOverlapWhisperX(_FakeWhisperX):
         ])
 
 
+class _PartialJointOverlapWhisperX(_FakeWhisperX):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def align(self, transcript, *args, **kwargs):
+        text = transcript[0]["text"]
+        self.align_calls.append({"text": text})
+        results = {
+            "Alpha": [("Alpha", 1.1, 2.0, 0.9)],
+            "Bravo": [("Bravo", 1.3, 2.2, 0.9)],
+            "Alpha Bravo": [
+                ("Alpha", 1.1, 1.4, 0.1),
+                ("Bravo", 2.1, 2.2, 0.9),
+            ],
+        }
+        return _result([
+            {"word": word, "start": start, "end": end, "score": score}
+            for word, start, end, score in results[text]
+        ])
+
+
 class _ContextualOverlapWhisperX(_FakeWhisperX):
     def __init__(self, *, invalid_context: bool = False) -> None:
         super().__init__([])
@@ -639,6 +660,43 @@ class ForcedAlignmentTests(unittest.TestCase):
 
         resolution = data["provenance"]["overlap_resolution"]
         self.assertEqual(resolution["selected_mode_counts"], {"joint": 4})
+        self.assertEqual(resolution["final_overlap_count"], 0)
+        validate_forced_alignment_data(data)
+
+    def test_valid_joint_subset_is_selected_atomically(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1000,
+                "end_ms": 2500,
+                "text": "Alpha",
+                "asr_text": "Alpha",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-alpha",
+                "speaker_id": "speaker-a",
+            },
+            {
+                "start_ms": 1200,
+                "end_ms": 2800,
+                "text": "Bravo",
+                "asr_text": "Bravo",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-bravo",
+                "speaker_id": "speaker-a",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("mas.engine.forced_align.MAX_OVERLAP_COMBINATIONS", 1):
+                data = align_corrected_segments(
+                    self._audio(directory),
+                    coarse,
+                    whisperx_module=_PartialJointOverlapWhisperX(),
+                )
+
+        resolution = data["provenance"]["overlap_resolution"]
+        self.assertEqual(
+            resolution["selected_mode_counts"],
+            {"independent": 1, "joint": 1},
+        )
         self.assertEqual(resolution["final_overlap_count"], 0)
         validate_forced_alignment_data(data)
 

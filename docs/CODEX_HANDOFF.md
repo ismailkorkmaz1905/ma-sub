@@ -1,10 +1,50 @@
+# Codex handoff
+
+## Current architecture update - 2026-09-12
+
+This section supersedes older architecture and resume descriptions below where
+they conflict. The changes are locally implemented and tested; they do not by
+themselves prove a real Episode 13 GPU, Drive, shutdown or delivery PASS.
+
+Current flow:
+
+```text
+source -> audio -> raw ASR -> TR return -> audio review -> forced alignment
+       -> ID return -> strict_finalize -> burn_mp4 -> exit 22 collection
+       -> owned GPU Pods ABSENT -> Drive upload/readback
+```
+
+- Completed audio review hydrates only after the final Turkish ZIP and report
+  match the exact current review input, configuration, implementation and manual
+  overrides. `state.json` alone never skips this work.
+- Forced alignment now creates `forced_alignment_v2.done.json` after the current
+  audio, corrected text, VAD, code/dependency binding and aligned output pass.
+  Its details bind the alignment digest and exact validated correction-output
+  digest. A legacy aligned output is adopted only after the current full binding
+  validator passes.
+- `strict_finalize` and `burn_mp4` are separate. The strict marker binds all
+  canonical evidence/configuration inputs, relevant producer code, PASS report,
+  softsub MKV and both SRT files. MP4 reuse remains independently bound to the
+  source, ID SRT, style, encoding settings, sample approval, output and receipt.
+- Exit 22 is not recoverably complete until controller collection succeeds. If
+  an expected external `/tmp/mas-epN-output/` MP4 or receipt is missing, a
+  checksum-bound collection-failure record tied to the exact request and attempt
+  advances the next remote-job identity. The episode budget is not reset.
+- Drive publication now occurs after the capacity lease closes and bound
+  capacity/shutdown evidence proves every controller-owned temporary Pod is
+  `ABSENT`. If Drive then fails, a verified release marker enables a
+  transfer-only retry before RunPod/Git/SSH preflight; that path cannot acquire
+  GPU compute.
+- Runtime bootstrap reuse now has an ABI marker, but there is still no proven
+  immutable container image digest. The repository also does not yet demonstrate
+  a complete transitive hash lock covering every Python dependency, native
+  library, model and base-image component. Both remain open release risks.
+
 > DELIVERY COMPLETE, 2026-09-06: Episode 12 1080p H.264/AAC MP4 with Indonesian subtitles burned in is complete and published. Drive object 1FAkmN0Z9HWcRrbfOT8C-ftmSXXiDdA2I was fully read before and after metadata-only rename: both actual reads match 8,978,040,872 bytes and SHA-256 3069df576bcf5d9ec88b1176ed3f016c2f210e511adcd216d38bf4b021f22675. Transport PASS; subtitle/perceptual quality remains REVIEW_REQUIRED. All owned MP4 Pods are externally ABSENT, retained Pod EXITED, volume preserved. Last balance USD 2.8764311039 at 14:01 UTC. No active GPU, encoder or delivery job remains.
 >
 > Local MP4: C:/Users/Ismail/CodeBase/ma-sub-archive-20260906/deliverables/Muhtemel Ask 12.Bolum.id.BURNED.REVIEW.mp4. Evidence: mp4-final-20260906T125824Z/recovery-complete.json under that archive. Earlier var/ and EPISODES/ paths also resolve under the archive. SSH -n -T and CUDA AV1 decode are in main; last local suite 742 passed, 5 skipped in 57.59 seconds. Pip/uv installer caches and failed video intermediates were cleaned; models, venv, sources and final artifacts preserved. Native single-stream download and direct-ID readback recovered the shared Google quota failure. Episode 13 has NOT started; use the updated desktop launcher and [plain-language report](SON_DURUM_VE_BOLUM_13.md). Earlier stopped/incomplete/active-job statements below are historical.
 
 > DRIVE LAYOUT UPDATE, 2026-09-06: Muhtemel_Ask_Subtitles (1Gdn4WLjICGJNsYIMCSpSNyXgA_8mdL5p) now directly contains only the same verified MP4 object. Live listing confirmed one file and no subfolders. The old EPISODES tree was moved outside delivery to My Drive as "Muhtemel Ask - Eski teslim arsivi - 20260906" (same folder ID 1baEW_vbsemXqM-K1or6SOEAyP63DCGpI). Native trash attempts hit shared-project quota HTTP 403; browser access was unavailable. Old MKV/SRT are archived, NOT deleted. The old delivery path is historical; inventory current Drive before Episode 13 publication.
-
-# Codex handoff
 
 LATEST DELIVERY STATE AFTER INTERRUPTION, 2026-09-06: final local Episode 12
 review SRTs and verified MKV are in `work/review-delivery-20260906-final-utf8/`.

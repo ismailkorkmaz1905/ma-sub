@@ -82,22 +82,49 @@ def _controller_preflight(monkeypatch, root):
 
 
 def test_transfer_only_verified_local_delivery_never_acquires_gpu(tmp_path, monkeypatch):
-    _controller_preflight(monkeypatch, tmp_path)
+    monkeypatch.setattr(runpod_controller, 'ROOT', tmp_path)
+    monkeypatch.setattr(runpod_controller, 'episode_dir', lambda _: tmp_path / 'episode')
+    monkeypatch.setenv('MAS_DRIVE_STRICT_REMOTE', 'drive:delivery')
+    for name in ('RUNPOD_POD_ID', 'RUNPOD_API_KEY', 'MAS_RUNPOD_SSH_KEY',
+                 'MAS_YTDLP_COOKIES', 'MAS_GMAIL_ADDRESS',
+                 'MAS_GMAIL_APP_PASSWORD', 'MAS_NOTIFY_TO'):
+        monkeypatch.delenv(name, raising=False)
     episode_root = tmp_path / 'episode'
     _strict_delivery(episode_root)
     delivery.validate_delivery(episode_root, 13)
-    (episode_root / 'work').mkdir(parents=True)
-    atomic_json(episode_root / 'work' / 'gpu-released-for-delivery.json', {
-        'status': 'ABSENT', 'delivery_sha256': delivery.sha256_file(
-            episode_root / 'final' / 'burned_mp4_delivery.json')})
+    audit = episode_root / 'work' / 'capacity' / 'completed'
+    audit.mkdir(parents=True)
+    shutdown_result = [{'pod_id': 'owned', 'status': 'ABSENT', 'error_type': None}]
+    state = {'format': 'mas-capacity-lease-state-1', 'episode': 13,
+             'owned_pod_ids': ['owned'], 'shutdown': shutdown_result, 'status': 'RELEASED'}
+    atomic_json(audit / 'capacity-state.json',
+                {'data': state, 'sha256': runpod_controller.digest(state)})
+    shutdown = {'state_sha256': runpod_controller.digest(state), 'owned_pods': shutdown_result}
+    atomic_json(audit / 'capacity-shutdown.json',
+                {'data': shutdown, 'sha256': runpod_controller.digest(shutdown)})
+    runpod_controller._write_delivery_release(episode_root, 13, 'owned', audit)
     def publish(root, episode, remote):
         delivery.validate_delivery(root, episode)
         assert remote == 'drive:delivery'
         return 0
     monkeypatch.setattr(runpod_controller, 'publish_local_delivery', publish)
+    monkeypatch.setattr(runpod_controller, '_required_environment',
+                        lambda: pytest.fail('transfer-only retry required RunPod environment'))
+    monkeypatch.setattr(runpod_controller, '_local_preflight',
+                        lambda *_: pytest.fail('transfer-only retry ran RunPod/git/SSH preflight'))
+    monkeypatch.setattr(runpod_controller, '_validate_local_tr_return',
+                        lambda *_: pytest.fail('transfer-only retry revalidated TR handoff'))
+    monkeypatch.setattr(runpod_controller, 'preflight_local_id_return',
+                        lambda *_: pytest.fail('transfer-only retry revalidated ID handoff'))
     monkeypatch.setattr(runpod_controller, 'CapacityProvider',
                         lambda *args: pytest.fail('transfer-only retry acquired GPU capacity'))
     assert runpod_controller.run_remote_episode(13) == 0
+
+    with (audit / 'capacity-state.json').open('a', encoding='utf-8') as handle:
+        handle.write('\n')
+    with pytest.raises(runpod_controller.RunPodControllerError,
+                       match='capacity evidence changed'):
+        runpod_controller.run_remote_episode(13)
 
 
 def test_wait_23_transfers_only_samples_and_does_not_acquire_gpu(tmp_path, monkeypatch):
@@ -169,6 +196,32 @@ def test_external_mp4_export_is_exact_and_downloads_to_canonical_local(tmp_path,
     with pytest.raises(runpod_controller.RunPodControllerError, match='escapes episode'):
         runpod_controller._download_record(bad, tmp_path / 'other', remote_root,
                                            ['scp'], 'host', budget)
+
+
+def test_changed_external_mp4_preserves_prior_canonical_by_sha(tmp_path, monkeypatch):
+    local_root = tmp_path / 'episode'
+    remote_root = '/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum'
+    filename = 'Muhtemel Ask 13.Bolum.id.bound.mp4'
+    canonical = local_root / 'final' / filename
+    canonical.parent.mkdir(parents=True)
+    prior = b'prior external mp4'
+    current = b'new external mp4'
+    canonical.write_bytes(prior)
+    record = {'relative_path': f'final/{filename}',
+              'storage_path': f'/tmp/mas-ep13-output/{filename}',
+              'size_bytes': len(current), 'sha256': hashlib.sha256(current).hexdigest()}
+    def transfer(command, **kwargs):
+        Path(command[-1]).write_bytes(current)
+    monkeypatch.setattr(runpod_controller, '_network_retry', transfer)
+    budget = type('Budget', (), {'check': lambda self: 60})()
+
+    runpod_controller._download_record(record, local_root, remote_root,
+                                       ['scp'], 'host', budget)
+
+    retained = (local_root / 'work' / 'remote-checkpoints' /
+                hashlib.sha256(prior).hexdigest() / filename)
+    assert retained.read_bytes() == prior
+    assert canonical.read_bytes() == current
 
 
 def test_strict_source_returns_subtitles_and_mkv_remain_hash_bound(tmp_path):

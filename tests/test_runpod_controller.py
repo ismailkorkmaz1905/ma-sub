@@ -370,8 +370,7 @@ def test_failed_terminal_remote_job_gets_new_attempt_identity(tmp_path):
     )
 
 
-@pytest.mark.parametrize("exit_code", [0, 20, 21, runpod_controller.READY_FOR_DELIVERY,
-                                       runpod_controller.WAIT_MP4_SAMPLE])
+@pytest.mark.parametrize("exit_code", [0, 20, 21, runpod_controller.WAIT_MP4_SAMPLE])
 def test_expected_terminal_remote_job_keeps_input_identity(tmp_path, exit_code):
     request_path = tmp_path / "remote-job-request.json"
     status_path = tmp_path / "remote-job-status.json"
@@ -388,6 +387,188 @@ def test_expected_terminal_remote_job_keeps_input_identity(tmp_path, exit_code):
     assert runpod_controller._remote_attempt_identity(
         base, request_path, status_path
     ) == (base, 0)
+
+
+def test_stale_collection_failure_marker_does_not_reset_ready_attempt(tmp_path):
+    request_path = tmp_path / "remote-job-request.json"
+    status_path = tmp_path / "remote-job-status.json"
+    marker_path = tmp_path / "remote-result-collection-failure.json"
+    base = "a" * 64
+    input_sha = runpod_controller.digest({"base_input_sha256": base, "attempt": 1})
+    request = {
+        "commit": "b" * 40,
+        "episode": 13,
+        "input_sha256": input_sha,
+        "base_input_sha256": base,
+        "attempt": 1,
+    }
+    request_path.write_text(
+        json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY}),
+        encoding="utf-8",
+    )
+    stale = {
+        "format": "mas-remote-result-collection-failure-1",
+        "base_input_sha256": base,
+        "input_sha256": base,
+        "attempt": 0,
+        "exit_code": runpod_controller.READY_FOR_DELIVERY,
+        "request_sha256": "c" * 64,
+    }
+    marker_path.write_text(
+        json.dumps({"data": stale, "sha256": runpod_controller.digest(stale)}),
+        encoding="utf-8",
+    )
+
+    next_sha, attempt = runpod_controller._remote_attempt_identity(
+        base, request_path, status_path
+    )
+
+    assert attempt == 2
+    assert next_sha == runpod_controller.digest(
+        {"base_input_sha256": base, "attempt": 2}
+    )
+
+
+def test_delivery_export_failure_records_current_attempt(tmp_path, monkeypatch):
+    local_root = tmp_path / "episode"
+    work = local_root / "work"
+    work.mkdir(parents=True)
+    base = "a" * 64
+    request = {
+        "commit": "b" * 40,
+        "episode": 13,
+        "input_sha256": base,
+        "base_input_sha256": base,
+        "attempt": 0,
+    }
+    request_path = work / "remote-job-request.json"
+    status_path = work / "remote-job-status.json"
+    request_path.write_text(
+        json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        runpod_controller,
+        "_network_retry",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            runpod_controller.RunPodControllerError("export unavailable")
+        ),
+    )
+    temporary = tmp_path / "transfer"
+    temporary.mkdir()
+
+    with pytest.raises(runpod_controller.RunPodControllerError, match="export unavailable"):
+        runpod_controller._collect_remote_results(
+            runpod_controller.READY_FOR_DELIVERY,
+            13,
+            local_root,
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum",
+            ["ssh"],
+            ["scp"],
+            "host",
+            None,
+            temporary,
+        )
+
+    marker = json.loads(
+        (work / "remote-result-collection-failure.json").read_text(encoding="utf-8")
+    )
+    assert marker["sha256"] == runpod_controller.digest(marker["data"])
+    assert "relative_path" not in marker["data"]
+    assert runpod_controller._remote_attempt_identity(
+        base, request_path, status_path
+    ) == (
+        runpod_controller.digest({"base_input_sha256": base, "attempt": 1}),
+        1,
+    )
+
+
+@pytest.mark.parametrize("filename", [
+    "Muhtemel Ask 13.Bolum.id.bound.mp4",
+    "Muhtemel Ask 13.Bolum.id.bound.burn.json",
+])
+def test_missing_external_delivery_result_advances_remote_identity(
+        tmp_path, monkeypatch, filename):
+    local_root = tmp_path / "episode"
+    work = local_root / "work"
+    work.mkdir(parents=True)
+    base = "a" * 64
+    commit = "b" * 40
+    request = {
+        "commit": commit,
+        "episode": 13,
+        "input_sha256": base,
+        "base_input_sha256": base,
+        "attempt": 0,
+    }
+    request_path = work / "remote-job-request.json"
+    status_path = work / "remote-job-status.json"
+    request_path.write_text(
+        json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY}),
+        encoding="utf-8",
+    )
+    record = {
+        "relative_path": f"final/{filename}",
+        "storage_path": f"/tmp/mas-ep13-output/{filename}",
+        "size_bytes": 1,
+        "sha256": "c" * 64,
+    }
+    manifest = {"episode": 13, "mode": "strict", "files": [record]}
+
+    def transfer(command, **kwargs):
+        Path(command[-1]).write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(runpod_controller, "_network_retry", transfer)
+    monkeypatch.setattr(
+        runpod_controller,
+        "_download_record",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            runpod_controller.RunPodControllerError("No such file")
+        ),
+    )
+    temporary = tmp_path / "transfer"
+    temporary.mkdir()
+
+    with pytest.raises(runpod_controller.RunPodControllerError, match="No such file"):
+        runpod_controller._collect_remote_results(
+            runpod_controller.READY_FOR_DELIVERY,
+            13,
+            local_root,
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum",
+            ["ssh"],
+            ["scp"],
+            "host",
+            None,
+            temporary,
+        )
+
+    marker = json.loads(
+        (work / "remote-result-collection-failure.json").read_text(encoding="utf-8")
+    )
+    assert marker["sha256"] == runpod_controller.digest(marker["data"])
+    assert marker["data"]["relative_path"] == record["relative_path"]
+    input_sha, attempt = runpod_controller._remote_attempt_identity(
+        base, request_path, status_path
+    )
+    assert attempt == 1
+    assert input_sha == runpod_controller.digest(
+        {"base_input_sha256": base, "attempt": 1}
+    )
+    prior_token = hashlib.sha256(f"13\n{commit}\n{base}\n".encode()).hexdigest()
+    next_token = hashlib.sha256(f"13\n{commit}\n{input_sha}\n".encode()).hexdigest()
+    assert next_token != prior_token
 
 
 def test_verified_transfer_cannot_reset_episode_budget(monkeypatch, tmp_path):

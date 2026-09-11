@@ -148,6 +148,7 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
     episode_root, _ = _patch_local_preflight(monkeypatch, tmp_path)
     events = []
     plan_args = {}
+    monkeypatch.setenv("MAS_DRIVE_STRICT_REMOTE", "drive:folder")
     monkeypatch.setattr(controller, "_prepare_official_source",
                         lambda *args: "https://example.invalid/episode")
     monkeypatch.setattr(controller, "_episode_budget", lambda *args: Budget())
@@ -161,11 +162,26 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
             return {"id": volume_id, "size": 50, "dataCenterId": "EU-RO-1"}
     class Lease:
         pod = {"id": "owned"}
-        def __init__(self, *args, **kwargs): pass
+        def __init__(self, *args, **kwargs):
+            self.audit = args[2]
         def __enter__(self):
             events.append("capacity-enter")
             return self
         def __exit__(self, *args):
+            self.audit.mkdir(parents=True, exist_ok=True)
+            shutdown_result = [{"pod_id": "owned", "status": "ABSENT", "error_type": None}]
+            state = {
+                "format": "mas-capacity-lease-state-1",
+                "episode": 13,
+                "owned_pod_ids": ["owned"],
+                "shutdown": shutdown_result,
+                "status": "RELEASED",
+            }
+            atomic_json(self.audit / "capacity-state.json",
+                        {"data": state, "sha256": digest(state)})
+            shutdown = {"state_sha256": digest(state), "owned_pods": shutdown_result}
+            atomic_json(self.audit / "capacity-shutdown.json",
+                        {"data": shutdown, "sha256": digest(shutdown)})
             events.append("capacity-exit")
         def remaining_work_seconds(self): return 600
     monkeypatch.setattr(controller, "CapacityProvider", Provider)
@@ -180,12 +196,28 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
                         lambda *args, **kwargs: READY_FOR_DELIVERY)
     monkeypatch.setattr(controller, "validate_delivery", lambda *args: events.append("validate"))
     monkeypatch.setattr(controller, "sha256_file", lambda path: "b" * 64)
-    monkeypatch.setattr(controller, "publish_local_delivery",
-                        lambda *args: events.append("publish") or READY_FOR_DELIVERY)
-    assert controller.run_remote_episode(13) == READY_FOR_DELIVERY
+    def publish(*args):
+        events.append("publish" if "publish" not in events else "publish-retry")
+        if events[-1] == "publish":
+            raise RuntimeError("Drive unavailable")
+        return 0
+    monkeypatch.setattr(controller, "publish_local_delivery", publish)
+    with pytest.raises(RuntimeError, match="Drive unavailable"):
+        controller.run_remote_episode(13)
     assert events == ["capacity-enter", "capacity-exit", "validate", "publish"]
     assert plan_args["gpu_type_ids"] == ["NVIDIA L4", "NVIDIA RTX PRO 4000 Blackwell"]
-    assert (episode_root / "work" / "gpu-released-for-delivery.json").is_file()
+    release_path = episode_root / "work" / "gpu-released-for-delivery.json"
+    release = json.loads(release_path.read_text(encoding="utf-8"))
+    assert release["sha256"] == digest(release["data"])
+    assert release["data"]["capacity_state"]["relative_path"].endswith("capacity-state.json")
+    assert release["data"]["capacity_shutdown"]["relative_path"].endswith("capacity-shutdown.json")
+
+    monkeypatch.setattr(controller, "_required_environment",
+                        lambda: pytest.fail("transfer retry required GPU environment"))
+    monkeypatch.setattr(controller, "CapacityProvider",
+                        lambda *args: pytest.fail("transfer retry acquired GPU"))
+    assert controller.run_remote_episode(13) == 0
+    assert events == ["capacity-enter", "capacity-exit", "validate", "publish", "publish-retry"]
 
 
 @pytest.mark.parametrize(("change_mtime", "expected_downloads"), [(False, 1), (True, 2)])

@@ -14,8 +14,3 @@ def save(path,state):
 def set_stage(state_path,state,name,status,**details):
  if status not in {'pending','running','pass','blocked','failed'}: raise ValueError(f'invalid stage status: {status}')
  state.setdefault('stages',{})[name]={'status':status,'updated_at':datetime.now(timezone.utc).isoformat(),**details}; save(state_path,state)
-def reusable(state,name,input_sha,config_sha,verify):
- s=state.get('stages',{}).get(name,{}); return s.get('status')=='complete' and s.get('input_sha256')==input_sha and s.get('config_sha256')==config_sha and all(verify(x) for x in s.get('outputs',[]))
-def invalidate_after(state,ordered,name):
- if name in ordered:
-  for x in ordered[ordered.index(name)+1:]: state.get('stages',{}).pop(x,None)

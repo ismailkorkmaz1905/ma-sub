@@ -1,6 +1,8 @@
 import json
 import hashlib
+import stat
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +11,109 @@ from mas import pipeline
 from mas.remote import RemoteVerificationError, _run_watchdog, upload_verified
 from mas.pipeline import _stage
 from mas.runpod import RunPodShutdownError, stop_current_pod
+
+
+def test_state_module_has_no_unverified_generic_reuse_api():
+    from mas import state
+
+    assert not hasattr(state, "reusable")
+
+
+def test_strict_finalize_input_binding_covers_inputs_and_producer(tmp_path, monkeypatch):
+    producer = tmp_path / "producer.py"
+    input_path = tmp_path / "input.json"
+    producer.write_text("producer-v1", encoding="utf-8")
+    input_path.write_text("input-v1", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+    monkeypatch.setattr(pipeline, "_STRICT_FINALIZE_PRODUCER_FILES", ("producer.py",))
+
+    original = pipeline._strict_finalize_input_sha256(13, {"input": input_path})
+    input_path.write_text("input-v2", encoding="utf-8")
+    changed_input = pipeline._strict_finalize_input_sha256(13, {"input": input_path})
+    producer.write_text("producer-v2", encoding="utf-8")
+    changed_producer = pipeline._strict_finalize_input_sha256(13, {"input": input_path})
+
+    assert original != changed_input != changed_producer
+
+
+def test_strict_finalize_checkpoint_hydrates_only_exact_bound_outputs(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "episode"
+    final = root / "final"
+    subtitles = final / "subtitles"
+    subtitles.mkdir(parents=True)
+    outputs = {
+        "report": final / "report.json",
+        "mkv": final / "episode.mkv",
+        "id_srt": subtitles / "episode-id.srt",
+        "tr_srt": subtitles / "episode-tr.srt",
+    }
+    for name, path in outputs.items():
+        if name != "report":
+            path.write_text(name, encoding="utf-8")
+    report = {
+        "status": "PASS",
+        "episode": 13,
+        "outputs": {
+            name: pipeline.file_record(path, root)
+            for name, path in outputs.items()
+            if name != "report"
+        },
+    }
+    outputs["report"].write_text(json.dumps(report), encoding="utf-8")
+    marker = final / "strict_finalize.done.json"
+    input_sha256 = "a" * 64
+    pipeline.write_stage_marker(
+        marker,
+        stage="strict_finalize_v2",
+        input_sha256=input_sha256,
+        outputs=outputs,
+    )
+
+    assert pipeline._load_strict_finalize_checkpoint(
+        marker, outputs["report"], outputs, root, 13, input_sha256
+    ) == report
+
+    other_report = final / "other-report.json"
+    other_report.write_bytes(outputs["report"].read_bytes())
+    with pytest.raises(RuntimeError, match="report path is missing or unsafe"):
+        pipeline._load_strict_finalize_checkpoint(
+            marker, other_report, outputs, root, 13, input_sha256
+        )
+
+    real_lstat = Path.lstat
+    report_details = real_lstat(outputs["report"])
+
+    def symlink_lstat(path):
+        if path == outputs["report"]:
+            return SimpleNamespace(
+                st_mode=stat.S_IFLNK,
+                st_size=report_details.st_size,
+            )
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", symlink_lstat)
+    with pytest.raises(RuntimeError, match="report path is missing or unsafe"):
+        pipeline._load_strict_finalize_checkpoint(
+            marker, outputs["report"], outputs, root, 13, input_sha256
+        )
+    monkeypatch.setattr(Path, "lstat", real_lstat)
+
+    outputs["id_srt"].write_text("changed", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="checkpoint binding changed"):
+        pipeline._load_strict_finalize_checkpoint(
+            marker, outputs["report"], outputs, root, 13, input_sha256
+        )
+
+
+def test_strict_finalize_checkpoint_does_not_adopt_legacy_report(tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text('{"status":"PASS","episode":13}', encoding="utf-8")
+
+    assert pipeline._load_strict_finalize_checkpoint(
+        tmp_path / "missing.done.json", report, {}, tmp_path, 13, "a" * 64
+    ) is None
 
 
 def test_offline_fixture_interruption_and_resume(tmp_path, monkeypatch):
@@ -83,12 +188,18 @@ def test_alignment_checkpoint_rejects_changed_bindings(tmp_path, monkeypatch, ch
 
     def align(*args, **kwargs):
         calls.append(args)
-        return {"audio_sha256": pipeline.sha256_file(audio), "provenance": {"device": "cuda"}}
+        return {"audio_sha256": pipeline.sha256_file(audio),
+                "alignment_sha256": "a" * 64, "provenance": {"device": "cuda"}}
 
     monkeypatch.setattr(pipeline, "align_corrected_segments", align)
     monkeypatch.setattr(pipeline, "validate_forced_alignment_data", lambda result: None)
-    assert pipeline._aligned_checkpoint(alignment, audio, inputs, vad)[1] is False
-    assert pipeline._aligned_checkpoint(alignment, audio, inputs, vad)[1] is True
+    correction_sha256 = "b" * 64
+    assert pipeline._aligned_checkpoint(
+        alignment, audio, inputs, vad, correction_sha256
+    )[1] is False
+    assert pipeline._aligned_checkpoint(
+        alignment, audio, inputs, vad, correction_sha256
+    )[1] is True
     original = alignment.read_bytes()
     if change == "text":
         inputs[0]["text"] = "Selam"
@@ -104,9 +215,57 @@ def test_alignment_checkpoint_rejects_changed_bindings(tmp_path, monkeypatch, ch
     else:
         alignment.with_suffix(".binding.json").unlink()
     with pytest.raises(RuntimeError, match="binding is stale or missing"):
-        pipeline._aligned_checkpoint(alignment, audio, inputs, vad)
+        pipeline._aligned_checkpoint(alignment, audio, inputs, vad, correction_sha256)
     assert len(calls) == 1
     assert alignment.read_bytes() == original
+
+
+def test_verified_legacy_alignment_gets_bound_stage_marker(tmp_path, monkeypatch):
+    audio = tmp_path / "audio.wav"
+    audio.write_bytes(b"audio")
+    alignment = tmp_path / "forced_alignment_v2.json"
+    inputs = [{"utterance_uid": "u1", "text": "Merhaba"}]
+    vad = [{"start_ms": 0, "end_ms": 1000}]
+    for name in ("src/mas/engine/forced_align.py", "src/mas/engine/speaker.py",
+                 "src/mas/engine/workflow.py", "requirements.lock"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("original", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "ROOT", tmp_path)
+    calls = []
+    result = {"audio_sha256": pipeline.sha256_file(audio),
+              "alignment_sha256": "a" * 64, "provenance": {"device": "cuda"}}
+    monkeypatch.setattr(
+        pipeline,
+        "align_corrected_segments",
+        lambda *args, **kwargs: calls.append(1) or result,
+    )
+    monkeypatch.setattr(pipeline, "validate_forced_alignment_data", lambda value: None)
+    correction_sha256 = "b" * 64
+
+    pipeline._aligned_checkpoint(alignment, audio, inputs, vad, correction_sha256)
+    done = alignment.with_suffix(".done.json")
+    done.unlink()
+    assert pipeline._aligned_checkpoint(
+        alignment, audio, inputs, vad, correction_sha256
+    )[1] is True
+
+    marker = json.loads(done.read_text(encoding="utf-8"))
+    assert marker["stage"] == "forced_alignment_v2"
+    assert marker["details"] == {
+        "alignment_sha256": "a" * 64,
+        "correction_output_sha256": correction_sha256,
+    }
+    assert marker["outputs"]["forced_alignment_v2"]["sha256"] == pipeline.sha256_file(
+        alignment
+    )
+    assert calls == [1]
+
+    marker["details"]["correction_output_sha256"] = "c" * 64
+    done.write_text(json.dumps(marker), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="stage marker binding changed"):
+        pipeline._aligned_checkpoint(alignment, audio, inputs, vad, correction_sha256)
+    assert calls == [1]
 
 
 def test_drive_upload_cannot_target_emergency(tmp_path):

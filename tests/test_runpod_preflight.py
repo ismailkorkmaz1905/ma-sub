@@ -126,14 +126,42 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert "sha256sum --check --status" in script
     assert '"$MAS_BIN_DIR/rclone"' in script
     assert 'export UV_INSTALL_DIR="$MAS_BIN_DIR"' in script
-    assert 'if [[ ! -x "$VENV/bin/python" ]]; then' in script
     assert "timeout 300 apt-get -o Acquire::Retries=3 update" in script
     assert "timeout 600 apt-get -o Acquire::Retries=3 install" in script
-    assert (
-        'uv pip install --python "$VENV/bin/python" '
-        '--index-strategy unsafe-best-match --requirements requirements.lock'
-    ) in script
+    assert 'RUNTIME_MARKER="$VENV/.mas-runtime-abi.json"' in script
+    assert '"format": "mas-runtime-abi-marker-1"' in script
+    for binding in (
+        '"requirements_sha256"',
+        'sys.implementation.name',
+        'platform.python_version()',
+        'sys.implementation.cache_tag',
+        'sysconfig.get_config_var("SOABI")',
+        'platform.machine()',
+        '"uv_version"',
+        'platform.freedesktop_os_release()',
+        'os.confstr("CS_GNU_LIBC_VERSION")',
+        'torch.__version__',
+        'torch.version.cuda',
+        'torch.backends.cudnn.version()',
+        '"_GLIBCXX_USE_CXX11_ABI"',
+        '"ffmpeg"',
+        '"ffprobe"',
+    ):
+        assert binding in script
+    assert 'wrapped = {"data": data, "sha256": hashlib.sha256(canonical).hexdigest()}' in script
+    assert 'ffmpeg_path="$(readlink -f -- "$(command -v ffmpeg)")"' in script
+    assert 'FFMPEG_SHA256="$(sha256sum "$ffmpeg_path"' in script
+    assert 'cmp -s -- "$RUNTIME_MARKER" "$observed_marker"' in script
+    assert 'uv venv --python 3.11 --relocatable "$candidate"' in script
+    assert 'mv -- "$candidate" "$VENV"' in script
+    assert 'remove_rebuild_tree "$backup"' in script
+    assert 'uv pip install --python "$candidate/bin/python"' in script
+    assert '--index-strategy unsafe-best-match --requirements requirements.lock' in script
+    assert script.index('write_runtime_marker "$candidate/bin/python"') < script.index(
+        'mv -- "$VENV" "$backup"'
+    )
     assert "uv pip sync" not in script
+    assert 'PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod' in script
 
     runner = (ROOT / "runpod" / "run-episode.sh").read_text(encoding="utf-8")
     assert 'export PATH="${MAS_BIN_DIR:-/workspace/.local/bin}:$PATH"' in runner

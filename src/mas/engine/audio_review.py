@@ -963,6 +963,11 @@ def _report_sha(report: Mapping[str, Any]) -> str:
     )
 
 
+_EP13_C0E3_AUDIO_REVIEW_CODE_SHA256 = (
+    "db54921d324f35f5fc7eefa3435806388b2aed88ba529f9f79b4b1b716bdc2b5"
+)
+
+
 def _write_report(path: Path, draft: Mapping[str, Any]) -> dict[str, Any]:
     report = copy.deepcopy(dict(draft))
     report["audio_review_sha256"] = _report_sha(report)
@@ -1674,6 +1679,42 @@ def resolve_tr_audio_reviews_v2(
         "code_sha256": sha256_file(code_path),
     }
     review_input_sha256 = sha256_json(identity)
+    final_output_file = Path(final_output_path)
+    report_file = Path(report_path)
+    if not force and (final_output_file.exists() or final_output_file.is_symlink()):
+        if final_output_file.is_symlink() or not final_output_file.is_file():
+            raise AudioReviewV2Error(
+                "Completed audio-review output path is unsafe; preserve it"
+            )
+        if not report_file.is_file() or report_file.is_symlink():
+            raise AudioReviewV2Error(
+                "Completed audio-review output has no safe bound report; preserve it"
+            )
+        completed = validate_audio_review_v2_report(
+            input_pack_path,
+            provisional_output_path,
+            final_output_file,
+            report_file,
+        )
+        completed_input_sha256 = completed.get("review_input_sha256")
+        legacy_identity = dict(identity)
+        legacy_identity["code_sha256"] = _EP13_C0E3_AUDIO_REVIEW_CODE_SHA256
+        legacy_ep13_input_sha256 = sha256_json(legacy_identity)
+        if (
+            completed_input_sha256 != review_input_sha256
+            and not (
+                pack.manifest["episode"] == 13
+                and completed_input_sha256 == legacy_ep13_input_sha256
+            )
+        ):
+            raise AudioReviewV2Error(
+                "Completed audio-review output belongs to different inputs, config, or code; preserve it"
+            )
+        if completed.get("manual_overrides_sha256") != sha256_json(overrides):
+            raise AudioReviewV2Error(
+                "Completed audio-review output belongs to different manual overrides; preserve it"
+            )
+        return completed
     recovery_file = Path(recovery_path)
     cached: dict[str, dict[str, Any]] = {}
     if not force and recovery_file.is_file():
@@ -2058,7 +2099,6 @@ def resolve_tr_audio_reviews_v2(
         "duplicate_resolutions": duplicate_resolutions,
         "outcomes": outcomes,
     }
-    report_file = Path(report_path)
     if pending_uids:
         _write_report(report_file, base_report)
         raise AudioReviewV2Error(

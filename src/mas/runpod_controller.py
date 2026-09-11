@@ -942,13 +942,112 @@ def _prepare_official_source(local_root, episode, source_url, cookie):
     return metadata["url"]
 
 
+def _capacity_release_evidence(local_root, episode, pod_id, state_record, shutdown_record):
+    if (not isinstance(pod_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", pod_id)
+            or not isinstance(state_record, dict) or not isinstance(shutdown_record, dict)
+            or not isinstance(state_record.get("relative_path"), str)
+            or not isinstance(shutdown_record.get("relative_path"), str)
+            or not isinstance(state_record.get("sha256"), str)
+            or not isinstance(shutdown_record.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", state_record["sha256"])
+            or not re.fullmatch(r"[0-9a-f]{64}", shutdown_record["sha256"])):
+        raise RunPodControllerError("delivery release capacity evidence is invalid")
+    state_path = safe_relative(local_root, state_record["relative_path"])
+    shutdown_path = safe_relative(local_root, shutdown_record["relative_path"])
+    capacity_root = (Path(local_root) / "work" / "capacity").resolve()
+    if (state_path.name != "capacity-state.json" or shutdown_path.name != "capacity-shutdown.json"
+            or state_path.parent != shutdown_path.parent
+            or not state_path.parent.resolve().is_relative_to(capacity_root)):
+        raise RunPodControllerError("delivery release capacity evidence path is invalid")
+    if (sha256_file(state_path) != state_record.get("sha256")
+            or sha256_file(shutdown_path) != shutdown_record.get("sha256")):
+        raise RunPodControllerError("delivery release capacity evidence changed")
+    saved_state = json.loads(state_path.read_text(encoding="utf-8"))
+    state = saved_state.get("data")
+    saved_shutdown = json.loads(shutdown_path.read_text(encoding="utf-8"))
+    shutdown = saved_shutdown.get("data")
+    if (not isinstance(state, dict) or saved_state.get("sha256") != digest(state)
+            or state.get("format") != "mas-capacity-lease-state-1"
+            or state.get("episode") != episode or state.get("status") != "RELEASED"):
+        raise RunPodControllerError("delivery release capacity state is invalid")
+    owned_ids = state.get("owned_pod_ids")
+    results = state.get("shutdown")
+    if (not isinstance(shutdown, dict) or saved_shutdown.get("sha256") != digest(shutdown)
+            or shutdown.get("state_sha256") != digest(state)
+            or shutdown.get("owned_pods") != results
+            or not isinstance(owned_ids, list) or pod_id not in owned_ids
+            or not isinstance(results, list) or not results
+            or any(not isinstance(item, dict) for item in results)
+            or any(not isinstance(item, str)
+                   or not re.fullmatch(r"[A-Za-z0-9_-]+", item) for item in owned_ids)
+            or any(not isinstance(item.get("pod_id"), str)
+                   or not re.fullmatch(r"[A-Za-z0-9_-]+", item["pod_id"])
+                   for item in results)
+            or len(owned_ids) != len(set(owned_ids))
+            or len(results) != len({item.get("pod_id") for item in results})
+            or {item.get("pod_id") for item in results} != set(owned_ids)
+            or any(item.get("status") != "ABSENT" for item in results)):
+        raise RunPodControllerError("delivery release shutdown evidence is invalid")
+
+
+def _write_delivery_release(local_root, episode, pod_id, audit):
+    state_path = Path(audit) / "capacity-state.json"
+    shutdown_path = Path(audit) / "capacity-shutdown.json"
+    state_record = {
+        "relative_path": state_path.relative_to(local_root).as_posix(),
+        "sha256": sha256_file(state_path),
+    }
+    shutdown_record = {
+        "relative_path": shutdown_path.relative_to(local_root).as_posix(),
+        "sha256": sha256_file(shutdown_path),
+    }
+    _capacity_release_evidence(local_root, episode, pod_id, state_record, shutdown_record)
+    release = {
+        "format": "mas-gpu-released-for-delivery-1",
+        "episode": episode,
+        "pod_id": pod_id,
+        "status": "ABSENT",
+        "delivery_sha256": sha256_file(local_root / "final" / "burned_mp4_delivery.json"),
+        "capacity_state": state_record,
+        "capacity_shutdown": shutdown_record,
+    }
+    atomic_json(local_root / "work" / "gpu-released-for-delivery.json",
+                {"data": release, "sha256": digest(release)})
+
+
+def _validate_delivery_release(local_root, episode, released_path):
+    saved = json.loads(Path(released_path).read_text(encoding="utf-8"))
+    release = saved.get("data")
+    if (not isinstance(release, dict) or saved.get("sha256") != digest(release)
+            or release.get("format") != "mas-gpu-released-for-delivery-1"
+            or release.get("episode") != episode or release.get("status") != "ABSENT"
+            or release.get("delivery_sha256") !=
+                sha256_file(local_root / "final" / "burned_mp4_delivery.json")):
+        raise RunPodControllerError("transfer-only shutdown/delivery binding changed")
+    _capacity_release_evidence(local_root, episode, release.get("pod_id"),
+                               release.get("capacity_state"), release.get("capacity_shutdown"))
+
+
 def run_remote_episode(episode, source_url=None):
     if type(episode) is not int or episode <= 0:
         raise RunPodControllerError("episode must be a positive integer")
     with _controller_lock(ROOT / "var" / "production-controller.lock"):
+        local_root = episode_dir(episode)
+        released_path = local_root / "work" / "gpu-released-for-delivery.json"
+        if released_path.is_file():
+            _validate_delivery_release(local_root, episode, released_path)
+            remote = os.getenv("MAS_DRIVE_STRICT_REMOTE")
+            if not remote:
+                raise RunPodControllerError(
+                    "missing environment: MAS_DRIVE_STRICT_REMOTE"
+                )
+            if "\r" in remote or "\n" in remote:
+                raise RunPodControllerError(
+                    "MAS_DRIVE_STRICT_REMOTE must not contain line breaks"
+                )
+            return publish_local_delivery(local_root, episode, remote)
         values = _required_environment()
         commit, rclone_config = _local_preflight(values)
-        local_root = episode_dir(episode)
         _validate_local_tr_return(local_root, f"Muhtemel Ask {episode}.Bolum")
         preflight_local_id_return(local_root, episode, ROOT / "config" / "production")
         last_status = local_root / "work" / "remote-job-status.json"
@@ -972,14 +1071,6 @@ def run_remote_episode(episode, source_url=None):
                             raise RunPodControllerError("verified wait evidence changed")
                     print(f"[WAIT] local return required: {expected_returns[code]}; no GPU acquired")
                     return code
-        released_path = local_root / "work" / "gpu-released-for-delivery.json"
-        if released_path.is_file():
-            released = json.loads(released_path.read_text(encoding="utf-8"))
-            if (released.get("status") != "ABSENT" or released.get("delivery_sha256") !=
-                    sha256_file(local_root / "final" / "burned_mp4_delivery.json")):
-                raise RunPodControllerError("transfer-only shutdown/delivery binding changed")
-            # A transfer-only retry must never reacquire paid compute.
-            return publish_local_delivery(local_root, episode, values["MAS_DRIVE_STRICT_REMOTE"])
         try:
             source_url = _prepare_official_source(
                 local_root, episode, source_url, values.get("MAS_YTDLP_COOKIES")
@@ -1075,7 +1166,6 @@ def run_remote_episode(episode, source_url=None):
         if not resume_lease:
             reference = {"commit": commit, "source_url": source_url, "audit": audit.relative_to(local_root).as_posix()}
             atomic_json(lease_reference, {"data": reference, "sha256": digest(reference)})
-        published_from_scratch = False
         with CapacityLease(provider, payload, audit, plan,
                            ready=None if budget_error else ready, resume=resume_lease) as lease:
             if budget_error:
@@ -1087,21 +1177,10 @@ def run_remote_episode(episode, source_url=None):
                                          commit=commit, rclone_config=rclone_config,
                                          budget=_PaidBudget(episode_budget, lease), pod=lease.pod,
                                          resume_only=resume_lease)
-            delivery_path = local_root / "final" / "burned_mp4_delivery.json"
-            if result == READY_FOR_DELIVERY and delivery_path.is_file():
-                transferred = json.loads(delivery_path.read_text(encoding="utf-8"))
-                if transferred["outputs"]["mp4"].get("storage_path"):
-                    # The operator requires Drive verification before deleting ephemeral MP4 storage.
-                    publish_local_delivery(local_root, episode, values["MAS_DRIVE_STRICT_REMOTE"],
-                                           total_timeout=min(3600, lease.remaining_work_seconds()))
-                    published_from_scratch = True
         if result == READY_FOR_DELIVERY:
             validate_delivery(local_root, episode)
-            atomic_json(local_root / "work" / "gpu-released-for-delivery.json",
-                        {"pod_id": lease.pod["id"], "status": "ABSENT", "capacity_audit": str(audit),
-                         "delivery_sha256": sha256_file(local_root / "final" / "burned_mp4_delivery.json")})
-            return 0 if published_from_scratch else publish_local_delivery(
-                local_root, episode, values["MAS_DRIVE_STRICT_REMOTE"])
+            _write_delivery_release(local_root, episode, lease.pod["id"], audit)
+            return publish_local_delivery(local_root, episode, values["MAS_DRIVE_STRICT_REMOTE"])
         if result in (20, 21, WAIT_MP4_SAMPLE):
             evidence = (local_root / "work" / "sample-export.json" if result == WAIT_MP4_SAMPLE else
                         local_root / "translation_input" / (f"Muhtemel Ask {episode}.Bolum_" +
@@ -1126,16 +1205,38 @@ def _download_record(record, local_root, remote_root, scp, host, budget, *, chec
         return local_episode_file
     if checkpoint:
         destination = local_root / "work" / "remote-checkpoints" / expected / Path(relative).name
-    if destination.is_file():
-        if destination.stat().st_size == size and sha256_file(destination) == expected:
-            return destination
-        raise RunPodControllerError("existing local evidence differs; preserve it")
-    destination.parent.mkdir(parents=True, exist_ok=True)
     remote_path = record.get("snapshot_path") or record.get("storage_path") or f"{remote_root}/{relative}"
     match = re.search(r"/Muhtemel Ask ([1-9][0-9]*)\.Bolum$", remote_root)
     external = (f"/tmp/mas-ep{match[1]}-output/{Path(relative).name}" if match else None)
     if (not remote_path.startswith(remote_root + "/") and remote_path != external) or "/../" in remote_path:
         raise RunPodControllerError("remote transfer path escapes episode")
+    if destination.is_file():
+        if destination.stat().st_size == size and sha256_file(destination) == expected:
+            return destination
+        if remote_path != external:
+            raise RunPodControllerError("existing local evidence differs; preserve it")
+        retained_sha = sha256_file(destination)
+        retained = safe_relative(
+            local_root,
+            f"work/remote-checkpoints/{retained_sha}/{destination.name}",
+        )
+        retained.parent.mkdir(parents=True, exist_ok=True)
+        if retained.exists():
+            if (retained.is_symlink() or not retained.is_file()
+                    or retained.stat().st_size != destination.stat().st_size
+                    or sha256_file(retained) != retained_sha):
+                raise RunPodControllerError("retained local evidence differs; preserve it")
+        else:
+            retained_partial = safe_relative(
+                local_root,
+                f"work/remote-checkpoints/{retained_sha}/{destination.name}.partial",
+            )
+            shutil.copyfile(destination, retained_partial)
+            if (retained_partial.stat().st_size != destination.stat().st_size
+                    or sha256_file(retained_partial) != retained_sha):
+                raise RunPodControllerError("retained local evidence byte/SHA-256 mismatch")
+            os.replace(retained_partial, retained)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(destination.name + ".partial")
     transfer_options = {
         "idle_timeout": 60,
@@ -1157,6 +1258,38 @@ def _download_record(record, local_root, remote_root, scp, host, budget, *, chec
     return destination
 
 
+def _record_result_collection_failure(local_root, exit_code, record=None):
+    work = Path(local_root) / "work"
+    request_path = work / "remote-job-request.json"
+    status_path = work / "remote-job-status.json"
+    if not request_path.is_file() or not status_path.is_file():
+        raise RunPodControllerError("remote collection failure evidence is incomplete")
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    data = request.get("data")
+    if not isinstance(data, dict) or request.get("sha256") != digest(data):
+        raise RunPodControllerError("remote job request integrity mismatch")
+    if status.get("status") != "EXITED" or status.get("exit_code") != exit_code:
+        raise RunPodControllerError("remote collection failure status mismatch")
+    attempt = data.get("attempt", 0)
+    if type(attempt) is not int or attempt < 0:
+        raise RunPodControllerError("remote job attempt evidence is invalid")
+    failure = {
+        "format": "mas-remote-result-collection-failure-1",
+        "episode": data.get("episode"),
+        "base_input_sha256": data.get("base_input_sha256", data.get("input_sha256")),
+        "input_sha256": data.get("input_sha256"),
+        "attempt": attempt,
+        "exit_code": exit_code,
+        "request_sha256": request["sha256"],
+    }
+    if isinstance(record, dict):
+        failure["relative_path"] = record.get("relative_path")
+        failure["storage_path"] = record.get("storage_path")
+    atomic_json(work / "remote-result-collection-failure.json",
+                {"data": failure, "sha256": digest(failure)})
+
+
 def _remote_attempt_identity(base_input_sha, request_path, status_path):
     if not request_path.is_file() and not status_path.is_file():
         return base_input_sha, 0
@@ -1168,6 +1301,27 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
     if not isinstance(data, dict) or request.get("sha256") != digest(data):
         raise RunPodControllerError("remote job request integrity mismatch")
     exit_code = status.get("exit_code") if status.get("status") == "EXITED" else None
+    failure_path = status_path.with_name("remote-result-collection-failure.json")
+    if exit_code == READY_FOR_DELIVERY and failure_path.is_file():
+        saved = json.loads(failure_path.read_text(encoding="utf-8"))
+        failure = saved.get("data")
+        if not isinstance(failure, dict) or saved.get("sha256") != digest(failure):
+            raise RunPodControllerError("remote result collection failure integrity mismatch")
+        prior_base = data.get("base_input_sha256", data.get("input_sha256"))
+        attempt = data.get("attempt", 0)
+        if type(attempt) is not int or attempt < 0:
+            raise RunPodControllerError("remote job attempt evidence is invalid")
+        if failure.get("format") != "mas-remote-result-collection-failure-1":
+            raise RunPodControllerError("remote result collection failure format mismatch")
+    if exit_code == READY_FOR_DELIVERY:
+        prior_base = data.get("base_input_sha256", data.get("input_sha256"))
+        if prior_base != base_input_sha:
+            return base_input_sha, 0
+        attempt = data.get("attempt", 0)
+        if type(attempt) is not int or attempt < 0:
+            raise RunPodControllerError("remote job attempt evidence is invalid")
+        attempt += 1
+        return digest({"base_input_sha256": base_input_sha, "attempt": attempt}), attempt
     if exit_code in (None, 0, 20, 21, READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
         return base_input_sha, 0
     prior_base = data.get("base_input_sha256", data.get("input_sha256"))
@@ -1282,15 +1436,22 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
     if exit_code in (READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
         export_name = "delivery-export.json" if exit_code == READY_FOR_DELIVERY else "sample-export.json"
         export_path = temporary / export_name
-        _network_retry(scp + [f"root@{host}:{remote_root}/work/{export_name}", str(export_path)],
-                       budget=budget, total_timeout=60)
-        manifest = json.loads(export_path.read_text(encoding="utf-8"))
-        expected_mode = "strict" if exit_code == READY_FOR_DELIVERY else "review"
-        if manifest.get("episode") != episode or manifest.get("mode") != expected_mode:
-            raise RunPodControllerError("delivery export identity mismatch")
-        for record in manifest["files"]:
-            _download_record(record, local_root, remote_root, scp, host, budget)
-        atomic_json(local_root / "work" / export_name, manifest)
+        current_record = None
+        try:
+            _network_retry(scp + [f"root@{host}:{remote_root}/work/{export_name}", str(export_path)],
+                           budget=budget, total_timeout=60)
+            manifest = json.loads(export_path.read_text(encoding="utf-8"))
+            expected_mode = "strict" if exit_code == READY_FOR_DELIVERY else "review"
+            if manifest.get("episode") != episode or manifest.get("mode") != expected_mode:
+                raise RunPodControllerError("delivery export identity mismatch")
+            for record in manifest["files"]:
+                current_record = record
+                _download_record(record, local_root, remote_root, scp, host, budget)
+            atomic_json(local_root / "work" / export_name, manifest)
+        except BaseException:
+            if exit_code == READY_FOR_DELIVERY:
+                _record_result_collection_failure(local_root, exit_code, current_record)
+            raise
 
     if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
         diagnostics = (

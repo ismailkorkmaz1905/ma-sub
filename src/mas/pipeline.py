@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -25,7 +26,13 @@ from .engine.api import (
     resolve_tr_audio_reviews,
     transcribe_raw_audio,
 )
-from .engine.download import atomic_write_bytes, atomic_write_json, download_source
+from .engine.download import (
+    atomic_write_bytes,
+    atomic_write_json,
+    download_source,
+    load_valid_stage_marker,
+    write_stage_marker,
+)
 from .engine.forced_align import (
     align_corrected_segments,
     correction_deletes_lexical_tokens,
@@ -56,7 +63,8 @@ STAGE_NOTIFICATION_NAMES = {
     "forced_alignment": "altyazı zaman hizalaması",
     "id_pack": "Endonezce çeviri paketi hazırlığı",
     "id_return": "Endonezce çeviri dönüşü doğrulaması",
-    "finalize": "final altyazı ve video üretimi",
+    "strict_finalize": "strict altyazı ve softsub video üretimi",
+    "burn_mp4": "Endonezce altyazılı final video üretimi",
     "drive_readback": "Google Drive yükleme ve hash doğrulaması",
 }
 STAGE_START_DETAILS = {
@@ -69,7 +77,8 @@ STAGE_START_DETAILS = {
     "forced_alignment": "Düzeltilmiş Türkçe metin CUDA üzerinde akustik olarak hizalanacak.",
     "id_pack": "Endonezce çeviri için değişmez Türkçe metne bağlı paket hazırlanacak.",
     "id_return": "Dönen Endonezce çevirinin kimliği, sırası ve değişmez alanları doğrulanacak.",
-    "finalize": "Strict altyazılar ve final video üretilecek, kalite kuralları doğrulanacak.",
+    "strict_finalize": "Strict altyazılar üretilecek ve tüm zamanlama ve kalite kuralları yeniden doğrulanacak.",
+    "burn_mp4": "Doğrulanmış Endonezce altyazı değişmez kaynağa gömülecek ve encoding makbuzu doğrulanacak.",
     "drive_readback": "Final dosyaları geçici adla yüklenecek; byte ve SHA-256 readback doğrulanacak.",
 }
 STAGE_NEXT_STEPS = {
@@ -81,8 +90,9 @@ STAGE_NEXT_STEPS = {
     "audio_review": "Türkçe metni akustik olarak hizalamak",
     "forced_alignment": "Endonezce çeviri handoff paketini hazırlamak",
     "id_pack": "Endonezce çeviri dönüşünü almak veya mevcut dönüşü doğrulamak",
-    "id_return": "strict altyazı ve final video üretmek",
-    "finalize": "final dosyaları Drive'a yükleyip readback doğrulamak",
+    "id_return": "strict altyazı ve softsub videoyu üretmek",
+    "strict_finalize": "Endonezce altyazılı final videoyu üretmek",
+    "burn_mp4": "final dosyaları Drive'a yükleyip readback doğrulamak",
     "drive_readback": "teslimat makbuzunu kaydedip compute shutdown yapmak",
 }
 
@@ -222,7 +232,44 @@ def _stage(path, state, name, action):
     return details
 
 
-def _aligned_checkpoint(alignment_path, audio_path, alignment_inputs, vad_regions):
+def _ensure_forced_alignment_marker(alignment_path, result, input_sha256,
+                                    correction_output_sha256):
+    marker_path = alignment_path.with_suffix(".done.json")
+    if marker_path.exists() or marker_path.is_symlink():
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise RuntimeError("forced-alignment stage marker is unsafe; preserve it")
+        marker = load_valid_stage_marker(
+            marker_path,
+            stage="forced_alignment_v2",
+            input_sha256=input_sha256,
+            required_output_keys=("forced_alignment_v2",),
+            allowed_root=alignment_path.parent,
+        )
+        details = marker.get("details") if marker is not None else None
+        if (
+            marker is None
+            or Path(marker["outputs"]["forced_alignment_v2"]["path"]).resolve(strict=True)
+            != alignment_path.resolve(strict=True)
+            or not isinstance(details, dict)
+            or details.get("alignment_sha256") != result.get("alignment_sha256")
+            or details.get("correction_output_sha256") != correction_output_sha256
+        ):
+            raise RuntimeError("forced-alignment stage marker binding changed; preserve it")
+        return
+    write_stage_marker(
+        marker_path,
+        stage="forced_alignment_v2",
+        input_sha256=input_sha256,
+        outputs={"forced_alignment_v2": alignment_path},
+        details={
+            "alignment_sha256": result["alignment_sha256"],
+            "correction_output_sha256": correction_output_sha256,
+        },
+    )
+
+
+def _aligned_checkpoint(alignment_path, audio_path, alignment_inputs, vad_regions,
+                        correction_output_sha256):
     binding = {
         "audio_sha256": sha256_file(audio_path),
         "alignment_inputs": alignment_inputs,
@@ -254,6 +301,9 @@ def _aligned_checkpoint(alignment_path, audio_path, alignment_inputs, vad_region
             or result.get("provenance", {}).get("device") != "cuda"
         ):
             raise RuntimeError("cached alignment is stale or was not produced on CUDA")
+        _ensure_forced_alignment_marker(
+            alignment_path, result, input_sha256, correction_output_sha256
+        )
         return result, True
     result = align_corrected_segments(
         audio_path, alignment_inputs, device="cuda", vad_regions=vad_regions,
@@ -264,7 +314,99 @@ def _aligned_checkpoint(alignment_path, audio_path, alignment_inputs, vad_region
         "input_sha256": input_sha256,
         "output_sha256": sha256_file(alignment_path),
     })
+    _ensure_forced_alignment_marker(
+        alignment_path, result, input_sha256, correction_output_sha256
+    )
     return result, False
+
+
+_STRICT_FINALIZE_PRODUCER_FILES = (
+    "src/mas/engine/audio_review.py",
+    "src/mas/engine/download.py",
+    "src/mas/engine/episode_archive.py",
+    "src/mas/engine/finalize.py",
+    "src/mas/engine/forced_align.py",
+    "src/mas/engine/id_translation.py",
+    "src/mas/engine/media.py",
+    "src/mas/engine/mux.py",
+    "src/mas/engine/srt.py",
+    "src/mas/engine/subtitle_qa.py",
+    "src/mas/engine/timing_qa.py",
+    "src/mas/engine/tr_correction.py",
+    "src/mas/engine/workflow.py",
+    "requirements.lock",
+)
+
+
+def _strict_finalize_input_sha256(episode, inputs):
+    records = {}
+    for name, value in sorted(inputs.items()):
+        path = Path(value)
+        if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+            raise RuntimeError(f"strict finalization input is missing or unsafe: {name}")
+        records[name] = {"size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
+    producer = {
+        name: sha256_file(ROOT / name)
+        for name in _STRICT_FINALIZE_PRODUCER_FILES
+    }
+    return sha256_json({"episode": episode, "inputs": records, "producer": producer})
+
+
+def _load_strict_finalize_checkpoint(marker_path, report_path, expected_outputs,
+                                     episode_root, episode, input_sha256):
+    marker_path = Path(marker_path)
+    report_path = Path(report_path)
+    if not marker_path.exists() and not marker_path.is_symlink():
+        return None
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise RuntimeError("strict finalization checkpoint marker is unsafe; preserve it")
+    marker = load_valid_stage_marker(
+        marker_path,
+        stage="strict_finalize_v2",
+        input_sha256=input_sha256,
+        required_output_keys=tuple(expected_outputs),
+        allowed_root=Path(episode_root) / "final",
+    )
+    if marker is None:
+        raise RuntimeError("strict finalization checkpoint binding changed; preserve it")
+    for name, expected in expected_outputs.items():
+        recorded = Path(marker["outputs"][name]["path"])
+        if recorded.resolve(strict=True) != Path(expected).resolve(strict=True):
+            raise RuntimeError("strict finalization checkpoint output path changed; preserve it")
+    try:
+        report_details = report_path.lstat()
+        expected_report_path = Path(expected_outputs["report"])
+        report_is_canonical = (
+            report_path.resolve(strict=True)
+            == expected_report_path.resolve(strict=True)
+        )
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "strict finalization report path is missing or unsafe; preserve it"
+        ) from exc
+    if (
+        stat.S_ISLNK(report_details.st_mode)
+        or not stat.S_ISREG(report_details.st_mode)
+        or report_details.st_size <= 0
+        or not report_is_canonical
+    ):
+        raise RuntimeError(
+            "strict finalization report path is missing or unsafe; preserve it"
+        )
+    try:
+        report = _json(report_path)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("strict finalization report is unreadable; preserve it") from exc
+    if report.get("status") != "PASS" or report.get("episode") != episode:
+        raise RuntimeError("strict finalization checkpoint has no matching PASS report")
+    actual_outputs = {
+        name: file_record(path, episode_root)
+        for name, path in expected_outputs.items()
+        if name != "report"
+    }
+    if report.get("outputs") != actual_outputs:
+        raise RuntimeError("strict finalization report output binding changed; preserve it")
+    return report
 
 
 def _load_configs():
@@ -482,6 +624,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         _json(speaker_evidence_path) if speaker_evidence_path.is_file() else None
     )
     def review_audio():
+        resumed = tr_output.is_file() and review_path.is_file()
         report = resolve_tr_audio_reviews(
             tr_pack, tr_text, tr_output, review_path,
             dirs["prepare"] / "audio_review_v2.recovery.json",
@@ -489,7 +632,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             manual_overrides=overrides)
         holder["correction"] = validate_tr_correction_output(tr_pack, tr_output)
         holder["review"] = report
-        return {"path": str(review_path), "sha256": sha256_file(review_path), "review_count": report["review_count"]}
+        return {"path": str(review_path), "sha256": sha256_file(review_path),
+                "review_count": report["review_count"], "resumed": resumed}
     _stage(state_path, state, "audio_review", review_audio)
     correction = holder["correction"]
     alignment_path = dirs["prepare"] / "forced_alignment_v2.json"
@@ -506,7 +650,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         )
         _source_guard(state, download.video_path)
         result, resumed = _aligned_checkpoint(
-            alignment_path, audio.audio_path, bundle.alignment_inputs, raw["vad_regions"]
+            alignment_path, audio.audio_path, bundle.alignment_inputs, raw["vad_regions"],
+            correction.output_sha256,
         )
         holder["aligned"] = result
         return {"path": str(alignment_path), "sha256": sha256_file(alignment_path), "device": "cuda", "resumed": resumed}
@@ -566,17 +711,76 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     _stage(state_path, state, "id_return", validate_id_return)
 
     report_path = dirs["final"] / f"{name}_FINALIZATION_REPORT_V2.json"
-    def finalize():
-        report = finalize_episode(
-            episode_root=root, episode=episode, source_video=download.video_path,
-            raw_asr_path=dirs["prepare"] / "raw_asr_v2.json", forced_alignment_path=alignment_path,
-            tr_correction_pack=tr_pack, tr_text_correction_output=tr_text,
-            tr_correction_output=tr_output, audio_review_path=review_path,
-            aligned_schema=schema_path, id_translation_pack=id_pack, id_translation_zip=id_output,
-            series_config=config_dir / "series.yaml", names_config=config_dir / "names.yaml",
-            religious_config=config_dir / "religious_terms.yaml")
-        if report.get("status") != "PASS":
-            raise RuntimeError("strict finalization did not PASS")
+    strict_marker_path = dirs["final"] / "strict_finalize.done.json"
+    strict_outputs = {
+        "report": report_path,
+        "mkv": dirs["final"] / f"{name}.mkv",
+        "id_srt": dirs["final"] / "subtitles" / f"{name}-id.srt",
+        "tr_srt": dirs["final"] / "subtitles" / f"{name}-tr.srt",
+    }
+    strict_inputs = {
+        "source_video": download.video_path,
+        "download_metadata": dirs["source"] / "source.metadata.json",
+        "download_marker": dirs["source"] / "download.done.json",
+        "audio": audio.audio_path,
+        "audio_metadata": dirs["prepare"] / "audio.metadata.json",
+        "audio_marker": dirs["prepare"] / "audio.done.json",
+        "raw_asr": dirs["prepare"] / "raw_asr_v2.json",
+        "raw_asr_marker": dirs["prepare"] / "raw_asr_v2.done.json",
+        "forced_alignment": alignment_path,
+        "forced_alignment_marker": dirs["prepare"] / "forced_alignment_v2.done.json",
+        "tr_correction_pack": tr_pack,
+        "tr_text_correction_output": tr_text,
+        "tr_correction_output": tr_output,
+        "audio_review": review_path,
+        "aligned_schema": schema_path,
+        "id_translation_pack": id_pack,
+        "id_translation_output": id_output,
+        "series_config": config_dir / "series.yaml",
+        "names_config": config_dir / "names.yaml",
+        "religious_config": config_dir / "religious_terms.yaml",
+    }
+    def strict_finalize():
+        input_sha256 = _strict_finalize_input_sha256(episode, strict_inputs)
+        report = _load_strict_finalize_checkpoint(
+            strict_marker_path,
+            report_path,
+            strict_outputs,
+            root,
+            episode,
+            input_sha256,
+        )
+        resumed = report is not None
+        if report is None:
+            report = finalize_episode(
+                episode_root=root, episode=episode, source_video=download.video_path,
+                raw_asr_path=dirs["prepare"] / "raw_asr_v2.json",
+                forced_alignment_path=alignment_path,
+                tr_correction_pack=tr_pack, tr_text_correction_output=tr_text,
+                tr_correction_output=tr_output, audio_review_path=review_path,
+                aligned_schema=schema_path, id_translation_pack=id_pack,
+                id_translation_zip=id_output,
+                series_config=config_dir / "series.yaml",
+                names_config=config_dir / "names.yaml",
+                religious_config=config_dir / "religious_terms.yaml",
+            )
+            if report.get("status") != "PASS":
+                raise RuntimeError("strict finalization did not PASS")
+            if _strict_finalize_input_sha256(episode, strict_inputs) != input_sha256:
+                raise RuntimeError("strict finalization inputs changed before checkpoint")
+            write_stage_marker(
+                strict_marker_path,
+                stage="strict_finalize_v2",
+                input_sha256=input_sha256,
+                outputs=strict_outputs,
+            )
+        holder["final_report"] = report
+        return {"report": str(report_path), "sha256": sha256_file(report_path),
+                "resumed": resumed}
+    _stage(state_path, state, "strict_finalize", strict_finalize)
+    report = holder["final_report"]
+
+    def burn_mp4():
         id_srt = root / report["outputs"]["id_srt"]["relative_path"]
         settings, _ = plan_encoding_settings(download.video_path, encoder=encoder, target_size_gb=target,
                                              encoder_options=encoder_options)
@@ -593,7 +797,6 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             atomic_write_json(dirs["work"] / "sample-export.json",
                               {"episode": episode, "mode": "review", "files": files})
             holder["sample_wait"] = True
-            holder["final_report"] = report
             return {"report": str(report_path), "samples": str(manifest_path), "sample_review_required": True}
         network = os.getenv("MAS_NETWORK_VOLUME_QUOTA_BYTES")
         storage = {}
@@ -622,14 +825,11 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         delivery_path = dirs["final"] / "burned_mp4_delivery.json"
         atomic_write_json(delivery_path, delivery)
         holder["delivery"] = delivery
-        holder["final_report"] = report
-        return {"report": str(report_path), "sha256": sha256_file(report_path),
-                "delivery": str(delivery_path), "delivery_sha256": sha256_file(delivery_path)}
-    _stage(state_path, state, "finalize", finalize)
-    report = holder["final_report"]
+        return {"delivery": str(delivery_path), "delivery_sha256": sha256_file(delivery_path)}
+    _stage(state_path, state, "burn_mp4", burn_mp4)
 
     if holder.get("sample_wait"):
-        set_stage(state_path, state, "finalize", "blocked", reason="MP4 samples require review",
+        set_stage(state_path, state, "burn_mp4", "blocked", reason="MP4 samples require review",
                   approval_path=str(dirs["review"] / "mp4-sample-approval.json"))
         notify(episode, "MP4 örnekleri inceleme bekliyor", "Örnekleri inceleyip kaynak/ayar bağlı onay kaydını tamamlayın.")
         return WAIT_MP4_SAMPLE

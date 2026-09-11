@@ -7,12 +7,15 @@ import json
 import tempfile
 import unittest
 import wave
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
 from mas.engine.audio_review import (
+    _EP13_C0E3_AUDIO_REVIEW_CODE_SHA256,
     _FasterWhisperReviewDecoder,
+    _report_sha,
     _write_exact_target_crop,
     AudioReviewV2Config,
     AudioReviewV2Error,
@@ -22,8 +25,10 @@ from mas.engine.audio_review import (
 from mas.engine.tr_correction import (
     create_tr_correction_output,
     create_tr_correction_pack,
+    read_tr_correction_pack,
     validate_tr_correction_output,
 )
+from mas.hashing import sha256_json
 
 
 AUDIT = {
@@ -197,6 +202,7 @@ def _pending_output(utterances: list[dict]) -> list[dict]:
 def _make_files(
     root: Path,
     *,
+    episode: int = 12,
     orphan: bool = False,
     include_hole: bool = False,
     candidate_reason: str | None = None,
@@ -231,7 +237,7 @@ def _make_files(
         utterances,
         holes,
         input_zip,
-        episode=12,
+        episode=episode,
         speech_hole_audio_root=root,
         asr_hallucination_records=[candidate_evidence],
         asr_hallucination_audio_root=root,
@@ -713,6 +719,169 @@ class AudioReviewV2Tests(unittest.TestCase):
             )
             self.assertEqual(report["status"], "PASS")
             self.assertEqual(resumed_decoder.call_count, 0)
+
+    def test_completed_review_hydrates_without_recovery_or_decoder(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory))
+            completed = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=FakeDecoder([_decoded()]),
+                progress=None,
+            )
+            paths[4].unlink()
+            resumed_decoder = FakeDecoder([])
+
+            hydrated = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=resumed_decoder,
+                progress=None,
+            )
+
+            self.assertEqual(hydrated, completed)
+            self.assertEqual(resumed_decoder.call_count, 0)
+
+    def test_completed_ep13_review_hydrates_from_c0e3_producer_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), episode=13)
+            settings = AudioReviewV2Config(
+                model_name="large-v3", device="cuda", allow_cpu_fallback=False
+            )
+            resolve_tr_audio_reviews_v2(
+                *paths,
+                config=settings,
+                decoder=FakeDecoder([_decoded()]),
+                progress=None,
+            )
+            pack = read_tr_correction_pack(paths[0])
+            provisional = validate_tr_correction_output(paths[0], paths[1])
+            report = json.loads(paths[3].read_text(encoding="utf-8"))
+            report["review_input_sha256"] = sha256_json(
+                {
+                    "correction_input_sha256": pack.manifest["input_sha256"],
+                    "provisional_output_sha256": provisional.output_sha256,
+                    "config": asdict(settings),
+                    "code_sha256": _EP13_C0E3_AUDIO_REVIEW_CODE_SHA256,
+                }
+            )
+            report["audio_review_sha256"] = _report_sha(report)
+            paths[3].write_text(json.dumps(report), encoding="utf-8")
+            report_before = paths[3].read_bytes()
+            final_before = paths[2].read_bytes()
+            resumed_decoder = FakeDecoder([])
+
+            hydrated = resolve_tr_audio_reviews_v2(
+                *paths,
+                config=settings,
+                decoder=resumed_decoder,
+                progress=None,
+            )
+
+            self.assertEqual(hydrated, report)
+            self.assertEqual(resumed_decoder.call_count, 0)
+            self.assertEqual(paths[2].read_bytes(), final_before)
+            self.assertEqual(paths[3].read_bytes(), report_before)
+
+    def test_c0e3_producer_identity_is_not_accepted_for_other_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory))
+            resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=FakeDecoder([_decoded()]),
+                progress=None,
+            )
+            pack = read_tr_correction_pack(paths[0])
+            provisional = validate_tr_correction_output(paths[0], paths[1])
+            report = json.loads(paths[3].read_text(encoding="utf-8"))
+            identity = {
+                "correction_input_sha256": pack.manifest["input_sha256"],
+                "provisional_output_sha256": provisional.output_sha256,
+                "config": asdict(AudioReviewV2Config()),
+                "code_sha256": _EP13_C0E3_AUDIO_REVIEW_CODE_SHA256,
+            }
+            report["review_input_sha256"] = sha256_json(identity)
+            report["audio_review_sha256"] = _report_sha(report)
+            paths[3].write_text(json.dumps(report), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                AudioReviewV2Error, "different inputs, config, or code"
+            ):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    decoder=FakeDecoder([]),
+                    progress=None,
+                )
+
+    def test_completed_review_rejects_changed_hydration_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory))
+            resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=FakeDecoder([_decoded()]),
+                progress=None,
+            )
+            final_before = paths[2].read_bytes()
+            report_before = paths[3].read_bytes()
+
+            with self.assertRaisesRegex(
+                AudioReviewV2Error, "different inputs, config, or code"
+            ):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    config=AudioReviewV2Config(beam_size=4),
+                    decoder=FakeDecoder([]),
+                    progress=None,
+                )
+
+            self.assertEqual(paths[2].read_bytes(), final_before)
+            self.assertEqual(paths[3].read_bytes(), report_before)
+
+    def test_completed_review_rejects_missing_bound_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory))
+            resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=FakeDecoder([_decoded()]),
+                progress=None,
+            )
+            final_before = paths[2].read_bytes()
+            paths[3].unlink()
+
+            with self.assertRaisesRegex(AudioReviewV2Error, "no safe bound report"):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    decoder=FakeDecoder([]),
+                    progress=None,
+                )
+
+            self.assertEqual(paths[2].read_bytes(), final_before)
+
+    def test_completed_review_rejects_changed_manual_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory))
+            resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=FakeDecoder([_decoded()]),
+                progress=None,
+            )
+            final_before = paths[2].read_bytes()
+            report_before = paths[3].read_bytes()
+
+            with self.assertRaisesRegex(AudioReviewV2Error, "different manual overrides"):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    manual_overrides={
+                        "candidate-1": {
+                            "disposition": "confirmed_dialogue",
+                            "tr_corrected": "Merhaba",
+                            "note": "Exact WAV yeniden doğrulandı.",
+                        }
+                    },
+                    decoder=FakeDecoder([]),
+                    progress=None,
+                )
+
+            self.assertEqual(paths[2].read_bytes(), final_before)
+            self.assertEqual(paths[3].read_bytes(), report_before)
 
     def test_report_tampering_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

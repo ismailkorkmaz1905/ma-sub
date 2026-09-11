@@ -10,6 +10,7 @@ from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
+import mas.engine.forced_align as forced_align
 from mas.engine.forced_align import (
     ALIGNMENT_TEXT_NORMALIZATION,
     AUDIO_REVIEW_SCORE_CONTEXT,
@@ -360,13 +361,19 @@ class ForcedAlignmentTests(unittest.TestCase):
             },
         ]
         with tempfile.TemporaryDirectory() as directory:
-            data = align_corrected_segments(
-                self._audio(directory),
-                coarse,
-                whisperx_module=_OverlapWhisperX(joint_resolves=True),
-            )
+            with patch.object(
+                forced_align,
+                "_overlap_components",
+                wraps=forced_align._overlap_components,
+            ) as components:
+                data = align_corrected_segments(
+                    self._audio(directory),
+                    coarse,
+                    whisperx_module=_OverlapWhisperX(joint_resolves=True),
+                )
 
         resolution = data["provenance"]["overlap_resolution"]
+        self.assertEqual(components.call_count, 2)
         self.assertEqual(resolution["initial_overlap_count"], 1)
         self.assertEqual(resolution["final_overlap_count"], 0)
         self.assertEqual(resolution["acoustic_component_count"], 0)

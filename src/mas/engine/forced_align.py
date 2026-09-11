@@ -1955,6 +1955,7 @@ def _resolve_alignment_overlaps(
     residual_before_partition = _unsafe_word_overlaps(
         [word for words in selected.values() for word in words]
     )
+    residual_components = _overlap_components(residual_before_partition, order)
     conflict_uids = {
         str(word["utterance_uid"])
         for overlap in residual_before_partition
@@ -2002,7 +2003,7 @@ def _resolve_alignment_overlaps(
 
     resolved_component_count = 0
     selected_mode_by_uid = {uid: "independent" for uid in selected}
-    for seed_uids in initial_components:
+    for seed_uids in residual_components:
         expanded = set(seed_uids)
         for uid in seed_uids:
             position = order[uid]

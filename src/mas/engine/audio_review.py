@@ -134,6 +134,11 @@ def _is_known_short_clip_hallucination(value: Any) -> bool:
     return _normalized_text(value) == "altyazı m k"
 
 
+def _is_repetitive_asr_hallucination(value: Any) -> bool:
+    tokens = _tokens(value)
+    return len(tokens) >= 20 and len(set(tokens)) <= max(2, len(tokens) // 10)
+
+
 def _tokens(value: Any) -> list[str]:
     normalized = _normalized_text(value)
     return normalized.split() if normalized else []
@@ -662,7 +667,11 @@ def _machine_decision(
             "reason": "speech hole has no reliable target transcript",
         }
 
-    confirmed = acoustic_transcript and (
+    repetitive_source_hallucination = (
+        kind == "asr_caption_candidate"
+        and _is_repetitive_asr_hallucination(evidence.get("asr_text", ""))
+    )
+    confirmed = acoustic_transcript and not repetitive_source_hallucination and (
         best_similarity >= float(config.min_reference_similarity)
         or best_shared >= required_shared_tokens
     )
@@ -765,9 +774,24 @@ def _contextual_boundary_decision(
     known_source_hallucination = _is_known_short_clip_hallucination(
         evidence.get("asr_text", "")
     )
+    repetitive_source_hallucination = _is_repetitive_asr_hallucination(
+        evidence.get("asr_text", "")
+    )
     usable_decodes = [
         item for item in decode_audit if item["usable_target_text"] is True
     ]
+    if kind == "asr_caption_candidate" and repetitive_source_hallucination:
+        return {
+            **copy.deepcopy(dict(pending_decision)),
+            "decision": "discarded_asr_hallucination",
+            "tr_corrected": "",
+            "reason": (
+                "repetitive source-ASR loop was not retained as one long dialogue cue"
+            ),
+            "source": "contextual_boundary_policy",
+            "forced_alignment_required": True,
+            "contextual_boundary_audit": audit,
+        }
     if kind == "asr_caption_candidate" and known_source_hallucination:
         if usable_decodes:
             selected = usable_decodes[-1]
@@ -1346,9 +1370,22 @@ def _validate_contextual_boundary_outcome(
         known_source_hallucination = _is_known_short_clip_hallucination(
             evidence.get("asr_text", "")
         )
+        repetitive_source_hallucination = _is_repetitive_asr_hallucination(
+            evidence.get("asr_text", "")
+        )
         usable = [
             item for item in bounded_decodes if item.get("usable_target_text") is True
         ]
+        if repetitive_source_hallucination:
+            if (
+                is_orphan
+                or outcome.get("decision") != "discarded_asr_hallucination"
+                or str(final_record.get("tr_corrected", "")).strip()
+            ):
+                raise AudioReviewV2Error(
+                    "repetitive source hallucination policy was misapplied"
+                )
+            return
         if known_source_hallucination:
             if usable:
                 valid = (

@@ -602,6 +602,34 @@ class AudioReviewV2Tests(unittest.TestCase):
             self.assertTrue(exact_audit["known_short_clip_hallucination"])
             self.assertFalse(exact_audit["usable_target_text"])
 
+    def test_repetitive_source_loop_is_discarded_without_merging_context(self) -> None:
+        repeated = " ".join(["Nefes al"] * 24)
+        decoded = _decoded(
+            "Nefes al. Tolga nereye gidiyorsun? Bir dur. Noter kağıdı geldi."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory),
+                candidate_reason="weak_confidence_candidate",
+                candidate_asr_text=repeated,
+            )
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=FakeDecoder([decoded, decoded, decoded]),
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            record = output.records[0]
+            outcome = report["outcomes"][0]
+            self.assertTrue(record["non_dialogue"])
+            self.assertEqual(record["tr_corrected"], "")
+            self.assertEqual(
+                record["review_disposition"], "discarded_asr_hallucination"
+            )
+            self.assertEqual(outcome["source"], "contextual_boundary_policy")
+            validate_audio_review_v2_report(*paths[:4])
+
     def test_known_source_hallucination_is_discarded_without_acoustic_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = _make_files(

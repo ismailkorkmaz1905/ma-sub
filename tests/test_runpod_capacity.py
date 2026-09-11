@@ -175,6 +175,40 @@ def test_unresolved_ambiguous_create_never_falls_back(tmp_path):
     assert saved["data"]["attempts"][0]["create_error_type"] == "TimeoutError"
 
 
+def test_resumed_ambiguous_create_without_visible_pod_releases_retry(tmp_path):
+    provider = Provider()
+    provider.create_results = [TimeoutError("unknown")]
+    ticks = iter(range(0, 1000, 5))
+    audit = tmp_path / "audit"
+    lease = CapacityLease(
+        provider,
+        BASE,
+        audit,
+        plan(startup_seconds=300),
+        nonce="0123456789abcdef",
+        sleep=lambda value: None,
+        clock=lambda: next(ticks),
+    )
+    with pytest.raises(IntegrityError, match="reconcile"):
+        lease.acquire()
+    actions_before_resume = list(provider.actions)
+
+    with pytest.raises(IntegrityError, match="no externally visible Pod"):
+        with CapacityLease(
+            provider,
+            BASE,
+            audit,
+            plan(),
+            resume=True,
+            resume_reconciliation_seconds=0,
+        ):
+            pass
+
+    saved = json.loads((audit / "capacity-state.json").read_text())
+    assert saved["data"]["status"] == "NO_CAPACITY"
+    assert provider.actions == actions_before_resume
+
+
 def test_ambiguous_provider_error_records_only_allowlisted_safe_details(tmp_path):
     provider = Provider()
     provider.create_results = [PilotProviderError({

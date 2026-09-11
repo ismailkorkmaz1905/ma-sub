@@ -456,6 +456,14 @@ class CapacityLease:
         active = [pod for pod in inventory if pod.get("desiredStatus") != "EXITED"]
         if any(pod not in candidates for pod in active):
             raise IntegrityError("unrelated active Pod prevents capacity resume")
+        if (not candidates and state.get("status") in
+                ("CREATE_REQUESTED", "AMBIGUOUS_RECONCILING", "AMBIGUOUS_UNRESOLVED")):
+            state["shutdown"] = []
+            state["status"] = "NO_CAPACITY"
+            self._save()
+            raise IntegrityError(
+                "ambiguous capacity create reconciled to no externally visible Pod"
+            )
         recorded_ids = state.get("owned_pod_ids") or []
         if recorded_ids and not candidates and all(
                 pod.get("id") not in set(recorded_ids) for pod in inventory):

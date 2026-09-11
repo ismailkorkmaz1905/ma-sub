@@ -40,6 +40,18 @@ def test_production_stop_after_download_does_not_start_audio(tmp_path, monkeypat
         return SimpleNamespace(video_path=video, resumed=False, captions_path=None)
 
     monkeypatch.setattr(pipeline, "download_source", download)
+    monkeypatch.setenv("MAS_EXTERNAL_RUNPOD_CONTROLLER", "1")
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod123")
+    monkeypatch.setenv("MAS_MAX_RUNTIME_SECONDS", "1")
+
+    def qualify(*args, **kwargs):
+        receipt = tmp_path / "qualification.json"
+        receipt.write_text(
+            json.dumps({"projected_full_encode_seconds": 999}), encoding="utf-8"
+        )
+        return receipt
+
+    monkeypatch.setattr(pipeline, "qualify_encoding", qualify)
     monkeypatch.setattr(
         pipeline,
         "extract_audio",

@@ -369,6 +369,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     encoder = os.getenv("MAS_MP4_ENCODER", "h264_nvenc")
     target = float(os.getenv("MAS_MP4_TARGET_GB", "3"))
     encoder_options = json.loads(os.environ["MAS_MP4_ENCODER_OPTIONS"]) if os.getenv("MAS_MP4_ENCODER_OPTIONS") else None
+    id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
+    sample_approval = dirs["review"] / "mp4-sample-approval.json"
     if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1" and encoder != "h264_nvenc":
         raise RuntimeError("RunPod MP4 production requires the explicitly supported NVENC encoder")
     holder = {}
@@ -394,7 +396,12 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             qualification = qualify_encoding(result.video_path, dirs["work"] / "encoder-qualification" / pod_id,
                 encoder=encoder, target_size_gb=target, encoder_options=encoder_options)
             measured = json.loads(qualification.read_text(encoding="utf-8"))
-            if measured["projected_full_encode_seconds"] >= float(os.getenv("MAS_MAX_RUNTIME_SECONDS", "14400")):
+            if (
+                id_output.is_file()
+                and sample_approval.is_file()
+                and measured["projected_full_encode_seconds"]
+                >= float(os.getenv("MAS_MAX_RUNTIME_SECONDS", "14400"))
+            ):
                 raise RuntimeError("measured MP4 encoding alone exceeds the paid runtime allowance")
         return {"source": str(result.video_path), "sha256": digest, "resumed": result.resumed}
     _stage(state_path, state, "download", acquire)
@@ -530,7 +537,6 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     artifacts = holder["artifacts"]
     manifest = holder["id_manifest"]
 
-    id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
     if not id_output.is_file():
         set_stage(state_path, state, "id_return", "blocked", expected=str(id_output))
         notify(
@@ -570,8 +576,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
                                 "id_srt": sha256_file(id_srt),
                                 "style": SUBTITLE_STYLE, "settings": settings["identity_sha256"]})[:12]
         mp4 = dirs["final"] / f"{name}.id.{identity}.mp4"
-        approval = dirs["review"] / "mp4-sample-approval.json"
-        if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1" and not approval.is_file():
+        if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1" and not sample_approval.is_file():
             samples = dirs["work"] / "encoding-samples" / identity
             manifest_path = create_encoding_samples(download.video_path, id_srt, samples,
                                                      encoder=encoder, target_size_gb=target,
@@ -593,7 +598,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
                 mp4 = Path(f"/tmp/mas-ep{episode}-output") / mp4.name
         burn_indonesian_mp4(download.video_path, id_srt, mp4, encoder=encoder, target_size_gb=target,
                             encoder_options=encoder_options,
-                            sample_approval_path=approval if approval.is_file() else None,
+                            sample_approval_path=sample_approval if sample_approval.is_file() else None,
                             require_sample_approval=os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1",
                             network_volume_root="/workspace" if network and mp4.is_relative_to(root) else None,
                             network_volume_quota_bytes=int(network) if network else None)

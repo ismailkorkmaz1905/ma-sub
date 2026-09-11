@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v6"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v7"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 DURATION_VAD_FIELDS = frozenset(
     {
@@ -2094,11 +2094,6 @@ def _resolve_alignment_overlaps(
             component_uids = list(seed_uids)
             option_sets = [options[uid] for uid in component_uids]
         combination_count = math.prod(len(option_set) for option_set in option_sets)
-        if combination_count > MAX_OVERLAP_COMBINATIONS:
-            raise ForcedAlignmentError(
-                f"overlap candidate budget exceeded: {combination_count} combinations "
-                f"for {', '.join(component_uids)}; limit {MAX_OVERLAP_COMBINATIONS}"
-            )
         envelope_start = min(
             int(word["start_ms"])
             for option_set in option_sets
@@ -2120,35 +2115,88 @@ def _resolve_alignment_overlaps(
             and int(word["start_ms"]) < envelope_end
         ]
         best: tuple[Any, ...] | None = None
-        best_score: tuple[int, int, int] | None = None
-        for combination in itertools.product(*option_sets):
-            trial_words = [word for _, words in combination for word in words]
-            if _unsafe_word_overlaps(trial_words):
-                continue
-            trial_start = min(int(word["start_ms"]) for word in trial_words)
-            trial_end = max(int(word["end_ms"]) for word in trial_words)
-            nearby = [
-                word
-                for word in outside_words
-                if int(word["end_ms"]) > trial_start
-                and int(word["start_ms"]) < trial_end
-            ]
-            boundary_overlaps = [
-                overlap
-                for overlap in _unsafe_word_overlaps(nearby + trial_words)
-                if str(overlap[0]["utterance_uid"]) in component_uids
-                or str(overlap[1]["utterance_uid"]) in component_uids
-            ]
-            if boundary_overlaps:
-                continue
-            score = (
-                sum(mode == "joint" for mode, _ in combination),
-                sum(mode == "independent" for mode, _ in combination),
-                sum(mode.startswith("padding-") for mode, _ in combination),
+        if combination_count <= MAX_OVERLAP_COMBINATIONS:
+            best_score: tuple[int, int, int] | None = None
+            for combination in itertools.product(*option_sets):
+                trial_words = [word for _, words in combination for word in words]
+                if _unsafe_word_overlaps(trial_words):
+                    continue
+                trial_start = min(int(word["start_ms"]) for word in trial_words)
+                trial_end = max(int(word["end_ms"]) for word in trial_words)
+                nearby = [
+                    word
+                    for word in outside_words
+                    if int(word["end_ms"]) > trial_start
+                    and int(word["start_ms"]) < trial_end
+                ]
+                boundary_overlaps = [
+                    overlap
+                    for overlap in _unsafe_word_overlaps(nearby + trial_words)
+                    if str(overlap[0]["utterance_uid"]) in component_uids
+                    or str(overlap[1]["utterance_uid"]) in component_uids
+                ]
+                if boundary_overlaps:
+                    continue
+                score = (
+                    sum(mode == "joint" for mode, _ in combination),
+                    sum(mode == "independent" for mode, _ in combination),
+                    sum(mode.startswith("padding-") for mode, _ in combination),
+                )
+                if best_score is None or score > best_score:
+                    best = combination
+                    best_score = score
+        else:
+            ranked_options = {
+                uid: sorted(
+                    options[uid],
+                    key=lambda option: (
+                        0 if option[0] == "joint" else
+                        1 if option[0] == "independent" else
+                        2 if option[0].startswith("padding-") else 3
+                    ),
+                )
+                for uid in component_uids
+            }
+            search_uids = sorted(
+                component_uids,
+                key=lambda uid: (len(ranked_options[uid]), order[uid]),
             )
-            if best_score is None or score > best_score:
-                best = combination
-                best_score = score
+            chosen: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+            search_attempts = 0
+
+            def search(position: int) -> bool:
+                nonlocal search_attempts
+                if position == len(search_uids):
+                    return True
+                uid = search_uids[position]
+                for option in ranked_options[uid]:
+                    search_attempts += 1
+                    if search_attempts > MAX_OVERLAP_COMBINATIONS:
+                        raise ForcedAlignmentError(
+                            "overlap candidate search budget exceeded: "
+                            f"{search_attempts} candidates for {', '.join(component_uids)}; "
+                            f"limit {MAX_OVERLAP_COMBINATIONS}"
+                        )
+                    trial_words = option[1]
+                    comparison_words = outside_words + [
+                        word for _, words in chosen.values() for word in words
+                    ] + trial_words
+                    conflicts = [
+                        overlap
+                        for overlap in _unsafe_word_overlaps(comparison_words)
+                        if str(overlap[0]["utterance_uid"]) == uid
+                        or str(overlap[1]["utterance_uid"]) == uid
+                    ]
+                    if conflicts:
+                        continue
+                    chosen[uid] = option
+                    if search(position + 1):
+                        return True
+                    del chosen[uid]
+                return False
+
+            if search(0):
+                best = tuple(chosen[uid] for uid in component_uids)
         if best is None:
             continue
         for uid, (mode, words) in zip(component_uids, best):

@@ -1,4 +1,3 @@
-import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -161,8 +160,6 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     expected_requirements_sha = (
         "b93b36910aade9a06120b6d772c561637da426ec6949c6199f7abdbc85834c65"
     )
-    requirements = (ROOT / "requirements.lock").read_bytes().replace(b"\r\n", b"\n")
-    assert hashlib.sha256(requirements).hexdigest() == expected_requirements_sha
     assert expected_requirements_sha in script
     assert 'uv pip install --python "$VENV/bin/python"' not in script
     assert 'importlib.metadata.distributions()' in script

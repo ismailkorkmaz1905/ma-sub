@@ -366,6 +366,102 @@ class ForcedAlignmentTests(unittest.TestCase):
                                      checkpoint_dir=checkpoint)
             self.assertEqual(len(fresh.align_calls), 2)
 
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_selection_only_change_reuses_raw_alignment_calls(self, _model_hash):
+        results = [
+            _result([
+                {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                {"word": "dünya!", "start": 1.5, "end": 1.9},
+            ]),
+            _result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}]),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            align_corrected_segments(
+                audio,
+                _coarse(),
+                whisperx_module=_FakeWhisperX(results),
+                checkpoint_dir=checkpoint,
+            )
+            original = forced_align._resolve_alignment_overlaps
+            reused = _FakeWhisperX([])
+            with patch(
+                "mas.engine.forced_align._resolve_alignment_overlaps",
+                wraps=original,
+            ) as selection:
+                data = align_corrected_segments(
+                    audio,
+                    _coarse(),
+                    whisperx_module=reused,
+                    checkpoint_dir=checkpoint,
+                )
+
+        self.assertEqual(reused.align_calls, [])
+        selection.assert_called_once()
+        validate_forced_alignment_data(data)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_changed_raw_alignment_producer_invalidates_cached_calls(
+        self, _model_hash
+    ):
+        results = [
+            _result([
+                {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                {"word": "dünya!", "start": 1.5, "end": 1.9},
+            ]),
+            _result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}]),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            with patch(
+                "mas.engine.forced_align._raw_alignment_producer_sha256",
+                return_value="a" * 64,
+            ):
+                align_corrected_segments(
+                    audio,
+                    _coarse(),
+                    whisperx_module=_FakeWhisperX(results),
+                    checkpoint_dir=checkpoint,
+                )
+            changed = _FakeWhisperX(results)
+            with patch(
+                "mas.engine.forced_align._raw_alignment_producer_sha256",
+                return_value="b" * 64,
+            ):
+                align_corrected_segments(
+                    audio,
+                    _coarse(),
+                    whisperx_module=changed,
+                    checkpoint_dir=checkpoint,
+                )
+
+        self.assertEqual(len(changed.align_calls), 2)
+
+    def test_raw_alignment_producer_identity_excludes_selection_helpers(self):
+        expected = forced_align._raw_alignment_producer_sha256()
+        with patch("mas.engine.forced_align._resolve_alignment_overlaps"):
+            self.assertEqual(
+                forced_align._raw_alignment_producer_sha256(), expected
+            )
+
+        getsource = forced_align.inspect.getsource
+
+        def changed_source(function):
+            source = getsource(function)
+            if function is forced_align._alignment_model_text:
+                return source + "\n# changed producer"
+            return source
+
+        with patch(
+            "mas.engine.forced_align.inspect.getsource",
+            side_effect=changed_source,
+        ):
+            self.assertNotEqual(
+                forced_align._raw_alignment_producer_sha256(), expected
+            )
+
     def test_model_digest_binds_weights_metadata_and_config(self):
         from types import SimpleNamespace
         import struct

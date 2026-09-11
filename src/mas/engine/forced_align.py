@@ -1624,6 +1624,37 @@ def _align_call_kwargs(align_function: Any) -> tuple[dict[str, Any], str]:
     return kwargs, mode
 
 
+def _execute_alignment_call(
+    align: Any,
+    transcript: Any,
+    model: Any,
+    metadata: Any,
+    audio: Any,
+    device: str,
+    kwargs: Mapping[str, Any],
+) -> Any:
+    result = align(transcript, model, metadata, audio, device, **kwargs)
+    _raw_aligned_words(result, "alignment checkpoint")
+    return result
+
+
+def _raw_alignment_producer_sha256() -> str:
+    functions = (
+        _alignment_model_text,
+        _allows_none,
+        _supports_keyword,
+        _align_call_kwargs,
+        _raw_aligned_words,
+        _execute_alignment_call,
+    )
+    return digest(
+        {
+            function.__name__: inspect.getsource(function)
+            for function in functions
+        }
+    )
+
+
 def _unsafe_word_overlaps(
     words: Sequence[Mapping[str, Any]],
 ) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
@@ -2471,7 +2502,7 @@ def align_corrected_segments(
             "device": device,
             "language": language,
             "interpolation": interpolation_mode,
-            "code_sha256": _audio_sha256(Path(__file__)),
+            "producer_sha256": _raw_alignment_producer_sha256(),
             "dependencies_sha256": _audio_sha256(
                 Path(__file__).resolve().parents[3] / "requirements.lock"
             ),
@@ -2483,8 +2514,15 @@ def align_corrected_segments(
             cached = journal.read(key)
             if cached is not None:
                 return cached
-            result = model_align(transcript, model, metadata, audio, device, **kwargs)
-            _raw_aligned_words(result, "alignment checkpoint")
+            result = _execute_alignment_call(
+                model_align,
+                transcript,
+                model,
+                metadata,
+                audio,
+                device,
+                kwargs,
+            )
             journal.write(key, result)
             return result
 

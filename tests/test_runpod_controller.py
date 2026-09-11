@@ -349,6 +349,47 @@ def test_post_run_transfers_share_retrieval_grace(monkeypatch):
     assert timeouts == [120, 50]
 
 
+def test_failed_terminal_remote_job_gets_new_attempt_identity(tmp_path):
+    request_path = tmp_path / "remote-job-request.json"
+    status_path = tmp_path / "remote-job-status.json"
+    base = "a" * 64
+    request = {"commit": "b" * 40, "episode": 13, "input_sha256": base}
+    request_path.write_text(
+        json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
+        encoding="utf-8",
+    )
+    status_path.write_text(json.dumps({"status": "EXITED", "exit_code": 124}), encoding="utf-8")
+
+    input_sha, attempt = runpod_controller._remote_attempt_identity(
+        base, request_path, status_path
+    )
+
+    assert attempt == 1
+    assert input_sha == runpod_controller.digest(
+        {"base_input_sha256": base, "attempt": 1}
+    )
+
+
+@pytest.mark.parametrize("exit_code", [0, 20, 21, runpod_controller.READY_FOR_DELIVERY,
+                                       runpod_controller.WAIT_MP4_SAMPLE])
+def test_expected_terminal_remote_job_keeps_input_identity(tmp_path, exit_code):
+    request_path = tmp_path / "remote-job-request.json"
+    status_path = tmp_path / "remote-job-status.json"
+    base = "a" * 64
+    request = {"commit": "b" * 40, "episode": 13, "input_sha256": base}
+    request_path.write_text(
+        json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps({"status": "EXITED", "exit_code": exit_code}), encoding="utf-8"
+    )
+
+    assert runpod_controller._remote_attempt_identity(
+        base, request_path, status_path
+    ) == (base, 0)
+
+
 def test_verified_transfer_cannot_reset_episode_budget(monkeypatch, tmp_path):
     elapsed = [0.0]
     calls = []

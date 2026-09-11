@@ -1157,6 +1157,29 @@ def _download_record(record, local_root, remote_root, scp, host, budget, *, chec
     return destination
 
 
+def _remote_attempt_identity(base_input_sha, request_path, status_path):
+    if not request_path.is_file() and not status_path.is_file():
+        return base_input_sha, 0
+    if not request_path.is_file() or not status_path.is_file():
+        raise RunPodControllerError("remote job retry evidence is incomplete")
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    data = request.get("data")
+    if not isinstance(data, dict) or request.get("sha256") != digest(data):
+        raise RunPodControllerError("remote job request integrity mismatch")
+    exit_code = status.get("exit_code") if status.get("status") == "EXITED" else None
+    if exit_code in (None, 0, 20, 21, READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
+        return base_input_sha, 0
+    prior_base = data.get("base_input_sha256", data.get("input_sha256"))
+    if prior_base != base_input_sha:
+        return base_input_sha, 0
+    attempt = data.get("attempt", 0)
+    if type(attempt) is not int or attempt < 0:
+        raise RunPodControllerError("remote job attempt evidence is invalid")
+    attempt += 1
+    return digest({"base_input_sha256": base_input_sha, "attempt": attempt}), attempt
+
+
 def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url, runtime_seconds, budget,
                         *, resume_only=False):
     release = f"/workspace/ma-sub/releases/{commit}"
@@ -1170,10 +1193,11 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
                      local_root / "review" / "mp4-sample-approval.json"]
     inputs = {path.relative_to(local_root).as_posix(): sha256_file(path)
               for path in resume_files if path.is_file()}
-    input_sha = digest({"source_url": source_url, "commit": commit, "files": inputs,
-                        "encoder": os.getenv("MAS_MP4_ENCODER", "h264_nvenc"),
-                        "encoder_options": os.getenv("MAS_MP4_ENCODER_OPTIONS"),
-                        "target_gb": os.getenv("MAS_MP4_TARGET_GB", "3")})
+    base_input_sha = digest({"source_url": source_url, "commit": commit, "files": inputs,
+                             "encoder": os.getenv("MAS_MP4_ENCODER", "h264_nvenc"),
+                             "encoder_options": os.getenv("MAS_MP4_ENCODER_OPTIONS"),
+                             "target_gb": os.getenv("MAS_MP4_TARGET_GB", "3")})
+    input_sha = base_input_sha
     request_path = local_root / "work" / "remote-job-request.json"
     if resume_only:
         request = json.loads(request_path.read_text(encoding="utf-8"))
@@ -1182,7 +1206,13 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
             raise RunPodControllerError("cannot resume an unbound remote job request")
         input_sha = request["data"]["input_sha256"]
     else:
-        request = {"commit": commit, "episode": episode, "input_sha256": input_sha}
+        input_sha, attempt = _remote_attempt_identity(
+            base_input_sha,
+            request_path,
+            local_root / "work" / "remote-job-status.json",
+        )
+        request = {"commit": commit, "episode": episode, "input_sha256": input_sha,
+                   "base_input_sha256": base_input_sha, "attempt": attempt}
         atomic_json(request_path, {"data": request, "sha256": digest(request)})
     common = f" --root {release} --episode {episode} --commit {commit} --input-sha256 {input_sha}"
     start = prefix + "start" + common + " --recover-lost --source-url " + shlex.quote(source_url)

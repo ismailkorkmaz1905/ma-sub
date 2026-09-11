@@ -217,7 +217,7 @@ def status_job(root, episode, commit, input_sha256=None):
     }
 
 
-def start_job(root, episode, commit, command, input_sha256=None):
+def start_job(root, episode, commit, command, input_sha256=None, *, recover_lost=False):
     if os.name != "posix" or not Path("/proc/self/stat").is_file():
         raise RemoteJobError("remote detached jobs require Linux /proc")
     identity = _identity(episode, commit, input_sha256)
@@ -234,7 +234,18 @@ def start_job(root, episode, commit, command, input_sha256=None):
         if (terminal and terminal.get("identity") == identity
                 and terminal.get("status") in {"STARTING", "RUNNING"}
                 and not _claim_live(existing)):
-            raise RemoteJobError("prior remote job ownership was lost; reconcile before restart")
+            if not recover_lost:
+                raise RemoteJobError("prior remote job ownership was lost; reconcile before restart")
+            recovery_path = paths["job"] / "recoveries.json"
+            recovery = _read_json(recovery_path) or {"identity": identity, "records": []}
+            if (recovery.get("identity") != identity or not isinstance(recovery.get("records"), list)):
+                raise RemoteJobError("remote job recovery evidence is invalid")
+            recovery["records"].append({
+                "recovered_at": _now(),
+                "state": terminal,
+                "claim": existing,
+            })
+            _atomic_json(recovery_path, recovery)
         if _claim_live(existing):
             if existing.get("identity") != identity:
                 raise RemoteJobError("another remote job is already running for this episode")
@@ -428,6 +439,7 @@ def main(argv=None):
         command.add_argument("--commit", required=True)
         command.add_argument("--input-sha256")
     commands.choices["start"].add_argument("--source-url")
+    commands.choices["start"].add_argument("--recover-lost", action="store_true")
     commands.choices["logs"].add_argument("--offset", type=int, default=0)
     commands.choices["logs"].add_argument("--max-bytes", type=int, default=65536)
     commands.choices["checkpoints"].add_argument("--deadline-seconds", type=int, default=60)
@@ -437,7 +449,8 @@ def main(argv=None):
         command = ["bash", str(Path(args.root).resolve() / "runpod" / "run-episode.sh"), str(args.episode)]
         if args.source_url:
             command += ["--source-url", args.source_url]
-        result = start_job(args.root, args.episode, args.commit, command, args.input_sha256)
+        result = start_job(args.root, args.episode, args.commit, command, args.input_sha256,
+                           recover_lost=args.recover_lost)
     elif args.action == "status":
         result = status_job(args.root, args.episode, args.commit, args.input_sha256)
     elif args.action == "checkpoints":

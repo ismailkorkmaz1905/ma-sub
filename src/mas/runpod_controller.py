@@ -1165,10 +1165,11 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
         request = {"commit": commit, "episode": episode, "input_sha256": input_sha}
         atomic_json(request_path, {"data": request, "sha256": digest(request)})
     common = f" --root {release} --episode {episode} --commit {commit} --input-sha256 {input_sha}"
-    start = prefix + "start" + common + " --source-url " + shlex.quote(source_url)
+    start = prefix + "start" + common + " --recover-lost --source-url " + shlex.quote(source_url)
     if not resume_only:
         try:
-            _network(ssh + [start], capture=True, idle_timeout=30, total_timeout=min(45, budget.check()))
+            _network_retry(ssh + [start], capture=True, attempts=3, idle_timeout=30,
+                           total_timeout=min(90, budget.check()), budget=budget)
         except RunPodControllerError:
             print("[RUNPOD] start response lost; checking existing job without restarting", flush=True)
     offset = 0

@@ -31,22 +31,33 @@ def _remote_response(command):
         return json.dumps({"text": "", "next_offset": 0})
     if " checkpoints " in text:
         return json.dumps({"files": [], "identity": identity})
+    if " start " in text:
+        return "{}"
     raise AssertionError(text)
 
 
-def test_lost_start_response_starts_once_then_only_monitors(monkeypatch, tmp_path):
+def test_lost_start_response_retries_idempotent_start_then_only_monitors(monkeypatch, tmp_path):
+    real_retry = controller._network_retry
     starts = []
     def lost(command, **kwargs):
         starts.append(command[-1])
-        raise controller.RunPodControllerError("response lost")
+        if len(starts) == 1:
+            raise controller.RunPodControllerError("response lost")
+        return "{}"
     monkeypatch.setattr(controller, "_network", lost)
-    monkeypatch.setattr(controller, "_network_retry", lambda command, **kwargs: _remote_response(command))
+    monkeypatch.setattr(controller.time, "sleep", lambda _: None)
+    def response(command, **kwargs):
+        if " start " in command[-1]:
+            return real_retry(command, **kwargs)
+        return _remote_response(command)
+    monkeypatch.setattr(controller, "_network_retry", response)
     result = controller._monitor_remote_job(
         ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
         "https://example.invalid/episode", 500, Budget())
     assert result == 0
-    assert len(starts) == 1
+    assert len(starts) == 2
     assert " start --root " in starts[0]
+    assert " --recover-lost --source-url " in starts[0]
     assert "; exec env PYTHONPATH=src " in starts[0]
 
 

@@ -113,6 +113,29 @@ def test_stale_running_state_is_not_reported_live(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="remote detached jobs require POSIX")
+def test_explicit_recovery_restarts_lost_job_and_preserves_evidence(tmp_path, monkeypatch):
+    from mas import remote_job
+    identity = remote_job._identity(13, COMMIT, "c" * 64)
+    paths = remote_job._paths(tmp_path, 13, identity["token"])
+    paths["job"].mkdir(parents=True)
+    stale_claim = {"identity": identity, "supervisor": {"pid": 99999999, "start_ticks": 1}}
+    stale_state = {"identity": identity, "status": "RUNNING", "worker_pid": 99999998}
+    paths["claim"].write_text(json.dumps(stale_claim), encoding="utf-8")
+    paths["state"].write_text(json.dumps(stale_state), encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str((__import__("pathlib").Path(__file__).parents[1] / "src").resolve()))
+
+    result = start_job(tmp_path, 13, COMMIT, [sys.executable, "-c", "pass"], "c" * 64,
+                       recover_lost=True)
+
+    assert result["started"] is True
+    recovery = json.loads((paths["job"] / "recoveries.json").read_text(encoding="utf-8"))
+    assert recovery["identity"] == identity
+    assert recovery["records"][0]["state"] == stale_state
+    assert recovery["records"][0]["claim"] == stale_claim
+    _wait(tmp_path, "EXITED")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="remote detached jobs require POSIX")
 def test_terminal_identity_is_not_restarted(tmp_path, monkeypatch):
     from mas import remote_job
     identity = remote_job._identity(13, COMMIT, "c" * 64)

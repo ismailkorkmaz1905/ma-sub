@@ -1003,6 +1003,43 @@ class ForcedAlignmentTests(unittest.TestCase):
         )
         validate_forced_alignment_data(data)
 
+    def test_bounded_overlap_search_forward_checks_late_conflict(self) -> None:
+        component_uids = [f"utt-{index}" for index in range(8)]
+        options = {}
+        for index, uid in enumerate(component_uids):
+            if index == 0:
+                starts = list(range(850, 857)) + [0]
+            elif index == 7:
+                starts = list(range(840, 848))
+            else:
+                starts = [index * 100 + option for option in range(8)]
+            options[uid] = [
+                (
+                    "joint",
+                    [
+                        {
+                            "utterance_uid": uid,
+                            "start_ms": start,
+                            "end_ms": start + 20,
+                        }
+                    ],
+                )
+                for start in starts
+            ]
+
+        chosen, attempts = forced_align._bounded_overlap_search(
+            component_uids,
+            options,
+            {uid: option_set[0][1] for uid, option_set in options.items()},
+            {uid: index for index, uid in enumerate(component_uids)},
+            700,
+        )
+
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen["utt-0"][1][0]["start_ms"], 0)
+        self.assertEqual(attempts, 695)
+
     def test_reviewed_dialogue_does_not_establish_distinct_speakers(self) -> None:
         coarse = [
             {

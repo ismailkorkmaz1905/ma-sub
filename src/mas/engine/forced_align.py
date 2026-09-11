@@ -1776,6 +1776,116 @@ def _alignment_candidate(
     return words
 
 
+def _bounded_overlap_search(
+    component_uids: Sequence[str],
+    options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
+    selected: Mapping[str, list[dict[str, Any]]],
+    order: Mapping[str, int],
+    max_attempts: int,
+) -> tuple[dict[str, tuple[str, list[dict[str, Any]]]] | None, int]:
+    option_sets = [options[uid] for uid in component_uids]
+    envelope_start = min(
+        int(word["start_ms"])
+        for option_set in option_sets
+        for _, words in option_set
+        for word in words
+    )
+    envelope_end = max(
+        int(word["end_ms"])
+        for option_set in option_sets
+        for _, words in option_set
+        for word in words
+    )
+    outside_words = [
+        word
+        for uid, words in selected.items()
+        if uid not in component_uids
+        for word in words
+        if int(word["end_ms"]) > envelope_start
+        and int(word["start_ms"]) < envelope_end
+    ]
+    ranked_options = {
+        uid: sorted(
+            options[uid],
+            key=lambda option: (
+                0 if option[0] == "joint" else
+                1 if option[0] == "independent" else
+                2 if option[0].startswith("padding-") else 3
+            ),
+        )
+        for uid in component_uids
+    }
+    search_attempts = 0
+
+    def compatible(
+        uid: str,
+        option: tuple[str, list[dict[str, Any]]],
+        chosen: Mapping[str, tuple[str, list[dict[str, Any]]]],
+    ) -> bool:
+        nonlocal search_attempts
+        if search_attempts >= max_attempts:
+            raise ForcedAlignmentError(
+                "overlap candidate search budget exceeded: "
+                f"{search_attempts + 1} candidates for {', '.join(component_uids)}; "
+                f"limit {max_attempts}"
+            )
+        search_attempts += 1
+        comparison_words = outside_words + [
+            word for _, words in chosen.values() for word in words
+        ] + option[1]
+        return not any(
+            str(left["utterance_uid"]) == uid
+            or str(right["utterance_uid"]) == uid
+            for left, right in _unsafe_word_overlaps(comparison_words)
+        )
+
+    search_uids = sorted(
+        component_uids,
+        key=lambda uid: (len(ranked_options[uid]), order[uid]),
+    )
+    greedy: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+    for uid in search_uids:
+        for option in ranked_options[uid]:
+            if compatible(uid, option, greedy):
+                greedy[uid] = option
+                break
+        else:
+            break
+    if len(greedy) == len(component_uids):
+        return greedy, search_attempts
+
+    def search(
+        chosen: dict[str, tuple[str, list[dict[str, Any]]]],
+        remaining: Sequence[str],
+    ) -> dict[str, tuple[str, list[dict[str, Any]]]] | None:
+        if not remaining:
+            return dict(chosen)
+        viable_by_uid: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {}
+        for uid in sorted(remaining, key=order.__getitem__):
+            viable = [
+                option
+                for option in ranked_options[uid]
+                if compatible(uid, option, chosen)
+            ]
+            if not viable:
+                return None
+            viable_by_uid[uid] = viable
+        uid = min(
+            remaining,
+            key=lambda candidate: (len(viable_by_uid[candidate]), order[candidate]),
+        )
+        next_remaining = [candidate for candidate in remaining if candidate != uid]
+        for option in viable_by_uid[uid]:
+            chosen[uid] = option
+            result = search(chosen, next_remaining)
+            if result is not None:
+                return result
+            del chosen[uid]
+        return None
+
+    return search({}, component_uids), search_attempts
+
+
 def _resolve_alignment_overlaps(
     source: Sequence[Mapping[str, Any]],
     independent: Mapping[str, list[dict[str, Any]]],
@@ -2277,56 +2387,14 @@ def _resolve_alignment_overlaps(
                     best = combination
                     best_score = score
         else:
-            ranked_options = {
-                uid: sorted(
-                    options[uid],
-                    key=lambda option: (
-                        0 if option[0] == "joint" else
-                        1 if option[0] == "independent" else
-                        2 if option[0].startswith("padding-") else 3
-                    ),
-                )
-                for uid in component_uids
-            }
-            search_uids = sorted(
+            chosen, _ = _bounded_overlap_search(
                 component_uids,
-                key=lambda uid: (len(ranked_options[uid]), order[uid]),
+                options,
+                selected,
+                order,
+                MAX_OVERLAP_COMBINATIONS,
             )
-            chosen: dict[str, tuple[str, list[dict[str, Any]]]] = {}
-            search_attempts = 0
-
-            def search(position: int) -> bool:
-                nonlocal search_attempts
-                if position == len(search_uids):
-                    return True
-                uid = search_uids[position]
-                for option in ranked_options[uid]:
-                    search_attempts += 1
-                    if search_attempts > MAX_OVERLAP_COMBINATIONS:
-                        raise ForcedAlignmentError(
-                            "overlap candidate search budget exceeded: "
-                            f"{search_attempts} candidates for {', '.join(component_uids)}; "
-                            f"limit {MAX_OVERLAP_COMBINATIONS}"
-                        )
-                    trial_words = option[1]
-                    comparison_words = outside_words + [
-                        word for _, words in chosen.values() for word in words
-                    ] + trial_words
-                    conflicts = [
-                        overlap
-                        for overlap in _unsafe_word_overlaps(comparison_words)
-                        if str(overlap[0]["utterance_uid"]) == uid
-                        or str(overlap[1]["utterance_uid"]) == uid
-                    ]
-                    if conflicts:
-                        continue
-                    chosen[uid] = option
-                    if search(position + 1):
-                        return True
-                    del chosen[uid]
-                return False
-
-            if search(0):
+            if chosen is not None:
                 best = tuple(chosen[uid] for uid in component_uids)
         if best is None:
             continue

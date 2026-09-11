@@ -872,6 +872,8 @@ def _write_runtime_env(path, values, commit):
                  "MAS_MP4_ENCODER", "MAS_MP4_ENCODER_OPTIONS"):
         if os.getenv(name):
             remote_values[name] = os.environ[name]
+    if os.getenv("MAS_ALLOW_C0E3_VENV_ADOPTION") == "1":
+        remote_values["MAS_ALLOW_C0E3_VENV_ADOPTION"] = "1"
     lines = [f"export {name}={shlex.quote(value)}" for name, value in remote_values.items()]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 

@@ -1,3 +1,4 @@
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -138,6 +139,7 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
         'sysconfig.get_config_var("SOABI")',
         'platform.machine()',
         '"uv_version"',
+        '"installed_distributions"',
         'platform.freedesktop_os_release()',
         'os.confstr("CS_GNU_LIBC_VERSION")',
         'torch.__version__',
@@ -152,6 +154,27 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert 'ffmpeg_path="$(readlink -f -- "$(command -v ffmpeg)")"' in script
     assert 'FFMPEG_SHA256="$(sha256sum "$ffmpeg_path"' in script
     assert 'cmp -s -- "$RUNTIME_MARKER" "$observed_marker"' in script
+    assert 'MAS_ALLOW_C0E3_VENV_ADOPTION:-}" == "1"' in script
+    assert '"$VENV" == "/workspace/ma-sub/.venv"' in script
+    assert '"$REQUIREMENTS_SHA256" == "$C0E3_REQUIREMENTS_SHA256"' in script
+    assert 'c0e3c8e40def2d7672a5dd201cd5d65fde086d6f' in script
+    expected_requirements_sha = (
+        "1a47075cdac4e504a915ac23badeb0524baaede883fb0608c874acab5206918f"
+    )
+    requirements = (ROOT / "requirements.lock").read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(requirements).hexdigest() == expected_requirements_sha
+    assert expected_requirements_sha in script
+    assert 'uv pip install --python "$VENV/bin/python"' not in script
+    assert 'importlib.metadata.distributions()' in script
+    assert 'from packaging.specifiers import SpecifierSet' in script
+    assert 'SpecifierSet(f"=={version}").contains(' in script
+    assert 'installed[name], prereleases=True' in script
+    assert 'timeout 300 uv pip check --python "$VENV/bin/python"' in script
+    assert 'torch.ones(1, device="cuda")' in script
+    assert 'ctranslate2.get_cuda_device_count() <= 0' in script
+    assert 'stale_candidates=("$VENV".rebuild.*)' in script
+    assert 'remove_rebuild_tree "$stale_candidate"' in script
+    assert '"$VENV".previous.*)' not in script.split('stale_candidates=', 1)[1]
     assert 'uv venv --python 3.11 --relocatable "$candidate"' in script
     assert 'mv -- "$candidate" "$VENV"' in script
     assert 'remove_rebuild_tree "$backup"' in script
@@ -160,6 +183,15 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert script.index('write_runtime_marker "$candidate/bin/python"') < script.index(
         'mv -- "$VENV" "$backup"'
     )
+    cache_clean = "timeout 120 uv cache clean"
+    pre_clean = script.index(cache_clean)
+    post_clean = script.index(cache_clean, pre_clean + 1)
+    assert script.count(cache_clean) == 2
+    assert pre_clean < script.index('&& validate_c0e3_venv; then')
+    assert script.index('uv pip install --python "$candidate/bin/python"') < post_clean
+    assert post_clean < script.index('if [[ -n "${MAS_NETWORK_VOLUME_QUOTA_BYTES:-}"')
+    assert post_clean < script.index('PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod')
+    assert script.count('uv venv --python 3.11 --relocatable "$candidate"') == 1
     assert "uv pip sync" not in script
     assert 'PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod' in script
 

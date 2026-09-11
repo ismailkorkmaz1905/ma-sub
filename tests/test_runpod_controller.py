@@ -1059,7 +1059,10 @@ def test_ssh_authentication_failure_stops_without_retry(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
-def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(tmp_path):
+def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("MAS_ALLOW_C0E3_VENV_ADOPTION", raising=False)
     values = {
         "RUNPOD_POD_ID": "pod123",
         "RUNPOD_API_KEY": "api secret",
@@ -1067,6 +1070,7 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(tmp_path):
         "MAS_GMAIL_APP_PASSWORD": "mail secret",
         "MAS_NOTIFY_TO": "to@example.com",
         "MAS_DRIVE_STRICT_REMOTE": "gdrive:path with spaces",
+        "MAS_ALLOW_C0E3_VENV_ADOPTION": "1",
     }
     target = tmp_path / "runtime.env"
     runpod_controller._write_runtime_env(target, values, "a" * 40)
@@ -1079,6 +1083,7 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(tmp_path):
     assert "UV_HTTP_RETRIES=3" in content
     assert "UV_CONCURRENT_DOWNLOADS=4" in content
     assert "HF_HOME=/workspace/.cache/huggingface" in content
+    assert "MAS_ALLOW_C0E3_VENV_ADOPTION" not in content
     assert b"\r" not in target.read_bytes()
 
     values["MAS_YTDLP_COOKIES"] = "C:/private/cookies.txt"
@@ -1086,6 +1091,12 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(tmp_path):
     content = target.read_text(encoding="utf-8")
     assert "MAS_YTDLP_COOKIES=/workspace/.mas-secrets/youtube-cookies.txt" in content
     assert "C:/private/cookies.txt" not in content
+
+    monkeypatch.setenv("MAS_ALLOW_C0E3_VENV_ADOPTION", "1")
+    runpod_controller._write_runtime_env(target, values, "a" * 40)
+    assert "export MAS_ALLOW_C0E3_VENV_ADOPTION=1" in target.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_cli_dispatches_production_run_to_controller(monkeypatch, tmp_path):

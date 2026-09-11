@@ -159,6 +159,27 @@ class _OverlapWhisperX(_FakeWhisperX):
         return _result([{"word": "Selam.", "start": 1.3, "end": 2.2}])
 
 
+class _TwoPairOverlapWhisperX(_FakeWhisperX):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def align(self, transcript, *args, **kwargs):
+        text = transcript[0]["text"]
+        self.align_calls.append({"text": text})
+        results = {
+            "Alpha": [("Alpha", 1.1, 2.0)],
+            "Bravo": [("Bravo", 1.3, 2.2)],
+            "Charlie": [("Charlie", 10.1, 11.0)],
+            "Delta": [("Delta", 10.3, 11.2)],
+            "Alpha Bravo": [("Alpha", 1.1, 1.4), ("Bravo", 1.5, 1.8)],
+            "Charlie Delta": [("Charlie", 10.1, 10.4), ("Delta", 10.5, 10.8)],
+        }
+        return _result([
+            {"word": word, "start": start, "end": end}
+            for word, start, end in results[text]
+        ])
+
+
 class _ContextualOverlapWhisperX(_FakeWhisperX):
     def __init__(self, *, invalid_context: bool = False) -> None:
         super().__init__([])
@@ -556,6 +577,70 @@ class ForcedAlignmentTests(unittest.TestCase):
                         self._audio(directory), coarse,
                         whisperx_module=_OverlapWhisperX(joint_resolves=True),
                     )
+
+    def test_matching_joint_candidates_are_selected_atomically(self) -> None:
+        coarse = [
+            {
+                "start_ms": 1000,
+                "end_ms": 2500,
+                "text": "Merhaba.",
+                "asr_text": "Merhaba.",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-a",
+                "speaker_id": "speaker-a",
+            },
+            {
+                "start_ms": 1200,
+                "end_ms": 2800,
+                "text": "Selam.",
+                "asr_text": "Selam.",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-b",
+                "speaker_id": "speaker-a",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("mas.engine.forced_align.MAX_OVERLAP_COMBINATIONS", 1):
+                data = align_corrected_segments(
+                    self._audio(directory),
+                    coarse,
+                    whisperx_module=_OverlapWhisperX(joint_resolves=True),
+                )
+
+        resolution = data["provenance"]["overlap_resolution"]
+        self.assertEqual(resolution["selected_mode_counts"], {"joint": 2})
+        self.assertEqual(resolution["final_overlap_count"], 0)
+        validate_forced_alignment_data(data)
+
+    def test_atomic_selection_ignores_other_disconnected_component(self) -> None:
+        coarse = [
+            {
+                "start_ms": start,
+                "end_ms": end,
+                "text": text,
+                "asr_text": text,
+                "deletion_audio_reviewed": False,
+                "utterance_uid": f"utt-{text.lower()}",
+                "speaker_id": "speaker-a",
+            }
+            for start, end, text in (
+                (1000, 2500, "Alpha"),
+                (1200, 2800, "Bravo"),
+                (10000, 11500, "Charlie"),
+                (10200, 11800, "Delta"),
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory),
+                coarse,
+                whisperx_module=_TwoPairOverlapWhisperX(),
+            )
+
+        resolution = data["provenance"]["overlap_resolution"]
+        self.assertEqual(resolution["selected_mode_counts"], {"joint": 4})
+        self.assertEqual(resolution["final_overlap_count"], 0)
+        validate_forced_alignment_data(data)
 
     def test_residual_overlap_uses_adjacent_joint_context(self) -> None:
         coarse = [

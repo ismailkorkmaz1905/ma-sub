@@ -1782,6 +1782,7 @@ def _resolve_alignment_overlaps(
         "raw_word_count_mismatches": 0,
         "candidate_validation_failures": 0,
         "candidate_options_added": 0,
+        "atomic_selections": 0,
         "failure_examples": [],
     }
 
@@ -1870,7 +1871,7 @@ def _resolve_alignment_overlaps(
         component_index: str,
         *,
         padding_ms: int | None = None,
-    ) -> None:
+    ) -> bool:
         nonlocal adaptive_candidate_count
         joint_diagnostics["attempts"] += 1
         target_uid_set = set(target_uids)
@@ -1915,8 +1916,9 @@ def _resolve_alignment_overlaps(
                     f"{component_index}: expected {expected_count} joint words, "
                     f"received {len(raw_words)}"
                 )
-                return
+                return False
             offset = 0
+            joint_candidates: dict[str, list[dict[str, Any]]] = {}
             for item in group:
                 uid = str(item["utterance_uid"])
                 word_count = len(_canonical_lexical_surfaces(str(item["text"])))
@@ -1965,10 +1967,49 @@ def _resolve_alignment_overlaps(
                 added = len(options[uid]) - before
                 adaptive_candidate_count += added
                 joint_diagnostics["candidate_options_added"] += added
+                joint_candidates[uid] = words
         except Exception as exc:
             joint_diagnostics["align_failures"] += 1
             record_joint_failure(f"{component_index}: {exc}")
-            return
+            return False
+        if set(joint_candidates) != target_uid_set:
+            return False
+        active_coarse: list[Mapping[str, Any]] = []
+        for item in sorted(group, key=lambda value: int(value["coarse_start_ms"])):
+            item_start = int(item["coarse_start_ms"])
+            active_coarse = [
+                prior
+                for prior in active_coarse
+                if int(prior["coarse_end_ms"]) > item_start
+            ]
+            current_speaker = speaker_id(item, str(item["utterance_uid"]))
+            if any(
+                current_speaker is None
+                or speaker_id(prior, str(prior["utterance_uid"])) != current_speaker
+                for prior in active_coarse
+            ):
+                return False
+            active_coarse.append(item)
+        outside_words = [
+            word
+            for uid, words in selected.items()
+            if uid not in target_uid_set
+            for word in words
+        ]
+        trial_words = outside_words + [
+            word for uid in target_uids for word in joint_candidates[uid]
+        ]
+        if any(
+            str(left["utterance_uid"]) in target_uid_set
+            or str(right["utterance_uid"]) in target_uid_set
+            for left, right in _unsafe_word_overlaps(trial_words)
+        ):
+            return False
+        for uid in target_uids:
+            selected[uid] = joint_candidates[uid]
+            selected_mode_by_uid[uid] = "joint"
+        joint_diagnostics["atomic_selections"] += 1
+        return True
 
     def contextual_component_uids(
         component_uids: Sequence[str], *, radius: int = 2
@@ -1980,10 +2021,10 @@ def _resolve_alignment_overlaps(
 
     for component_index, component_uids in enumerate(initial_components, start=1):
         group = [by_uid[uid] for uid in component_uids]
-        add_joint_component_options(
+        atomically_selected = add_joint_component_options(
             component_uids, component_uids, str(component_index)
         )
-        if select_component(component_uids):
+        if atomically_selected or select_component(component_uids):
             continue
         for item in group:
             uid = str(item["utterance_uid"])

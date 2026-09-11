@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v5"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v6"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 DURATION_VAD_FIELDS = frozenset(
     {
@@ -2013,13 +2013,37 @@ def _resolve_alignment_overlaps(
     )
     residual_components = _overlap_components(residual_before_partition, order)
     for component_index, seed_uids in enumerate(residual_components, start=1):
+        seen_contexts: set[tuple[str, ...]] = set()
         for radius in (1, 2, 4, 8):
             context_uids = contextual_component_uids(seed_uids, radius=radius)
+            context_key = tuple(context_uids)
+            if context_key in seen_contexts:
+                continue
+            seen_contexts.add(context_key)
             add_joint_component_options(
                 context_uids,
                 context_uids,
                 f"residual-{component_index}-radius-{radius}",
             )
+        for uid in sorted(seed_uids, key=order.__getitem__):
+            position = order[uid]
+            for start, end, label in (
+                (max(0, position - 1), position + 1, "left"),
+                (max(0, position - 1), min(len(source), position + 2), "center"),
+                (position, min(len(source), position + 2), "right"),
+            ):
+                context_uids = [
+                    str(item["utterance_uid"]) for item in source[start:end]
+                ]
+                context_key = tuple(context_uids)
+                if len(context_uids) < 2 or context_key in seen_contexts:
+                    continue
+                seen_contexts.add(context_key)
+                add_joint_component_options(
+                    context_uids,
+                    context_uids,
+                    f"residual-{component_index}-{order[uid] + 1}-{label}",
+                )
     conflict_uids = {
         str(word["utterance_uid"])
         for overlap in residual_before_partition

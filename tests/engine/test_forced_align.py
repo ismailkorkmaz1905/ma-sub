@@ -511,10 +511,14 @@ class ForcedAlignmentTests(unittest.TestCase):
 
         self.assertEqual(
             [(segment["start_ms"], segment["end_ms"]) for segment in data["segments"]],
-            [(450, 750), (1100, 1500), (1600, 1900), (2450, 2850)],
+            [(450, 750), (1100, 1500), (2300, 2600), (2655, 2800)],
         )
         self.assertIn(
             "Once Ben ona ne yaptim Hicbir sey yapmadim Ben ona ne yaptim",
+            [call["text"] for call in fake.align_calls],
+        )
+        self.assertIn(
+            "Hicbir sey yapmadim Ben ona ne yaptim",
             [call["text"] for call in fake.align_calls],
         )
         resolution = data["provenance"]["overlap_resolution"]
@@ -536,7 +540,7 @@ class ForcedAlignmentTests(unittest.TestCase):
         )
         self.assertEqual(
             [(segment["start_ms"], segment["end_ms"]) for segment in partial["segments"]],
-            [(500, 800), (1100, 1500), (1600, 1900), (2450, 2850)],
+            [(500, 800), (1100, 1500), (2300, 2600), (2655, 2800)],
         )
         validate_forced_alignment_data(partial)
 

@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v3"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v4"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 DURATION_VAD_FIELDS = frozenset(
     {
@@ -1766,6 +1766,19 @@ def _resolve_alignment_overlaps(
         uid: [("independent", words)] for uid, words in independent.items()
     }
     selected_mode_by_uid = {uid: "independent" for uid in selected}
+    joint_diagnostics: dict[str, Any] = {
+        "attempts": 0,
+        "align_failures": 0,
+        "raw_word_count_mismatches": 0,
+        "candidate_validation_failures": 0,
+        "candidate_options_added": 0,
+        "failure_examples": [],
+    }
+
+    def record_joint_failure(message: str) -> None:
+        examples = joint_diagnostics["failure_examples"]
+        if len(examples) < 5:
+            examples.append(message)
 
     def add_option(uid: str, mode: str, words: list[dict[str, Any]]) -> None:
         signature = tuple(
@@ -1847,6 +1860,7 @@ def _resolve_alignment_overlaps(
         component_index: str,
     ) -> None:
         nonlocal adaptive_candidate_count
+        joint_diagnostics["attempts"] += 1
         target_uid_set = set(target_uids)
         group = [by_uid[uid] for uid in context_uids]
         joint_start = min(int(item["start_ms"]) for item in group)
@@ -1875,9 +1889,13 @@ def _resolve_alignment_overlaps(
                 for item in group
             )
             if len(raw_words) != expected_count:
+                joint_diagnostics["raw_word_count_mismatches"] += 1
+                record_joint_failure(
+                    f"{component_index}: expected {expected_count} joint words, "
+                    f"received {len(raw_words)}"
+                )
                 return
             offset = 0
-            candidates: dict[str, list[dict[str, Any]]] = {}
             for item in group:
                 uid = str(item["utterance_uid"])
                 word_count = len(_canonical_lexical_surfaces(str(item["text"])))
@@ -1885,45 +1903,50 @@ def _resolve_alignment_overlaps(
                 offset += word_count
                 if uid not in target_uid_set:
                     continue
-                expanded = dict(item)
-                expanded["start_ms"] = joint_start
-                expanded["end_ms"] = joint_end
-                words, _ = _normalize_aligned_words(
-                    {"word_segments": raw_word_slice},
-                    expanded,
-                    segment_index=order[uid] + 1,
-                    first_word_index=1,
-                    min_word_score=min_word_score,
-                    max_word_duration_ms=max_word_duration_ms,
-                    vad_regions=vad_regions,
-                )
-                drift = _segment_drift_audit(
-                    words,
-                    coarse_start_ms=int(item["coarse_start_ms"]),
-                    coarse_end_ms=int(item["coarse_end_ms"]),
-                )
-                context = _bounded_drift_context(
-                    words,
-                    drift,
-                    window_start_ms=joint_start,
-                    window_end_ms=joint_end,
-                    coarse_start_ms=int(item["coarse_start_ms"]),
-                    coarse_end_ms=int(item["coarse_end_ms"]),
-                    max_outward_drift_ms=max_outward_drift_ms,
-                )
-                if (
-                    drift["early_outward_drift_ms"] > max_outward_drift_ms
-                    or drift["late_outward_drift_ms"] > max_outward_drift_ms
-                ) and context is None:
-                    return
-                candidates[uid] = words
-            if len(candidates) != len(target_uids):
-                return
-            for uid in target_uids:
+                try:
+                    expanded = dict(item)
+                    expanded["start_ms"] = joint_start
+                    expanded["end_ms"] = joint_end
+                    words, _ = _normalize_aligned_words(
+                        {"word_segments": raw_word_slice},
+                        expanded,
+                        segment_index=order[uid] + 1,
+                        first_word_index=1,
+                        min_word_score=min_word_score,
+                        max_word_duration_ms=max_word_duration_ms,
+                        vad_regions=vad_regions,
+                    )
+                    drift = _segment_drift_audit(
+                        words,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                    )
+                    context = _bounded_drift_context(
+                        words,
+                        drift,
+                        window_start_ms=joint_start,
+                        window_end_ms=joint_end,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                        max_outward_drift_ms=max_outward_drift_ms,
+                    )
+                    if (
+                        drift["early_outward_drift_ms"] > max_outward_drift_ms
+                        or drift["late_outward_drift_ms"] > max_outward_drift_ms
+                    ) and context is None:
+                        continue
+                except Exception as exc:
+                    joint_diagnostics["candidate_validation_failures"] += 1
+                    record_joint_failure(f"{component_index}/{uid}: {exc}")
+                    continue
                 before = len(options[uid])
-                add_option(uid, "joint", candidates[uid])
-                adaptive_candidate_count += len(options[uid]) - before
-        except Exception:
+                add_option(uid, "joint", words)
+                added = len(options[uid]) - before
+                adaptive_candidate_count += added
+                joint_diagnostics["candidate_options_added"] += added
+        except Exception as exc:
+            joint_diagnostics["align_failures"] += 1
+            record_joint_failure(f"{component_index}: {exc}")
             return
 
     def contextual_component_uids(component_uids: Sequence[str]) -> list[str]:
@@ -2121,6 +2144,7 @@ def _resolve_alignment_overlaps(
         raise ForcedAlignmentError(
             "same/unknown-speaker alignment overlap remains between "
             f"{prior['utterance_uid']} and {current['utterance_uid']}; "
+            f"joint diagnostics: {joint_diagnostics}; "
             f"all {len(pairs)} unresolved UID pairs: {pairs}"
         )
     return selected, assigned_speakers, {

@@ -160,8 +160,9 @@ class _OverlapWhisperX(_FakeWhisperX):
 
 
 class _ContextualOverlapWhisperX(_FakeWhisperX):
-    def __init__(self) -> None:
+    def __init__(self, *, invalid_context: bool = False) -> None:
         super().__init__([])
+        self.invalid_context = invalid_context
 
     def align(
         self,
@@ -179,7 +180,8 @@ class _ContextualOverlapWhisperX(_FakeWhisperX):
         if text == "Once Ben ona ne yaptim Hicbir sey yapmadim Ben ona ne yaptim":
             return _result(
                 [
-                    {"word": "Once", "start": 0.45, "end": 0.75},
+                    {"word": "Once", "start": 0.45, "end": 0.75,
+                     "score": 0.01 if self.invalid_context else 0.90},
                     {"word": "Ben", "start": 1.1, "end": 1.2},
                     {"word": "ona", "start": 1.2, "end": 1.3},
                     {"word": "ne", "start": 1.3, "end": 1.4},
@@ -519,6 +521,24 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertEqual(resolution["selected_mode_counts"], {"joint": 4})
         self.assertEqual(resolution["final_overlap_count"], 0)
         validate_forced_alignment_data(data)
+
+        partial_fake = _ContextualOverlapWhisperX(invalid_context=True)
+        with tempfile.TemporaryDirectory() as directory:
+            partial = align_corrected_segments(
+                self._audio(directory),
+                coarse,
+                whisperx_module=partial_fake,
+            )
+
+        self.assertEqual(
+            partial["provenance"]["overlap_resolution"]["selected_mode_counts"],
+            {"independent": 1, "joint": 3},
+        )
+        self.assertEqual(
+            [(segment["start_ms"], segment["end_ms"]) for segment in partial["segments"]],
+            [(500, 800), (1100, 1500), (1600, 1900), (2450, 2850)],
+        )
+        validate_forced_alignment_data(partial)
 
     def test_reviewed_dialogue_does_not_establish_distinct_speakers(self) -> None:
         coarse = [

@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v1"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v2"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 DURATION_VAD_FIELDS = frozenset(
     {
@@ -1765,6 +1765,7 @@ def _resolve_alignment_overlaps(
     options: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {
         uid: [("independent", words)] for uid, words in independent.items()
     }
+    selected_mode_by_uid = {uid: "independent" for uid in selected}
 
     def add_option(uid: str, mode: str, words: list[dict[str, Any]]) -> None:
         signature = tuple(
@@ -1833,13 +1834,21 @@ def _resolve_alignment_overlaps(
                 best_joint_count = joint_count
         if best is None:
             return False
-        for uid, (_, words) in zip(component_uids, best):
+        for uid, (mode, words) in zip(component_uids, best):
             selected[uid] = words
+            selected_mode_by_uid[uid] = mode
         return True
 
     adaptive_candidate_count = 0
-    for component_index, component_uids in enumerate(initial_components, start=1):
-        group = [by_uid[uid] for uid in component_uids]
+
+    def add_joint_component_options(
+        target_uids: Sequence[str],
+        context_uids: Sequence[str],
+        component_index: str,
+    ) -> None:
+        nonlocal adaptive_candidate_count
+        target_uid_set = set(target_uids)
+        group = [by_uid[uid] for uid in context_uids]
         joint_start = min(int(item["start_ms"]) for item in group)
         joint_end = max(int(item["end_ms"]) for item in group)
         joint_text = " ".join(str(item["text"]) for item in group)
@@ -1865,47 +1874,69 @@ def _resolve_alignment_overlaps(
                 len(_canonical_lexical_surfaces(str(item["text"])))
                 for item in group
             )
-            if len(raw_words) == expected_count:
-                offset = 0
-                for item in group:
-                    uid = str(item["utterance_uid"])
-                    word_count = len(_canonical_lexical_surfaces(str(item["text"])))
-                    expanded = dict(item)
-                    expanded["start_ms"] = joint_start
-                    expanded["end_ms"] = joint_end
-                    words, _ = _normalize_aligned_words(
-                        {"word_segments": raw_words[offset : offset + word_count]},
-                        expanded,
-                        segment_index=order[uid] + 1,
-                        first_word_index=1,
-                        min_word_score=min_word_score,
-                        max_word_duration_ms=max_word_duration_ms,
-                        vad_regions=vad_regions,
-                    )
-                    offset += word_count
-                    drift = _segment_drift_audit(
-                        words,
-                        coarse_start_ms=int(item["coarse_start_ms"]),
-                        coarse_end_ms=int(item["coarse_end_ms"]),
-                    )
-                    context = _bounded_drift_context(
-                        words,
-                        drift,
-                        window_start_ms=joint_start,
-                        window_end_ms=joint_end,
-                        coarse_start_ms=int(item["coarse_start_ms"]),
-                        coarse_end_ms=int(item["coarse_end_ms"]),
-                        max_outward_drift_ms=max_outward_drift_ms,
-                    )
-                    if (
-                        drift["early_outward_drift_ms"] > max_outward_drift_ms
-                        or drift["late_outward_drift_ms"] > max_outward_drift_ms
-                    ) and context is None:
-                        continue
-                    add_option(uid, "joint", words)
-                    adaptive_candidate_count += 1
+            if len(raw_words) != expected_count:
+                return
+            offset = 0
+            candidates: dict[str, list[dict[str, Any]]] = {}
+            for item in group:
+                uid = str(item["utterance_uid"])
+                word_count = len(_canonical_lexical_surfaces(str(item["text"])))
+                raw_word_slice = raw_words[offset : offset + word_count]
+                offset += word_count
+                if uid not in target_uid_set:
+                    continue
+                expanded = dict(item)
+                expanded["start_ms"] = joint_start
+                expanded["end_ms"] = joint_end
+                words, _ = _normalize_aligned_words(
+                    {"word_segments": raw_word_slice},
+                    expanded,
+                    segment_index=order[uid] + 1,
+                    first_word_index=1,
+                    min_word_score=min_word_score,
+                    max_word_duration_ms=max_word_duration_ms,
+                    vad_regions=vad_regions,
+                )
+                drift = _segment_drift_audit(
+                    words,
+                    coarse_start_ms=int(item["coarse_start_ms"]),
+                    coarse_end_ms=int(item["coarse_end_ms"]),
+                )
+                context = _bounded_drift_context(
+                    words,
+                    drift,
+                    window_start_ms=joint_start,
+                    window_end_ms=joint_end,
+                    coarse_start_ms=int(item["coarse_start_ms"]),
+                    coarse_end_ms=int(item["coarse_end_ms"]),
+                    max_outward_drift_ms=max_outward_drift_ms,
+                )
+                if (
+                    drift["early_outward_drift_ms"] > max_outward_drift_ms
+                    or drift["late_outward_drift_ms"] > max_outward_drift_ms
+                ) and context is None:
+                    return
+                candidates[uid] = words
+            if len(candidates) != len(target_uids):
+                return
+            for uid in target_uids:
+                before = len(options[uid])
+                add_option(uid, "joint", candidates[uid])
+                adaptive_candidate_count += len(options[uid]) - before
         except Exception:
-            pass
+            return
+
+    def contextual_component_uids(component_uids: Sequence[str]) -> list[str]:
+        positions = [order[uid] for uid in component_uids]
+        start = max(0, min(positions) - 2)
+        end = min(len(source), max(positions) + 3)
+        return [str(item["utterance_uid"]) for item in source[start:end]]
+
+    for component_index, component_uids in enumerate(initial_components, start=1):
+        group = [by_uid[uid] for uid in component_uids]
+        add_joint_component_options(
+            component_uids, component_uids, str(component_index)
+        )
         if select_component(component_uids):
             continue
         for item in group:
@@ -1956,17 +1987,20 @@ def _resolve_alignment_overlaps(
         [word for words in selected.values() for word in words]
     )
     residual_components = _overlap_components(residual_before_partition, order)
+    for component_index, seed_uids in enumerate(residual_components, start=1):
+        add_joint_component_options(
+            seed_uids,
+            contextual_component_uids(seed_uids),
+            f"residual-{component_index}",
+        )
     conflict_uids = {
         str(word["utterance_uid"])
         for overlap in residual_before_partition
         for word in overlap
     }
     partition_uids = set(conflict_uids)
-    for uid in tuple(conflict_uids):
-        position = order[uid]
-        for neighbor in (position - 2, position - 1, position + 1, position + 2):
-            if 0 <= neighbor < len(source):
-                partition_uids.add(str(source[neighbor]["utterance_uid"]))
+    for component_uids in residual_components:
+        partition_uids.update(contextual_component_uids(component_uids))
     for uid in sorted(partition_uids, key=order.__getitem__):
         position = order[uid]
         item = by_uid[uid]
@@ -2002,15 +2036,8 @@ def _resolve_alignment_overlaps(
         adaptive_candidate_count += 1
 
     resolved_component_count = 0
-    selected_mode_by_uid = {uid: "independent" for uid in selected}
     for seed_uids in residual_components:
-        expanded = set(seed_uids)
-        for uid in seed_uids:
-            position = order[uid]
-            for neighbor in (position - 2, position - 1, position + 1, position + 2):
-                if 0 <= neighbor < len(source):
-                    expanded.add(str(source[neighbor]["utterance_uid"]))
-        component_uids = sorted(expanded, key=order.__getitem__)
+        component_uids = contextual_component_uids(seed_uids)
         option_sets = [options[uid] for uid in component_uids]
         if math.prod(len(option_set) for option_set in option_sets) > MAX_OVERLAP_COMBINATIONS:
             component_uids = list(seed_uids)

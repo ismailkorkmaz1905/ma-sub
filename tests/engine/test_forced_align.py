@@ -159,6 +159,71 @@ class _OverlapWhisperX(_FakeWhisperX):
         return _result([{"word": "Selam.", "start": 1.3, "end": 2.2}])
 
 
+class _ContextualOverlapWhisperX(_FakeWhisperX):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def align(
+        self,
+        transcript: list[dict[str, Any]],
+        model: object,
+        metadata: dict[str, str],
+        audio: object,
+        device: str,
+        interpolate_method: str = "nearest",
+        return_char_alignments: bool = False,
+        print_progress: bool = False,
+    ) -> dict[str, Any]:
+        text = transcript[0]["text"]
+        self.align_calls.append({"text": text})
+        if text == "Once Ben ona ne yaptim Hicbir sey yapmadim Ben ona ne yaptim":
+            return _result(
+                [
+                    {"word": "Once", "start": 0.5, "end": 0.8},
+                    {"word": "Ben", "start": 1.1, "end": 1.2},
+                    {"word": "ona", "start": 1.2, "end": 1.3},
+                    {"word": "ne", "start": 1.3, "end": 1.4},
+                    {"word": "yaptim", "start": 1.4, "end": 1.5},
+                    {"word": "Hicbir", "start": 1.6, "end": 1.7},
+                    {"word": "sey", "start": 1.7, "end": 1.8},
+                    {"word": "yapmadim", "start": 1.8, "end": 1.9},
+                    {"word": "Ben", "start": 2.4, "end": 2.5},
+                    {"word": "ona", "start": 2.5, "end": 2.6},
+                    {"word": "ne", "start": 2.6, "end": 2.7},
+                    {"word": "yaptim", "start": 2.7, "end": 2.8},
+                ]
+            )
+        if text == "Ben ona ne yaptim Hicbir sey yapmadim":
+            return _result(
+                [
+                    {"word": "Ben", "start": 1.1, "end": 1.2},
+                    {"word": "ona", "start": 1.2, "end": 1.3},
+                    {"word": "ne", "start": 1.3, "end": 1.4},
+                    {"word": "yaptim", "start": 1.4, "end": 1.5},
+                    {"word": "Hicbir", "start": 2.3, "end": 2.4},
+                    {"word": "sey", "start": 2.4, "end": 2.5},
+                    {"word": "yapmadim", "start": 2.5, "end": 2.6},
+                ]
+            )
+        words = text.split()
+        if text == "Once":
+            start, end = 0.5, 0.8
+        elif text == "Hicbir sey yapmadim":
+            start, end = 1.3, 2.2
+        elif len(self.align_calls) == 2:
+            start, end = 1.1, 2.0
+        else:
+            start, end = 2.4, 2.8
+        duration = (end - start) / len(words)
+        return _result(
+            [
+                {"word": word, "start": start + index * duration,
+                 "end": start + (index + 1) * duration}
+                for index, word in enumerate(words)
+            ]
+        )
+
+
 def _result(
     words: list[dict[str, Any]], *, add_default_scores: bool = True
 ) -> dict[str, Any]:
@@ -398,6 +463,62 @@ class ForcedAlignmentTests(unittest.TestCase):
                         self._audio(directory), coarse,
                         whisperx_module=_OverlapWhisperX(joint_resolves=True),
                     )
+
+    def test_residual_overlap_uses_adjacent_joint_context(self) -> None:
+        coarse = [
+            {
+                "start_ms": 400,
+                "end_ms": 900,
+                "text": "Once",
+                "asr_text": "Once",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-context",
+            },
+            {
+                "start_ms": 1000,
+                "end_ms": 3000,
+                "text": "Ben ona ne yaptim",
+                "asr_text": "Ben ona ne yaptim",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-repeat-a",
+            },
+            {
+                "start_ms": 1100,
+                "end_ms": 3100,
+                "text": "Hicbir sey yapmadim",
+                "asr_text": "Hicbir sey yapmadim",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-middle",
+            },
+            {
+                "start_ms": 2000,
+                "end_ms": 3500,
+                "text": "Ben ona ne yaptim",
+                "asr_text": "Ben ona ne yaptim",
+                "deletion_audio_reviewed": False,
+                "utterance_uid": "utt-repeat-b",
+            },
+        ]
+        fake = _ContextualOverlapWhisperX()
+        with tempfile.TemporaryDirectory() as directory:
+            data = align_corrected_segments(
+                self._audio(directory),
+                coarse,
+                whisperx_module=fake,
+            )
+
+        self.assertEqual(
+            [(segment["start_ms"], segment["end_ms"]) for segment in data["segments"]],
+            [(500, 800), (1100, 1500), (1600, 1900), (2400, 2800)],
+        )
+        self.assertIn(
+            "Once Ben ona ne yaptim Hicbir sey yapmadim Ben ona ne yaptim",
+            [call["text"] for call in fake.align_calls],
+        )
+        resolution = data["provenance"]["overlap_resolution"]
+        self.assertEqual(resolution["selected_mode_counts"], {"independent": 2, "joint": 2})
+        self.assertEqual(resolution["final_overlap_count"], 0)
+        validate_forced_alignment_data(data)
 
     def test_reviewed_dialogue_does_not_establish_distinct_speakers(self) -> None:
         coarse = [

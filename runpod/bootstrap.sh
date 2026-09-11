@@ -10,7 +10,7 @@ export PATH="$MAS_BIN_DIR:$PATH"
 cd "$ROOT"
 
 C0E3_RELEASE="/workspace/ma-sub/releases/c0e3c8e40def2d7672a5dd201cd5d65fde086d6f"
-C0E3_REQUIREMENTS_SHA256="1a47075cdac4e504a915ac23badeb0524baaede883fb0608c874acab5206918f"
+C0E3_REQUIREMENTS_SHA256="b93b36910aade9a06120b6d772c561637da426ec6949c6199f7abdbc85834c65"
 REQUIREMENTS_SHA256="$(sha256sum requirements.lock | awk '{print $1}')"
 
 remove_rebuild_tree() {

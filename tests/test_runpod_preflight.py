@@ -159,7 +159,7 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert '"$REQUIREMENTS_SHA256" != "$C0E3_REQUIREMENTS_SHA256"' in script
     assert 'c0e3c8e40def2d7672a5dd201cd5d65fde086d6f' in script
     expected_requirements_sha = (
-        "1a47075cdac4e504a915ac23badeb0524baaede883fb0608c874acab5206918f"
+        "b93b36910aade9a06120b6d772c561637da426ec6949c6199f7abdbc85834c65"
     )
     requirements = (ROOT / "requirements.lock").read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(requirements).hexdigest() == expected_requirements_sha

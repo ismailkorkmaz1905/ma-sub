@@ -26,8 +26,20 @@ fi
 
 if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  timeout 300 apt-get update
-  timeout 600 apt-get install -y --no-install-recommends ffmpeg
+  for attempt in 1 2 3; do
+    if timeout 300 apt-get -o Acquire::Retries=3 update; then
+      break
+    fi
+    [[ "$attempt" -lt 3 ]] || exit 1
+    sleep $((attempt * 5))
+  done
+  for attempt in 1 2 3; do
+    if timeout 600 apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg; then
+      break
+    fi
+    [[ "$attempt" -lt 3 ]] || exit 1
+    sleep $((attempt * 5))
+  done
 fi
 
 if ! command -v rclone >/dev/null 2>&1; then

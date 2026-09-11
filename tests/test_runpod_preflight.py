@@ -127,6 +127,8 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert '"$MAS_BIN_DIR/rclone"' in script
     assert 'export UV_INSTALL_DIR="$MAS_BIN_DIR"' in script
     assert 'if [[ ! -x "$VENV/bin/python" ]]; then' in script
+    assert "timeout 300 apt-get -o Acquire::Retries=3 update" in script
+    assert "timeout 600 apt-get -o Acquire::Retries=3 install" in script
     assert (
         'uv pip install --python "$VENV/bin/python" '
         '--index-strategy unsafe-best-match --requirements requirements.lock'

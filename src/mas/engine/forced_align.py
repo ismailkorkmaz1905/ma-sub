@@ -1975,7 +1975,10 @@ def _resolve_alignment_overlaps(
         if not joint_candidates:
             return False
         active_coarse: list[Mapping[str, Any]] = []
-        for item in sorted(group, key=lambda value: int(value["coarse_start_ms"])):
+        for item in sorted(
+            (by_uid[uid] for uid in joint_candidates),
+            key=lambda value: int(value["coarse_start_ms"]),
+        ):
             item_start = int(item["coarse_start_ms"])
             active_coarse = [
                 prior

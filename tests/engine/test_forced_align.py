@@ -663,7 +663,7 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertEqual(resolution["final_overlap_count"], 0)
         validate_forced_alignment_data(data)
 
-    def test_valid_joint_subset_is_selected_atomically(self) -> None:
+    def test_valid_unknown_joint_subset_is_selected_atomically(self) -> None:
         coarse = [
             {
                 "start_ms": 1000,
@@ -672,7 +672,6 @@ class ForcedAlignmentTests(unittest.TestCase):
                 "asr_text": "Alpha",
                 "deletion_audio_reviewed": False,
                 "utterance_uid": "utt-alpha",
-                "speaker_id": "speaker-a",
             },
             {
                 "start_ms": 1200,
@@ -681,7 +680,6 @@ class ForcedAlignmentTests(unittest.TestCase):
                 "asr_text": "Bravo",
                 "deletion_audio_reviewed": False,
                 "utterance_uid": "utt-bravo",
-                "speaker_id": "speaker-a",
             },
         ]
         with tempfile.TemporaryDirectory() as directory:

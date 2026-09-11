@@ -765,6 +765,20 @@ def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host, b
     )
 
 
+def _upload_speaker_evidence(local_root, remote_root, *, ssh, scp, host, budget=None):
+    source = Path(local_root) / "review" / "speaker_evidence_v1.json"
+    if not source.is_file():
+        return None
+    return _upload_episode_file_verified(
+        source,
+        f"{remote_root}/review/speaker_evidence_v1.json",
+        ssh=ssh,
+        scp=scp,
+        host=host,
+        budget=budget,
+    )
+
+
 def _ssh_args(key, host, port):
     return [
         "ssh",
@@ -1147,6 +1161,7 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
               "exec env PYTHONPATH=src /workspace/ma-sub/.venv/bin/python -m mas.remote_job ")
     resume_files = sorted((local_root / "translation_output").glob("*.zip"))
     resume_files += [local_root / "review" / "audio_review_overrides.json",
+                     local_root / "review" / "speaker_evidence_v1.json",
                      local_root / "review" / "mp4-sample-approval.json"]
     inputs = {path.relative_to(local_root).as_posix(): sha256_file(path)
               for path in resume_files if path.is_file()}
@@ -1422,6 +1437,14 @@ def _run_remote_session(episode, source_url, *, values, commit, rclone_config, b
                 host=host,
                 budget=budget,
             )
+            speaker_receipt = _upload_speaker_evidence(
+                local_root,
+                remote_root,
+                ssh=ssh,
+                scp=scp,
+                host=host,
+                budget=budget,
+            )
             approval = local_root / "review" / "mp4-sample-approval.json"
             if approval.is_file():
                 _upload_episode_file_verified(approval, f"{remote_root}/review/{approval.name}",
@@ -1431,6 +1454,12 @@ def _run_remote_session(episode, source_url, *, values, commit, rclone_config, b
                     "[RUNPOD] audio review overrides upload verified: "
                     f"bytes={override_receipt['bytes']} "
                     f"sha256={override_receipt['sha256']}"
+                )
+            if speaker_receipt is not None:
+                print(
+                    "[RUNPOD] speaker evidence upload verified: "
+                    f"bytes={speaker_receipt['bytes']} "
+                    f"sha256={speaker_receipt['sha256']}"
                 )
 
             arguments = [str(episode)]

@@ -15,6 +15,8 @@ from mas.engine.id_translation import validate_id_translation_pack
 from mas.engine.raw_asr import RawASRV2Config
 from mas.engine.tr_correction import compute_output_sha256
 from mas.engine.speech_coverage import SpeechCoverageConfig
+from mas.engine.speaker_evidence import build_speaker_evidence
+from mas.reliability import digest
 from mas.engine.workflow import (
     DEFAULT_ALIGNMENT_PADDING_MS,
     V2PipelineError,
@@ -477,6 +479,53 @@ def _forced_alignment(
 
 
 class V2CorrectionRoutingTests(unittest.TestCase):
+    def test_hash_bound_speaker_evidence_is_attached_without_changing_corrections(self) -> None:
+        inputs = _input_utterances()
+        corrections = _corrections()
+        probabilities = [[0.0, 0.0, 0.0, 0.0] for _ in range(82)]
+        for index in range(12, 31):
+            probabilities[index] = [0.98, 0.01, 0.0, 0.0]
+        for index in range(56, 75):
+            probabilities[index] = [0.01, 0.98, 0.0, 0.0]
+        pilot_data = {
+            "format": "mas-native-diarization-pilot-1",
+            "status": "REVIEW_REQUIRED",
+            "production_acceptance": False,
+            "episode": 12,
+            "clip_identity": "ep12-residual-001-0-6500",
+            "input_sha256": "a" * 64,
+            "model_sha256": "b" * 64,
+            "runtime": [],
+            "sample_rate": 16000,
+            "frame_seconds": 0.08,
+            "frame_count": len(probabilities),
+            "speaker_columns": 4,
+            "probabilities": probabilities,
+        }
+        pilot = {"data": pilot_data, "sha256": digest(pilot_data)}
+        evidence = build_speaker_evidence(
+            episode=12,
+            audio_sha256=AUDIO_SHA,
+            input_utterances=inputs,
+            intervals=[{"start": 0, "end": 6500}],
+            pilot_wrappers=[pilot],
+        )
+
+        bundle = correction_records_to_alignment_inputs(
+            inputs,
+            corrections,
+            speech_hole_records=_speech_holes(),
+            speaker_evidence=evidence,
+            episode=12,
+            audio_sha256=AUDIO_SHA,
+        )
+
+        self.assertTrue(bundle.alignment_inputs[0]["speaker_id"].endswith("column-1"))
+        self.assertTrue(bundle.alignment_inputs[1]["speaker_id"].endswith("column-2"))
+        self.assertEqual(
+            bundle.window_audit[0]["speaker_evidence_sha256"], evidence["sha256"]
+        )
+
     def test_padding_prevents_clipping_without_changing_uid_or_text(self) -> None:
         inputs = _input_utterances()
         corrections = _corrections()

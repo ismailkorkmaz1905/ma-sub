@@ -42,6 +42,7 @@ from .speech_coverage import (
     analyze_speech_coverage,
     require_v2_beta_speech_coverage_config,
 )
+from .speaker_evidence import SpeakerEvidenceError, validate_speaker_evidence
 from .timing_qa import (
     TimingQAV2Config,
     assert_timing_qa_v2,
@@ -157,6 +158,9 @@ def correction_records_to_alignment_inputs(
     speech_hole_records: Sequence[Mapping[str, Any]] = (),
     asr_hallucination_records: Sequence[Mapping[str, Any]] = (),
     alignment_padding_ms: int = DEFAULT_ALIGNMENT_PADDING_MS,
+    speaker_evidence: Mapping[str, Any] | None = None,
+    episode: int | None = None,
+    audio_sha256: str | None = None,
 ) -> AlignmentInputBundle:
     """Route exact, validated Turkish corrections to alignment or review.
 
@@ -242,6 +246,23 @@ def correction_records_to_alignment_inputs(
         )
     except TRCorrectionError as exc:
         raise V2PipelineError(f"Turkish correction output is invalid: {exc}") from exc
+    speaker_assignments: dict[str, str] = {}
+    speaker_evidence_sha256 = None
+    if speaker_evidence is not None:
+        if episode is None or audio_sha256 is None:
+            raise V2PipelineError(
+                "episode and audio_sha256 are required with speaker evidence"
+            )
+        try:
+            speaker_assignments = validate_speaker_evidence(
+                speaker_evidence,
+                episode=episode,
+                audio_sha256=audio_sha256,
+                input_utterances=trusted_inputs,
+            )
+        except SpeakerEvidenceError as exc:
+            raise V2PipelineError(f"speaker evidence is invalid: {exc}") from exc
+        speaker_evidence_sha256 = str(speaker_evidence["sha256"])
     pending_review_uids = [
         str(record["utterance_uid"])
         for record in trusted_corrections
@@ -283,6 +304,10 @@ def correction_records_to_alignment_inputs(
             "audio_reviewed": bool(record["audio_reviewed"]),
             "review_disposition": str(record["review_disposition"]),
         }
+        assigned_speaker = speaker_assignments.get(uid)
+        if assigned_speaker is not None:
+            audit["speaker_id"] = assigned_speaker
+            audit["speaker_evidence_sha256"] = speaker_evidence_sha256
         if is_non_dialogue:
             if is_hallucination_discard:
                 candidate = hallucinations_by_uid[uid]
@@ -341,27 +366,27 @@ def correction_records_to_alignment_inputs(
                 )
             padded_start = max(0, coarse_start - padding_ms)
             padded_end = coarse_end + padding_ms
-            alignment_inputs.append(
-                {
-                    "start_ms": padded_start,
-                    "end_ms": padded_end,
-                    "coarse_start_ms": coarse_start,
-                    "coarse_end_ms": coarse_end,
-                    "text": str(record["tr_corrected"]),
-                    "asr_text": str(record["asr_text"]),
-                    "deletion_audio_reviewed": bool(
-                        uid in hallucinations_by_uid
-                        and record["non_dialogue"] is False
-                        and record["review_required"] is False
-                        and record["audio_reviewed"] is True
-                        and record["review_disposition"]
-                        == "confirmed_dialogue"
-                    ),
-                    "audio_reviewed": bool(record["audio_reviewed"]),
-                    "review_disposition": str(record["review_disposition"]),
-                    "utterance_uid": uid,
-                }
-            )
+            alignment_input = {
+                "start_ms": padded_start,
+                "end_ms": padded_end,
+                "coarse_start_ms": coarse_start,
+                "coarse_end_ms": coarse_end,
+                "text": str(record["tr_corrected"]),
+                "asr_text": str(record["asr_text"]),
+                "deletion_audio_reviewed": bool(
+                    uid in hallucinations_by_uid
+                    and record["non_dialogue"] is False
+                    and record["review_required"] is False
+                    and record["audio_reviewed"] is True
+                    and record["review_disposition"] == "confirmed_dialogue"
+                ),
+                "audio_reviewed": bool(record["audio_reviewed"]),
+                "review_disposition": str(record["review_disposition"]),
+                "utterance_uid": uid,
+            }
+            if assigned_speaker is not None:
+                alignment_input["speaker_id"] = assigned_speaker
+            alignment_inputs.append(alignment_input)
             audit["alignment_start_ms"] = padded_start
             audit["alignment_end_ms"] = padded_end
         window_audit.append(audit)
@@ -1083,6 +1108,7 @@ def build_strict_v2_artifacts(
     segmentation_config: SegmentationConfig | None = None,
     timing_qa_config: TimingQAV2Config | None = None,
     acoustic_audio_review: Mapping[str, Any] | None = None,
+    speaker_evidence: Mapping[str, Any] | None = None,
 ) -> V2PipelineArtifacts:
     """Build the strict aligned blocks/schema after external forced alignment."""
 
@@ -1098,6 +1124,9 @@ def build_strict_v2_artifacts(
             "asr_hallucination_records", []
         ),
         alignment_padding_ms=alignment_padding_ms,
+        speaker_evidence=speaker_evidence,
+        episode=resolved_episode,
+        audio_sha256=trusted_raw["audio_sha256"],
     )
     trusted_alignment = _strict_json_copy(
         dict(forced_alignment_data),

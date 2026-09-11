@@ -772,6 +772,30 @@ def test_missing_audio_review_overrides_does_not_touch_remote(monkeypatch, tmp_p
     ) is None
 
 
+def test_speaker_evidence_uses_verified_episode_upload(monkeypatch, tmp_path):
+    source = tmp_path / "review" / "speaker_evidence_v1.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("{}", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        runpod_controller,
+        "_upload_episode_file_verified",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {"bytes": 2, "sha256": "a" * 64},
+    )
+
+    receipt = runpod_controller._upload_speaker_evidence(
+        tmp_path,
+        "/remote/episode",
+        ssh=["ssh"],
+        scp=["scp"],
+        host="host",
+    )
+
+    assert receipt["bytes"] == 2
+    assert calls[0][0][0] == source
+    assert calls[0][0][1] == "/remote/episode/review/speaker_evidence_v1.json"
+
+
 def test_ssh_has_bounded_liveness_options(tmp_path):
     command = runpod_controller._ssh_args(tmp_path / "key", "192.0.2.4", "10022")
     assert command[1:3] == ["-n", "-T"]

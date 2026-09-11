@@ -476,7 +476,11 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     tr_output = dirs["translation_output"] / f"{name}_TR_CORRECTED.zip"
     review_path = dirs["prepare"] / "audio_review_v2.json"
     overrides_path = dirs["review"] / "audio_review_overrides.json"
+    speaker_evidence_path = dirs["review"] / "speaker_evidence_v1.json"
     overrides = _json(overrides_path) if overrides_path.is_file() else None
+    speaker_evidence = (
+        _json(speaker_evidence_path) if speaker_evidence_path.is_file() else None
+    )
     def review_audio():
         report = resolve_tr_audio_reviews(
             tr_pack, tr_text, tr_output, review_path,
@@ -496,6 +500,9 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             correction.records,
             speech_hole_records=pack.speech_holes,
             asr_hallucination_records=pack.asr_hallucination_records,
+            speaker_evidence=speaker_evidence,
+            episode=episode,
+            audio_sha256=raw["audio_sha256"],
         )
         _source_guard(state, download.video_path)
         result, resumed = _aligned_checkpoint(
@@ -515,6 +522,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
             aligned,
             episode=episode,
             acoustic_audio_review=holder["review"],
+            speaker_evidence=speaker_evidence,
         )
         atomic_write_json(schema_path, artifacts.schema)
         atomic_write_json(dirs["prepare"] / "alignment_window_audit_v2.json", list(artifacts.preparation.window_audit))

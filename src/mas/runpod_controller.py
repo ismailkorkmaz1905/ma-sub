@@ -24,8 +24,8 @@ from .reliability import BudgetExceeded, RunBudget, atomic_json, digest
 from .delivery import READY_FOR_DELIVERY, WAIT_MP4_SAMPLE, publish_local_delivery, safe_relative, validate_delivery
 from .hashing import sha256_file
 from .source_discovery import discover_episode_metadata
-from .runpod_capacity import (CapacityLease, CapacityPlan, CapacityProvider, CapacityReadinessError,
-                             load_storage_quote)
+from .runpod_capacity import (DEFAULT_GPU_TYPE_IDS, CapacityLease, CapacityPlan,
+                             CapacityProvider, CapacityReadinessError, load_storage_quote)
 
 
 class RunPodControllerError(RuntimeError):
@@ -1043,6 +1043,11 @@ def run_remote_episode(episode, source_url=None):
                    "supportPublicIp": True, "startSsh": True}
         plan = CapacityPlan(episode=episode,
                             maximum_rate_usd_per_hour=float(os.getenv("MAS_RUNPOD_MAX_COST_PER_HR", "0.75")),
+                            gpu_type_ids=(
+                                _configured_gpu_type_ids()
+                                if os.getenv("MAS_RUNPOD_GPU_TYPE_IDS") or os.getenv("MAS_RUNPOD_GPU_TYPE_ID")
+                                else DEFAULT_GPU_TYPE_IDS
+                            ),
                             total_seconds=int(episode_budget.check()) if episode_budget else 14400,
                             storage_quote=storage_quote)
 

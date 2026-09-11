@@ -147,6 +147,7 @@ def test_controller_lock_rejects_duplicate_owner(tmp_path):
 def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
     episode_root, _ = _patch_local_preflight(monkeypatch, tmp_path)
     events = []
+    plan_args = {}
     monkeypatch.setattr(controller, "_prepare_official_source",
                         lambda *args: "https://example.invalid/episode")
     monkeypatch.setattr(controller, "_episode_budget", lambda *args: Budget())
@@ -168,7 +169,12 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
             events.append("capacity-exit")
         def remaining_work_seconds(self): return 600
     monkeypatch.setattr(controller, "CapacityProvider", Provider)
-    monkeypatch.setattr(controller, "CapacityPlan", lambda **kwargs: object())
+    monkeypatch.setenv("MAS_RUNPOD_GPU_TYPE_IDS", "NVIDIA L4|NVIDIA RTX PRO 4000 Blackwell")
+    monkeypatch.setattr(
+        controller,
+        "CapacityPlan",
+        lambda **kwargs: plan_args.update(kwargs) or object(),
+    )
     monkeypatch.setattr(controller, "CapacityLease", Lease)
     monkeypatch.setattr(controller, "_run_remote_session",
                         lambda *args, **kwargs: READY_FOR_DELIVERY)
@@ -178,6 +184,7 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
                         lambda *args: events.append("publish") or READY_FOR_DELIVERY)
     assert controller.run_remote_episode(13) == READY_FOR_DELIVERY
     assert events == ["capacity-enter", "capacity-exit", "validate", "publish"]
+    assert plan_args["gpu_type_ids"] == ["NVIDIA L4", "NVIDIA RTX PRO 4000 Blackwell"]
     assert (episode_root / "work" / "gpu-released-for-delivery.json").is_file()
 
 

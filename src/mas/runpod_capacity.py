@@ -255,9 +255,6 @@ class CapacityLease:
             raise IntegrityError("live account balance is below the protected reserve")
         if account.get("isAutoPayEnabled") is not False:
             raise IntegrityError("capacity acquisition requires disabled auto-pay")
-        offers = self.provider.offers(self.plan.gpu_type_ids, self.plan.data_center_id,
-                                      self._left(20))
-        offers = _ordered_offers(offers, self.plan)
         self._requested_epoch = self.wall_clock()
         requested_at = datetime.fromtimestamp(self._requested_epoch, timezone.utc).isoformat()
         self._state = {
@@ -271,8 +268,33 @@ class CapacityLease:
             "storage_quote_sha256": self.plan.storage_quote["sha256"],
             "storage_quote_observed_at_utc": self.plan.storage_quote["observed_at_utc"],
             "storage_quote_source_url": self.plan.storage_quote["source_url"],
-            "attempts": [], "owned_pod_ids": [], "status": "READY_TO_CREATE",
+            "attempts": [], "owned_pod_ids": [], "status": "WAITING_FOR_CAPACITY",
         }
+        self._save()
+        while True:
+            try:
+                offers = _ordered_offers(
+                    self.provider.offers(
+                        self.plan.gpu_type_ids,
+                        self.plan.data_center_id,
+                        self._left(20),
+                    ),
+                    self.plan,
+                )
+                break
+            except IntegrityError as exc:
+                if str(exc) != "no fresh allowed EU-RO-1 GPU offers are available":
+                    raise
+                left = min(
+                    self._startup_deadline,
+                    self._deadline - self.plan.shutdown_seconds,
+                ) - self.clock()
+                if left <= 1:
+                    self._state["status"] = "NO_CAPACITY"
+                    self._save()
+                    raise
+                self.sleep(min(1, left))
+        self._state["status"] = "READY_TO_CREATE"
         self._save()
         for index, offer in enumerate(offers):
             inventory = self.provider.list_pods(self._left(10))

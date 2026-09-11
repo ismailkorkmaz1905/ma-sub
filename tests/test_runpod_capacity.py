@@ -89,6 +89,54 @@ def test_allowed_gpu_preference_wins_over_cheaper_reversed_offer(tmp_path):
         assert lease.pod["gpuTypeId"] == "L4"
 
 
+def test_capacity_offer_is_polled_within_bounded_startup_window(tmp_path):
+    provider = Provider()
+    available = provider.offers
+    calls = 0
+
+    def delayed(gpu_types, data_center, timeout):
+        nonlocal calls
+        calls += 1
+        return [] if calls == 1 else available(gpu_types, data_center, timeout)
+
+    provider.offers = delayed
+    with CapacityLease(
+        provider,
+        BASE,
+        tmp_path / "audit",
+        plan(),
+        nonce="0123456789abcdef",
+        sleep=lambda seconds: None,
+    ) as lease:
+        assert lease.pod["id"] == "owned"
+    assert calls == 2
+
+
+def test_capacity_offer_polling_stops_at_startup_deadline(tmp_path):
+    provider = Provider()
+    provider.offers = lambda gpu_types, data_center, timeout: []
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    with pytest.raises(IntegrityError, match="no fresh allowed"):
+        with CapacityLease(
+            provider,
+            BASE,
+            tmp_path / "audit",
+            plan(total_seconds=60, startup_seconds=3, shutdown_seconds=10),
+            nonce="0123456789abcdef",
+            clock=lambda: now[0],
+            wall_clock=lambda: 1000 + now[0],
+            sleep=sleep,
+        ):
+            pass
+    saved = json.loads((tmp_path / "audit" / "capacity-state.json").read_text())
+    assert saved["data"]["status"] == "NO_CAPACITY"
+    assert now[0] == 2
+
+
 def test_explicit_capacity_failure_falls_back_once(tmp_path):
     provider = Provider()
     provider.create_results = [PilotProviderError({"category": "capacity", "http_status": 500})]

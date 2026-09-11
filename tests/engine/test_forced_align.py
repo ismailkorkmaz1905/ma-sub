@@ -179,7 +179,7 @@ class _ContextualOverlapWhisperX(_FakeWhisperX):
         if text == "Once Ben ona ne yaptim Hicbir sey yapmadim Ben ona ne yaptim":
             return _result(
                 [
-                    {"word": "Once", "start": 0.5, "end": 0.8},
+                    {"word": "Once", "start": 0.45, "end": 0.75},
                     {"word": "Ben", "start": 1.1, "end": 1.2},
                     {"word": "ona", "start": 1.2, "end": 1.3},
                     {"word": "ne", "start": 1.3, "end": 1.4},
@@ -187,10 +187,10 @@ class _ContextualOverlapWhisperX(_FakeWhisperX):
                     {"word": "Hicbir", "start": 1.6, "end": 1.7},
                     {"word": "sey", "start": 1.7, "end": 1.8},
                     {"word": "yapmadim", "start": 1.8, "end": 1.9},
-                    {"word": "Ben", "start": 2.4, "end": 2.5},
-                    {"word": "ona", "start": 2.5, "end": 2.6},
-                    {"word": "ne", "start": 2.6, "end": 2.7},
-                    {"word": "yaptim", "start": 2.7, "end": 2.8},
+                    {"word": "Ben", "start": 2.45, "end": 2.55},
+                    {"word": "ona", "start": 2.55, "end": 2.65},
+                    {"word": "ne", "start": 2.65, "end": 2.75},
+                    {"word": "yaptim", "start": 2.75, "end": 2.85},
                 ]
             )
         if text == "Ben ona ne yaptim Hicbir sey yapmadim":
@@ -509,14 +509,14 @@ class ForcedAlignmentTests(unittest.TestCase):
 
         self.assertEqual(
             [(segment["start_ms"], segment["end_ms"]) for segment in data["segments"]],
-            [(500, 800), (1100, 1500), (1600, 1900), (2400, 2800)],
+            [(450, 750), (1100, 1500), (1600, 1900), (2450, 2850)],
         )
         self.assertIn(
             "Once Ben ona ne yaptim Hicbir sey yapmadim Ben ona ne yaptim",
             [call["text"] for call in fake.align_calls],
         )
         resolution = data["provenance"]["overlap_resolution"]
-        self.assertEqual(resolution["selected_mode_counts"], {"independent": 2, "joint": 2})
+        self.assertEqual(resolution["selected_mode_counts"], {"joint": 4})
         self.assertEqual(resolution["final_overlap_count"], 0)
         validate_forced_alignment_data(data)
 

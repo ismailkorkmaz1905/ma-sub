@@ -293,6 +293,36 @@ class _ResidualEarlyStopWhisperX(_FakeWhisperX):
         return _result([{"word": text, "start": start, "end": end}])
 
 
+class _OverBudgetContextWhisperX(_FakeWhisperX):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def align(self, transcript, *args, **kwargs):
+        text = transcript[0]["text"]
+        self.align_calls.append({"text": text})
+        if text == "A B":
+            return _result([{"word": "A", "start": 1.1, "end": 2.0}])
+        times = {
+            "A": (1.1, 2.0),
+            "B": (1.3, 2.2),
+            "C": (2.35, 2.55),
+            "D": (4.1, 4.3),
+            "E": (5.1, 5.3),
+        }
+        words = text.split()
+        if len(words) >= 3 and words[:3] == ["A", "B", "C"]:
+            times["A"] = (2.4, 2.5)
+            times["C"] = (3.0, 3.2)
+            if "D" in words:
+                times["D"] = (4.2, 4.25)
+        return _result(
+            [
+                {"word": word, "start": times[word][0], "end": times[word][1]}
+                for word in words
+            ]
+        )
+
+
 def _result(
     words: list[dict[str, Any]], *, add_default_scores: bool = True
 ) -> dict[str, Any]:
@@ -933,6 +963,43 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertNotIn("Context Alpha", texts)
         self.assertEqual(
             data["provenance"]["overlap_resolution"]["final_overlap_count"], 0
+        )
+        validate_forced_alignment_data(data)
+
+    def test_over_budget_context_search_keeps_neighbor_options(self) -> None:
+        coarse = [
+            {
+                "start_ms": 0,
+                "end_ms": 6000,
+                "coarse_start_ms": start,
+                "coarse_end_ms": end,
+                "text": text,
+                "asr_text": text,
+                "deletion_audio_reviewed": False,
+                "utterance_uid": f"utt-{text.lower()}",
+            }
+            for text, start, end in (
+                ("A", 1000, 2500),
+                ("B", 1200, 2800),
+                ("C", 2300, 3300),
+                ("D", 4000, 4500),
+                ("E", 5000, 5500),
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("mas.engine.forced_align.MAX_OVERLAP_COMBINATIONS", 5):
+                data = align_corrected_segments(
+                    self._audio(directory),
+                    coarse,
+                    whisperx_module=_OverBudgetContextWhisperX(),
+                )
+
+        self.assertEqual(
+            data["provenance"]["overlap_resolution"]["final_overlap_count"], 0
+        )
+        self.assertEqual(
+            [(segment["start_ms"], segment["end_ms"]) for segment in data["segments"]],
+            [(2400, 2500), (1300, 2200), (3000, 3200), (4200, 4250), (5100, 5300)],
         )
         validate_forced_alignment_data(data)
 

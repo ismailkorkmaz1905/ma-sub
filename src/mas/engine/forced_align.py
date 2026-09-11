@@ -2224,9 +2224,6 @@ def _resolve_alignment_overlaps(
     for seed_uids in residual_components:
         component_uids = contextual_component_uids(seed_uids)
         option_sets = [options[uid] for uid in component_uids]
-        if math.prod(len(option_set) for option_set in option_sets) > MAX_OVERLAP_COMBINATIONS:
-            component_uids = list(seed_uids)
-            option_sets = [options[uid] for uid in component_uids]
         combination_count = math.prod(len(option_set) for option_set in option_sets)
         envelope_start = min(
             int(word["start_ms"])

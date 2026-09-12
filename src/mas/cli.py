@@ -197,6 +197,13 @@ def main(argv=None):
     pilot_parser.add_argument("--offset-ms", type=int, default=0)
     review_audio_parser = commands.add_parser("review-audio")
     review_audio_parser.add_argument("episode", type=int)
+    emergency_parser = commands.add_parser("emergency-segment")
+    emergency_parser.add_argument("episode", type=int)
+    emergency_actions = emergency_parser.add_subparsers(dest="action", required=True)
+    emergency_prepare = emergency_actions.add_parser("prepare")
+    emergency_prepare.add_argument("--corrected-zip")
+    emergency_finalize = emergency_actions.add_parser("finalize")
+    emergency_finalize.add_argument("--translations", required=True)
     clean_parser = commands.add_parser("clean")
     clean_parser.add_argument("episode", type=int)
     clean_parser.add_argument("--destroy", action="store_true")
@@ -227,6 +234,9 @@ def main(argv=None):
                 result = run_pilot_command(args)
             elif args.command == "review-audio":
                 result = run_audio_review_ui(args.episode)
+            elif args.command == "emergency-segment":
+                from .emergency_segment import run_emergency_segment_command
+                result = run_emergency_segment_command(args)
             else:
                 result = clean(args.episode, args.destroy)
             if run_log:

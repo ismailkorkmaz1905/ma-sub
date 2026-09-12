@@ -1440,9 +1440,11 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
     offset = 0
     downloaded = {}
     while True:
-        output = _network_retry(ssh + [prefix + "status" + common], capture=True,
-                                attempts=3, idle_timeout=30, total_timeout=60, budget=budget)
-        status = json.loads(output)
+        output = _network_retry(
+            ssh + [prefix + "poll" + common + f" --offset {offset} --max-bytes 65536 --deadline-seconds 60"],
+            capture=True, attempts=3, total_timeout=120, budget=budget)
+        poll = json.loads(output)
+        status = poll["status"]
         expected_identity = {"episode": episode, "commit": commit, "input_sha256": input_sha,
                              "token": hashlib.sha256(
                                  f"{episode}\n{commit}\n{input_sha}\n".encode()).hexdigest()}
@@ -1450,16 +1452,12 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
             raise RunPodControllerError("remote job status identity mismatch")
         atomic_json(local_root / "work" / "remote-job-status.json", status)
         print(f"[RUNPOD] remote job status={status.get('status', 'UNKNOWN')}", flush=True)
-        log_output = _network_retry(ssh + [prefix + "logs" + common + f" --offset {offset} --max-bytes 65536"],
-                                    capture=True, attempts=2, total_timeout=45, budget=budget)
-        log = json.loads(log_output)
+        log = poll["log"]
         text = log.get("text", "")
         if text:
             print(text, end="", flush=True)
         offset = log["next_offset"]
-        checkpoint_output = _network_retry(ssh + [prefix + "checkpoints" + common], capture=True,
-                                            attempts=2, total_timeout=120, budget=budget)
-        checkpoints = json.loads(checkpoint_output)
+        checkpoints = poll["checkpoints"]
         if checkpoints.get("identity") != expected_identity:
             raise RunPodControllerError("remote checkpoint identity mismatch")
         for record in checkpoints.get("files", []):

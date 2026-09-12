@@ -25,8 +25,12 @@ def _remote_response(command):
         token = hashlib.sha256(f"{episode}\n{commit}\n{input_sha}\n".encode()).hexdigest()
         identity = {"episode": episode, "commit": commit,
                     "input_sha256": input_sha, "token": token}
-    if " status " in text:
-        return json.dumps({"status": "EXITED", "exit_code": 0, "identity": identity})
+    if " poll " in text:
+        return json.dumps({
+            "status": {"status": "EXITED", "exit_code": 0, "identity": identity},
+            "log": {"text": "", "next_offset": 0, "eof": True},
+            "checkpoints": {"files": [], "identity": identity},
+        })
     if " logs " in text:
         return json.dumps({"text": "", "next_offset": 0})
     if " checkpoints " in text:
@@ -76,7 +80,10 @@ def test_resume_only_never_sends_start(monkeypatch, tmp_path):
         ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
         "https://example.invalid/episode", 500, Budget(), resume_only=True) == 0
     assert calls
-    assert all(" remote_job start " not in command for command in calls)
+    assert all("mas.remote_job start " not in command for command in calls)
+    assert len(calls) == 1
+    assert "mas.remote_job poll " in calls[0]
+    assert " --max-bytes 65536 --deadline-seconds 60" in calls[0]
 
 
 def test_stale_remote_identity_status_is_rejected_without_relaunch(monkeypatch, tmp_path):
@@ -86,15 +93,57 @@ def test_stale_remote_identity_status_is_rejected_without_relaunch(monkeypatch, 
     calls = []
     def response(command, **kwargs):
         calls.append(command[-1])
-        if " status " in command[-1]:
-            return json.dumps({"status": "RUNNING_OTHER", "exit_code": None})
+        if " poll " in command[-1]:
+            payload = json.loads(_remote_response(command))
+            payload["status"] = {"status": "RUNNING_OTHER", "exit_code": None}
+            return json.dumps(payload)
         return _remote_response(command)
     monkeypatch.setattr(controller, "_network_retry", response)
     with pytest.raises(controller.RunPodControllerError, match="identity mismatch"):
         controller._monitor_remote_job(
             ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
             "https://example.invalid/episode", 500, Budget(), resume_only=True)
-    assert all(" remote_job start " not in command for command in calls)
+    assert all("mas.remote_job start " not in command for command in calls)
+
+
+def test_poll_rejects_forged_checkpoint_identity(monkeypatch, tmp_path):
+    request = {"commit": "a" * 40, "episode": 13, "input_sha256": "b" * 64}
+    atomic_json(tmp_path / "work" / "remote-job-request.json",
+                {"data": request, "sha256": digest(request)})
+    def response(command, **kwargs):
+        payload = json.loads(_remote_response(command))
+        payload["checkpoints"]["identity"] = {"token": "forged"}
+        return json.dumps(payload)
+    monkeypatch.setattr(controller, "_network_retry", response)
+    with pytest.raises(controller.RunPodControllerError, match="checkpoint identity mismatch"):
+        controller._monitor_remote_job(
+            ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
+            "https://example.invalid/episode", 500, Budget(), resume_only=True)
+
+
+def test_terminal_poll_drains_bounded_log_before_return(monkeypatch, tmp_path, capsys):
+    request = {"commit": "a" * 40, "episode": 13, "input_sha256": "b" * 64}
+    atomic_json(tmp_path / "work" / "remote-job-request.json",
+                {"data": request, "sha256": digest(request)})
+    calls = []
+    def response(command, **kwargs):
+        calls.append(command[-1])
+        payload = json.loads(_remote_response(command))
+        offset = int(re.search(r"--offset (\d+)", command[-1])[1])
+        payload["log"] = ({"text": "x" * 65536, "next_offset": 65536, "eof": False}
+                          if offset == 0 else
+                          {"text": "tail", "next_offset": 65540, "eof": True})
+        return json.dumps(payload)
+    monkeypatch.setattr(controller, "_network_retry", response)
+
+    assert controller._monitor_remote_job(
+        ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
+        "https://example.invalid/episode", 500, Budget(), resume_only=True) == 0
+
+    assert len(calls) == 2
+    assert "--offset 0 --max-bytes 65536" in calls[0]
+    assert "--offset 65536 --max-bytes 65536" in calls[1]
+    assert capsys.readouterr().out.endswith("tail")
 
 
 def _patch_local_preflight(monkeypatch, tmp_path):
@@ -228,10 +277,9 @@ def test_checkpoint_cache_reuses_verified_stat_until_file_changes(
               "size_bytes": 1, "snapshot_path": "/workspace/snapshot"}
     def response(command, **kwargs):
         payload = json.loads(_remote_response(command))
-        if " status " in command[-1]:
-            payload["status"], payload["exit_code"] = next(statuses)
-        elif " checkpoints " in command[-1]:
-            payload["files"] = [record]
+        if " poll " in command[-1]:
+            payload["status"]["status"], payload["status"]["exit_code"] = next(statuses)
+            payload["checkpoints"]["files"] = [record]
         return json.dumps(payload)
     downloads = []
     checkpoint = tmp_path / "cached.mp4"

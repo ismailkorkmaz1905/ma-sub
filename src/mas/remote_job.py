@@ -429,10 +429,20 @@ def read_log(root, episode, commit, offset=0, max_bytes=65536, input_sha256=None
             "eof": position + len(payload) >= size}
 
 
+def poll_job(root, episode, commit, offset=0, max_bytes=65536, input_sha256=None,
+             deadline_seconds=60):
+    return {
+        "status": status_job(root, episode, commit, input_sha256),
+        "log": read_log(root, episode, commit, offset, max_bytes, input_sha256),
+        "checkpoints": checkpoint_manifest(
+            root, episode, commit, input_sha256, deadline_seconds),
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m mas.remote_job")
     commands = parser.add_subparsers(dest="action", required=True)
-    for name in ("start", "status", "checkpoints", "logs", "_supervise"):
+    for name in ("start", "status", "checkpoints", "logs", "poll", "_supervise"):
         command = commands.add_parser(name)
         command.add_argument("--root", required=True)
         command.add_argument("--episode", required=True, type=int)
@@ -443,6 +453,9 @@ def main(argv=None):
     commands.choices["logs"].add_argument("--offset", type=int, default=0)
     commands.choices["logs"].add_argument("--max-bytes", type=int, default=65536)
     commands.choices["checkpoints"].add_argument("--deadline-seconds", type=int, default=60)
+    commands.choices["poll"].add_argument("--offset", type=int, default=0)
+    commands.choices["poll"].add_argument("--max-bytes", type=int, default=65536)
+    commands.choices["poll"].add_argument("--deadline-seconds", type=int, default=60)
     commands.choices["_supervise"].add_argument("--token", required=True)
     args = parser.parse_args(argv)
     if args.action == "start":
@@ -459,6 +472,9 @@ def main(argv=None):
     elif args.action == "logs":
         result = read_log(args.root, args.episode, args.commit, args.offset, args.max_bytes,
                           args.input_sha256)
+    elif args.action == "poll":
+        result = poll_job(args.root, args.episode, args.commit, args.offset, args.max_bytes,
+                          args.input_sha256, args.deadline_seconds)
     else:
         return supervise(args.root, args.episode, args.commit, args.token)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)

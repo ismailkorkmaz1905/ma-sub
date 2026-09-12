@@ -10,6 +10,7 @@ import wave
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
+from unittest.mock import patch
 
 from mas.engine.audio_review import (
     _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256,
@@ -244,6 +245,96 @@ def _make_files(
         input_zip, _pending_output(utterances), provisional_zip
     )
     return input_zip, provisional_zip, final_zip, report, recovery
+
+
+def _make_overlapping_rescue_files(
+    root: Path, *, include_parent: bool
+) -> tuple[Path, Path, Path, Path, Path]:
+    child, child_evidence = _candidate(asr_text="sabah eve")
+    child.update(
+        {
+            "utterance_uid": "rescue-child",
+            "utterance_index": 2 if include_parent else 1,
+            "coarse_start_ms": 300,
+            "coarse_end_ms": 550,
+            "risk_flags": [
+                "speech_hole_rescue_asr",
+                "overlapping_rescue_word_evidence",
+                "suspected_asr_hallucination",
+                "manual_audio_review_required",
+            ],
+        }
+    )
+    child_evidence.update(
+        {
+            "candidate_uid": "rescue-child-evidence",
+            "candidate_index": 2 if include_parent else 1,
+            "utterance_uid": "rescue-child",
+            "utterance_index": child["utterance_index"],
+            "start_ms": 300,
+            "end_ms": 550,
+            "reason": "overlapping_rescue_word_evidence",
+            "asr_text": "sabah eve",
+            "risk_flags": copy.deepcopy(child["risk_flags"]),
+            "audio_member": (
+                "asr_hallucination_audio/rescue-child-evidence.wav"
+            ),
+        }
+    )
+    utterances = [child]
+    evidence_records = [child_evidence]
+    if include_parent:
+        parent, parent_evidence = _candidate(
+            asr_text="Sen sabah eve geldim"
+        )
+        parent.update(
+            {
+                "utterance_uid": "canonical-parent",
+                "utterance_index": 1,
+                "coarse_start_ms": 100,
+                "coarse_end_ms": 900,
+            }
+        )
+        parent_evidence.update(
+            {
+                "candidate_uid": "canonical-parent-evidence",
+                "candidate_index": 1,
+                "utterance_uid": "canonical-parent",
+                "utterance_index": 1,
+                "start_ms": 100,
+                "end_ms": 900,
+                "asr_text": parent["asr_text"],
+                "risk_flags": copy.deepcopy(parent["risk_flags"]),
+                "audio_member": (
+                    "asr_hallucination_audio/canonical-parent-evidence.wav"
+                ),
+            }
+        )
+        utterances.insert(0, parent)
+        evidence_records.insert(0, parent_evidence)
+    for evidence in evidence_records:
+        path = root / evidence["audio_member"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_wav())
+    paths = (
+        root / "input.zip",
+        root / "provisional.zip",
+        root / "final.zip",
+        root / "audio_review_v2.json",
+        root / "audio_review_v2.recovery.json",
+    )
+    create_tr_correction_pack(
+        utterances,
+        [],
+        paths[0],
+        episode=12,
+        asr_hallucination_records=evidence_records,
+        asr_hallucination_audio_root=root,
+    )
+    create_tr_correction_output(
+        paths[0], _pending_output(utterances), paths[1]
+    )
+    return paths
 
 
 class AudioReviewV2Tests(unittest.TestCase):
@@ -538,6 +629,89 @@ class AudioReviewV2Tests(unittest.TestCase):
                 "candidate-1",
             )
 
+    def test_overlapping_rescue_text_confirmation_without_parent_fails_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_overlapping_rescue_files(
+                Path(directory), include_parent=False
+            )
+            with self.assertRaisesRegex(AudioReviewV2Error, "pending_count=1"):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    decoder=FakeDecoder(
+                        [
+                            _decoded_words(
+                                ("sabah", 300, 400),
+                                ("eve", 420, 520),
+                            ),
+                            _decoded("sabah eve"),
+                            _decoded("sabah eve"),
+                        ]
+                    ),
+                    progress=None,
+                )
+            report = json.loads(paths[3].read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["pending_utterance_uids"], ["rescue-child"]
+            )
+
+    def test_overlapping_rescue_is_discarded_only_with_acoustic_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_overlapping_rescue_files(
+                Path(directory), include_parent=True
+            )
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=FakeDecoder(
+                    [
+                        _decoded_words(
+                            ("Sen", 100, 250),
+                            ("sabah", 300, 400),
+                            ("eve", 420, 520),
+                            ("geldim", 600, 800),
+                        ),
+                        _decoded_words(
+                            ("sabah", 300, 400),
+                            ("eve", 420, 520),
+                        ),
+                        _decoded(),
+                        _decoded(),
+                    ]
+                ),
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            child = output.records[1]
+            self.assertEqual(
+                child["review_disposition"], "discarded_asr_hallucination"
+            )
+            self.assertEqual(child["tr_corrected"], "")
+            self.assertEqual(report["duplicate_resolution_count"], 1)
+            resolution = report["duplicate_resolutions"][0]
+            self.assertEqual(
+                resolution["duplicate_of_utterance_uid"], "canonical-parent"
+            )
+            self.assertEqual(
+                resolution["provenance_flag"],
+                "overlapping_rescue_word_evidence",
+            )
+            validate_audio_review_v2_report(*paths[:4])
+
+            forged_overlap = resolution["coarse_overlap_ms"] + 1
+            resolution["coarse_overlap_ms"] = forged_overlap
+            report["outcomes"][1]["duplicate_evidence"][
+                "coarse_overlap_ms"
+            ] = forged_overlap
+            report["audio_review_sha256"] = _report_sha(report)
+            paths[3].write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(
+                AudioReviewV2Error,
+                "overlapping rescue acoustic duplicate evidence mismatch",
+            ):
+                validate_audio_review_v2_report(*paths[:4])
+
     def test_contextual_policy_missing_context_remains_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = _make_files(
@@ -605,6 +779,115 @@ class AudioReviewV2Tests(unittest.TestCase):
             exact_audit = outcome["contextual_boundary_audit"]["bounded_decodes"][-1]
             self.assertTrue(exact_audit["known_short_clip_hallucination"])
             self.assertFalse(exact_audit["usable_target_text"])
+
+    def test_contextual_policy_rejects_exact_crop_outro_with_sentinel_timing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), include_hole=True)
+            decoder = FakeDecoder(
+                [
+                    _decoded("Merhaba"),
+                    _decoded(),
+                    _decoded(),
+                    _decoded_words(
+                        ("İzlediğiniz", 0, 120),
+                        ("için", 120, 121),
+                        ("teşekkür", 120, 160),
+                        ("ederim.", 160, 161),
+                    ),
+                ]
+            )
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            hole = output.records[1]
+            outcome = report["outcomes"][1]
+            exact_audit = outcome["contextual_boundary_audit"]["bounded_decodes"][-1]
+            self.assertEqual(hole["review_disposition"], "reviewed_non_dialogue")
+            self.assertEqual(hole["tr_corrected"], "")
+            self.assertTrue(hole["non_dialogue"])
+            self.assertTrue(exact_audit["known_short_clip_hallucination"])
+            self.assertTrue(exact_audit["one_millisecond_word_timing"])
+            self.assertFalse(exact_audit["usable_target_text"])
+            validate_audio_review_v2_report(*paths[:4])
+
+            exact_audit["known_short_clip_hallucination"] = False
+            exact_audit["usable_target_text"] = True
+            report["audio_review_sha256"] = _report_sha(report)
+            paths[3].write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(
+                AudioReviewV2Error, "contextual boundary decode audit mismatch"
+            ):
+                validate_audio_review_v2_report(*paths[:4])
+
+    def test_contextual_policy_keeps_outro_without_sentinel_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), include_hole=True)
+            decoder = FakeDecoder(
+                [
+                    _decoded("Merhaba"),
+                    _decoded(),
+                    _decoded(),
+                    _decoded_words(
+                        ("İzlediğiniz", 0, 90),
+                        ("için", 90, 160),
+                        ("teşekkür", 160, 270),
+                        ("ederim.", 270, 380),
+                    ),
+                ]
+            )
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            hole = output.records[1]
+            exact_audit = report["outcomes"][1]["contextual_boundary_audit"][
+                "bounded_decodes"
+            ][-1]
+            self.assertEqual(hole["review_disposition"], "confirmed_dialogue")
+            self.assertEqual(
+                hole["tr_corrected"], "İzlediğiniz için teşekkür ederim."
+            )
+            self.assertFalse(exact_audit["known_short_clip_hallucination"])
+            self.assertFalse(exact_audit["one_millisecond_word_timing"])
+
+    def test_contextual_policy_keeps_other_text_with_one_millisecond_word(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), include_hole=True)
+            decoder = FakeDecoder(
+                [
+                    _decoded("Merhaba"),
+                    _decoded(),
+                    _decoded(),
+                    _decoded_words(("Duydum", 0, 1)),
+                ]
+            )
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=decoder,
+                progress=None,
+            )
+
+            output = validate_tr_correction_output(paths[0], paths[2])
+            hole = output.records[1]
+            exact_audit = report["outcomes"][1]["contextual_boundary_audit"][
+                "bounded_decodes"
+            ][-1]
+            self.assertEqual(hole["review_disposition"], "confirmed_dialogue")
+            self.assertEqual(hole["tr_corrected"], "Duydum")
+            self.assertFalse(exact_audit["known_short_clip_hallucination"])
+            self.assertTrue(exact_audit["one_millisecond_word_timing"])
 
     def test_repetitive_source_loop_is_discarded_without_merging_context(self) -> None:
         repeated = " ".join(["Nefes al"] * 24)
@@ -751,11 +1034,6 @@ class AudioReviewV2Tests(unittest.TestCase):
                 progress=None,
             )
             report = json.loads(paths[3].read_text(encoding="utf-8"))
-            report["review_input_sha256"] = "0" * 64
-            report["audio_review_sha256"] = _report_sha(report)
-            paths[3].write_text(json.dumps(report), encoding="utf-8")
-            report_before = paths[3].read_bytes()
-            final_before = paths[2].read_bytes()
             resumed_decoder = FakeDecoder([])
             import mas.engine.audio_review as audio_review_module
 
@@ -767,6 +1045,12 @@ class AudioReviewV2Tests(unittest.TestCase):
                     return _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256
                 if candidate == paths[2]:
                     return _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256
+                if candidate == paths[0]:
+                    return audio_review_module._EP13_LEGACY_TR_PACK_SHA256
+                if candidate == paths[1]:
+                    return audio_review_module._EP13_LEGACY_PROVISIONAL_ZIP_SHA256
+                if candidate == paths[4]:
+                    return audio_review_module._EP13_LEGACY_RECOVERY_SHA256
                 return real_sha256_file(path)
 
             audio_review_module.sha256_file = artifact_sha256
@@ -781,14 +1065,10 @@ class AudioReviewV2Tests(unittest.TestCase):
                 progress=None,
             )
 
-            self.assertEqual(hydrated, report)
+            self.assertEqual(hydrated["status"], "PASS")
             self.assertEqual(resumed_decoder.call_count, 0)
-            self.assertEqual(paths[2].read_bytes(), final_before)
-            self.assertEqual(paths[3].read_bytes(), report_before)
 
-            with self.assertRaisesRegex(
-                AudioReviewV2Error, "different inputs, config, or code"
-            ):
+            with self.assertRaisesRegex(AudioReviewV2Error, "migration evidence mismatch"):
                 resolve_tr_audio_reviews_v2(
                     *paths,
                     config=AudioReviewV2Config(beam_size=settings.beam_size + 1),
@@ -825,14 +1105,69 @@ class AudioReviewV2Tests(unittest.TestCase):
                 setattr, audio_review_module, "sha256_file", real_sha256_file
             )
 
-            with self.assertRaisesRegex(
-                AudioReviewV2Error, "different inputs, config, or code"
-            ):
+            with self.assertRaisesRegex(AudioReviewV2Error, "artifact binding mismatch"):
                 resolve_tr_audio_reviews_v2(
                     *paths,
                     decoder=FakeDecoder([]),
                     progress=None,
                 )
+
+    def test_ep13_legacy_migration_rejects_forged_decode_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), episode=13)
+            settings = AudioReviewV2Config(
+                model_name="large-v3", device="cuda", allow_cpu_fallback=False
+            )
+            resolve_tr_audio_reviews_v2(
+                *paths,
+                config=settings,
+                decoder=FakeDecoder([_decoded()]),
+                progress=None,
+            )
+            recovery = json.loads(paths[4].read_text(encoding="utf-8"))
+            recovery["machine_decisions"]["candidate-1"]["target_decode"][
+                "transcript"
+            ] = "forged"
+            recovery["recovery_sha256"] = hashlib.sha256(
+                json.dumps(
+                    {
+                        key: value
+                        for key, value in recovery.items()
+                        if key != "recovery_sha256"
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            paths[4].write_text(json.dumps(recovery), encoding="utf-8")
+            import mas.engine.audio_review as audio_review_module
+
+            real_sha256_file = audio_review_module.sha256_file
+
+            def artifact_sha256(path):
+                candidate = Path(path)
+                allowed = {
+                    paths[0]: audio_review_module._EP13_LEGACY_TR_PACK_SHA256,
+                    paths[1]: audio_review_module._EP13_LEGACY_PROVISIONAL_ZIP_SHA256,
+                    paths[2]: _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256,
+                    paths[3]: _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256,
+                    paths[4]: audio_review_module._EP13_LEGACY_RECOVERY_SHA256,
+                }
+                return allowed.get(candidate, real_sha256_file(path))
+
+            with patch.object(
+                audio_review_module, "sha256_file", side_effect=artifact_sha256
+            ):
+                with self.assertRaisesRegex(
+                    AudioReviewV2Error, "legacy decode evidence is invalid"
+                ):
+                    resolve_tr_audio_reviews_v2(
+                        *paths,
+                        config=settings,
+                        decoder=FakeDecoder([]),
+                        progress=None,
+                    )
 
     def test_completed_review_rejects_changed_hydration_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

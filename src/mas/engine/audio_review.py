@@ -49,8 +49,8 @@ AUDIO_REVIEW_V2_VERSION = "1.0"
 AUDIO_REVIEW_V2_RECOVERY_FORMAT = "audio-review-v2-recovery-1"
 MACHINE_NOTE_PREFIX = "machine_audio_review_v2:"
 MANUAL_NOTE_PREFIX = "manual_audio_review_v2:"
-CONTEXTUAL_BOUNDARY_POLICY = "contextual-boundary-policy-1"
-ACOUSTIC_DUPLICATE_POLICY = "acoustic-duplicate-policy-1"
+CONTEXTUAL_BOUNDARY_POLICY = "contextual-boundary-policy-2"
+ACOUSTIC_DUPLICATE_POLICY = "acoustic-duplicate-policy-2"
 
 
 class AudioReviewV2Error(RuntimeError):
@@ -130,8 +130,52 @@ def _normalized_text(value: Any) -> str:
     return " ".join(re.findall(r"[^\W_]+", normalized, flags=re.UNICODE))
 
 
-def _is_known_short_clip_hallucination(value: Any) -> bool:
-    return _normalized_text(value) == "altyazı m k"
+def _has_one_millisecond_word_timing(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    words = value.get("words")
+    if isinstance(words, (str, bytes, bytearray)) or not isinstance(
+        words, Sequence
+    ):
+        return False
+    return any(
+        isinstance(word, Mapping)
+        and isinstance(word.get("start_ms"), int)
+        and not isinstance(word.get("start_ms"), bool)
+        and isinstance(word.get("end_ms"), int)
+        and not isinstance(word.get("end_ms"), bool)
+        and int(word["end_ms"]) - int(word["start_ms"]) == 1
+        for word in words
+    )
+
+
+def _is_known_short_clip_hallucination(
+    value: Any,
+    *,
+    stage: str | None = None,
+    decoded: Mapping[str, Any] | None = None,
+    staged_decodes: Sequence[tuple[str, Mapping[str, Any]]] = (),
+) -> bool:
+    normalized = _normalized_text(value)
+    if normalized == "altyazı m k":
+        return True
+    if (
+        normalized != "izlediğiniz için teşekkür ederim"
+        or stage != "exact_target_crop"
+        or not _has_one_millisecond_word_timing(decoded)
+    ):
+        return False
+    transcripts = {
+        name: str(candidate.get("transcript", "")).strip()
+        for name, candidate in staged_decodes
+        if isinstance(name, str) and isinstance(candidate, Mapping)
+    }
+    return (
+        "blind_padded" in transcripts
+        and "prompted_padded" in transcripts
+        and not transcripts["blind_padded"]
+        and not transcripts["prompted_padded"]
+    )
 
 
 def _is_repetitive_asr_hallucination(value: Any) -> bool:
@@ -624,6 +668,18 @@ def _machine_decision(
         "source": "secondary_asr",
         "known_short_clip_hallucination": known_short_clip_hallucination,
     }
+    if "overlapping_rescue_word_evidence" in set(
+        evidence.get("risk_flags", [])
+    ):
+        return {
+            **base,
+            "decision": "pending_audio_review",
+            "tr_corrected": str(provisional_record["tr_corrected"]).strip(),
+            "reason": (
+                "overlapping rescue requires persisted acoustic duplicate "
+                "evidence or manual review"
+            ),
+        }
     has_adjacent_context = bool(
         str(evidence.get("context_before", "")).strip()
         or str(evidence.get("context_after", "")).strip()
@@ -723,6 +779,10 @@ def _contextual_boundary_decision(
 ) -> dict[str, Any]:
     if pending_decision.get("decision") != "pending_audio_review":
         return copy.deepcopy(dict(pending_decision))
+    if "overlapping_rescue_word_evidence" in set(
+        evidence.get("risk_flags", [])
+    ):
+        return copy.deepcopy(dict(pending_decision))
     context_before = str(evidence.get("context_before", "")).strip()
     context_after = str(evidence.get("context_after", "")).strip()
     if not context_before and not context_after:
@@ -734,7 +794,14 @@ def _contextual_boundary_decision(
         transcript = str(decoded.get("transcript", "")).strip()
         exact_word_overlap_ms = int(decoded.get("exact_word_overlap_ms", 0))
         known_short_clip_hallucination = _is_known_short_clip_hallucination(
-            transcript
+            transcript,
+            stage=stage,
+            decoded=decoded,
+            staged_decodes=staged_decodes,
+        )
+        one_millisecond_word_timing = (
+            stage == "exact_target_crop"
+            and _has_one_millisecond_word_timing(decoded)
         )
         context_similarity = max(
             _text_similarity(transcript, context_before),
@@ -757,6 +824,7 @@ def _contextual_boundary_decision(
                 "transcript_present": bool(transcript),
                 "usable_target_text": usable_target_text,
                 "known_short_clip_hallucination": known_short_clip_hallucination,
+                "one_millisecond_word_timing": one_millisecond_word_timing,
                 "exact_word_overlap_ms": exact_word_overlap_ms,
             }
         )
@@ -969,6 +1037,139 @@ _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256 = (
 _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256 = (
     "b026480b2b8a08a68f4c068bb669f55a4753701301d682d21461f6b8df51471f"
 )
+_EP13_LEGACY_TR_PACK_SHA256 = (
+    "7d74ddce943e89702ef60cf10aebc02921793702b2307ef62b91cd08117d53a9"
+)
+_EP13_LEGACY_PROVISIONAL_ZIP_SHA256 = (
+    "6ef69291a806531a1eb544afafc9c2c6452d1f603877418abe59da08b6e415ed"
+)
+_EP13_LEGACY_RECOVERY_SHA256 = (
+    "412c3baabfe2159cce4696877530a78d3db14cc849aca4b276d004401a4b1991"
+)
+
+
+def _validated_cached_decode(
+    raw: Mapping[str, Any], *, target_start_ms: int, target_end_ms: int,
+    clip_duration_ms: int,
+) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise AudioReviewV2Error("legacy decode evidence must be an object")
+    words = _normalize_decoder_result(
+        {"words": raw.get("words"), "segments": []}
+    )["words"]
+    transcript = " ".join(str(word["text"]).strip() for word in words).strip()
+    if (
+        raw.get("words") != words
+        or raw.get("transcript") != transcript
+        or raw.get("selected_word_count") != len(words)
+        or raw.get("target_start_in_clip_ms") != target_start_ms
+        or raw.get("target_end_in_clip_ms") != target_end_ms
+        or raw.get("source") != ("word_timestamps" if transcript else "none")
+        or any(
+            int(word["start_ms"]) < 0
+            or int(word["end_ms"]) > clip_duration_ms
+            for word in words
+        )
+    ):
+        raise AudioReviewV2Error("legacy decode transcript/timing evidence mismatch")
+    exact_overlap_ms = sum(
+        max(
+            0,
+            min(target_end_ms, int(word["end_ms"]))
+            - max(target_start_ms, int(word["start_ms"])),
+        )
+        for word in words
+    )
+    if raw.get("exact_word_overlap_ms") != exact_overlap_ms:
+        raise AudioReviewV2Error("legacy decode overlap evidence mismatch")
+    return {
+        "transcript": transcript,
+        "source": raw["source"],
+        "exact_word_overlap_ms": exact_overlap_ms,
+        "selected_word_count": len(words),
+        "target_start_in_clip_ms": target_start_ms,
+        "target_end_in_clip_ms": target_end_ms,
+        "words": words,
+    }
+
+
+def _validate_legacy_decision_evidence(
+    decision: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    provisional_record: Mapping[str, Any],
+    clip_path: Path,
+    crop_path: Path,
+) -> None:
+    clip_duration_ms = int(evidence["clip_end_ms"]) - int(
+        evidence["clip_start_ms"]
+    )
+    target_start_ms = int(evidence["start_ms"]) - int(evidence["clip_start_ms"])
+    target_end_ms = int(evidence["end_ms"]) - int(evidence["clip_start_ms"])
+    target = _validated_cached_decode(
+        decision.get("target_decode", {}),
+        target_start_ms=target_start_ms,
+        target_end_ms=target_end_ms,
+        clip_duration_ms=clip_duration_ms,
+    )
+    blind = None
+    if "blind_target_decode" in decision:
+        blind = _validated_cached_decode(
+            decision["blind_target_decode"],
+            target_start_ms=target_start_ms,
+            target_end_ms=target_end_ms,
+            clip_duration_ms=clip_duration_ms,
+        )
+    exact = None
+    if "exact_target_crop_decode" in decision:
+        crop = _write_exact_target_crop(clip_path, crop_path, evidence)
+        if decision.get("exact_target_crop") != crop:
+            raise AudioReviewV2Error("legacy exact crop evidence mismatch")
+        exact = _validated_cached_decode(
+            decision["exact_target_crop_decode"],
+            target_start_ms=0,
+            target_end_ms=int(crop["duration_ms"]),
+            clip_duration_ms=int(crop["duration_ms"]),
+        )
+    audit = decision.get("contextual_boundary_audit")
+    if decision.get("source") == "contextual_boundary_policy":
+        if not isinstance(audit, Mapping) or audit.get("policy") != "contextual-boundary-policy-1":
+            raise AudioReviewV2Error("legacy contextual decode audit mismatch")
+        stages = audit.get("bounded_decodes")
+        if not isinstance(stages, list) or not stages:
+            raise AudioReviewV2Error("legacy contextual decode stages are missing")
+        names = []
+        for item in stages:
+            if not isinstance(item, Mapping):
+                raise AudioReviewV2Error("legacy contextual decode stage is malformed")
+            stage = item.get("stage")
+            transcript = item.get("transcript")
+            if (
+                not isinstance(stage, str)
+                or not isinstance(transcript, str)
+                or item.get("transcript_sha256")
+                != hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+                or isinstance(item.get("exact_word_overlap_ms"), bool)
+                or not isinstance(item.get("exact_word_overlap_ms"), int)
+                or item["exact_word_overlap_ms"] < 0
+            ):
+                raise AudioReviewV2Error("legacy contextual decode stage evidence mismatch")
+            names.append(stage)
+            expected = blind if stage == "blind_padded" else exact if stage == "exact_target_crop" else None
+            if expected is not None and (
+                transcript != expected["transcript"]
+                or item["exact_word_overlap_ms"] != expected["exact_word_overlap_ms"]
+            ):
+                raise AudioReviewV2Error("legacy contextual decode stage binding mismatch")
+        if len(names) != len(set(names)) or not {"blind_padded", "exact_target_crop"}.issubset(names):
+            raise AudioReviewV2Error("legacy contextual decode stage coverage mismatch")
+    elif audit is not None:
+        raise AudioReviewV2Error("legacy contextual audit has invalid source")
+    if decision.get("source") == "secondary_asr_prompted_confirmation":
+        prompt = _evidence_prompt(evidence, provisional_record)
+        if prompt is None or decision.get("evidence_prompt_sha256") != hashlib.sha256(
+            prompt.encode("utf-8")
+        ).hexdigest():
+            raise AudioReviewV2Error("legacy prompted decode evidence mismatch")
 
 
 def _write_report(path: Path, draft: Mapping[str, Any]) -> dict[str, Any]:
@@ -1056,9 +1257,12 @@ def _outcome(
 
 
 def _exact_target_words(
-    decision: Mapping[str, Any], evidence: Mapping[str, Any]
+    decision: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    *,
+    allow_unconfirmed: bool = False,
 ) -> list[dict[str, Any]]:
-    if decision.get("decision") != "confirmed_dialogue":
+    if decision.get("decision") != "confirmed_dialogue" and not allow_unconfirmed:
         return []
     if decision.get("source") == "secondary_asr_exact_target_crop":
         decode = decision.get("exact_target_crop_decode")
@@ -1122,7 +1326,14 @@ def _apply_acoustic_duplicate_policy(
         uid: (kind, evidence) for uid, kind, evidence in inventory
     }
     words_by_uid = {
-        uid: _exact_target_words(adjusted[uid], evidence)
+        uid: _exact_target_words(
+            adjusted[uid],
+            evidence,
+            allow_unconfirmed=(
+                "overlapping_rescue_word_evidence"
+                in set(provisional_by_uid[uid].get("risk_flags", []))
+            ),
+        )
         for uid, _kind, evidence in inventory
     }
     resolutions = []
@@ -1131,14 +1342,19 @@ def _apply_acoustic_duplicate_policy(
             continue
         child_record = provisional_by_uid[child_uid]
         child_flags = set(child_record.get("risk_flags", []))
+        overlapping_rescue = "overlapping_rescue_word_evidence" in child_flags
         if (
             child_kind != "speech_hole"
             and "speech_hole_rescue_asr" not in child_flags
+            and not overlapping_rescue
         ):
             continue
         child_words = words_by_uid[child_uid]
         child_tokens = [word["normalized"] for word in child_words]
-        if not child_tokens or len(child_tokens) > 3:
+        if not child_tokens or (len(child_tokens) > 3 and not overlapping_rescue):
+            continue
+        child_source_tokens = _tokens(child_record.get("asr_text", ""))
+        if overlapping_rescue and len(child_source_tokens) < 2:
             continue
         child_start = int(child_record["coarse_start_ms"])
         child_end = int(child_record["coarse_end_ms"])
@@ -1148,9 +1364,29 @@ def _apply_acoustic_duplicate_policy(
             if parent_uid == child_uid or parent_uid in override_uids:
                 continue
             parent_record = provisional_by_uid[parent_uid]
+            parent_flags = set(parent_record.get("risk_flags", []))
             parent_start = int(parent_record["coarse_start_ms"])
             parent_end = int(parent_record["coarse_end_ms"])
-            if (
+            coarse_overlap_ms = max(
+                0,
+                min(child_end, parent_end) - max(child_start, parent_start),
+            )
+            if overlapping_rescue:
+                if (
+                    _parent_kind != "asr_caption_candidate"
+                    or "speech_hole_rescue_asr" in parent_flags
+                    or "overlapping_rescue_word_evidence" in parent_flags
+                    or parent_end - parent_start <= child_duration
+                    or coarse_overlap_ms * 2 < child_duration
+                ):
+                    continue
+                parent_source_tokens = _tokens(parent_record.get("asr_text", ""))
+                source_match_offset = _contiguous_token_match(
+                    child_source_tokens, parent_source_tokens
+                )
+                if source_match_offset is None:
+                    continue
+            elif (
                 parent_start > child_start
                 or parent_end < child_end
                 or parent_end - parent_start < child_duration * 2
@@ -1192,6 +1428,22 @@ def _apply_acoustic_duplicate_policy(
             )
             if acoustic_overlap_ms <= 0:
                 continue
+            if overlapping_rescue and any(
+                max(
+                    0,
+                    min(child_word["end_ms"], parent_word["end_ms"])
+                    - max(child_word["start_ms"], parent_word["start_ms"]),
+                )
+                * 2
+                < min(
+                    child_word["end_ms"] - child_word["start_ms"],
+                    parent_word["end_ms"] - parent_word["start_ms"],
+                )
+                for child_word, parent_word in zip(
+                    child_words, matched_parent_words
+                )
+            ):
+                continue
             matches.append(
                 (
                     parent_end - parent_start,
@@ -1200,6 +1452,7 @@ def _apply_acoustic_duplicate_policy(
                     parent_uid,
                     match_kind,
                     match_offset,
+                    coarse_overlap_ms,
                 )
             )
         if not matches:
@@ -1211,6 +1464,7 @@ def _apply_acoustic_duplicate_policy(
             parent_uid,
             match_kind,
             match_offset,
+            coarse_overlap_ms,
         ) = max(matches)
         parent_kind, parent_evidence = evidence_by_uid[parent_uid]
         parent_words = words_by_uid[parent_uid]
@@ -1233,6 +1487,23 @@ def _apply_acoustic_duplicate_policy(
                 )
             ).hexdigest(),
         }
+        if overlapping_rescue:
+            evidence.update(
+                {
+                    "provenance_flag": "overlapping_rescue_word_evidence",
+                    "source_match_kind": "exact_contiguous",
+                    "source_matched_token_count": len(child_source_tokens),
+                    "source_child_text_sha256": hashlib.sha256(
+                        str(child_record["asr_text"]).encode("utf-8")
+                    ).hexdigest(),
+                    "source_parent_text_sha256": hashlib.sha256(
+                        str(provisional_by_uid[parent_uid]["asr_text"]).encode(
+                            "utf-8"
+                        )
+                    ).hexdigest(),
+                    "coarse_overlap_ms": coarse_overlap_ms,
+                }
+            )
         child_decision = adjusted[child_uid]
         child_decision["decision"] = (
             "reviewed_non_dialogue"
@@ -1316,6 +1587,43 @@ def _validate_contextual_boundary_outcome(
     bounded_decodes = audit.get("bounded_decodes")
     if not isinstance(bounded_decodes, list) or not bounded_decodes:
         raise AudioReviewV2Error("contextual boundary decode audit is missing")
+    exact_decode = outcome.get("exact_target_crop_decode")
+    if not isinstance(exact_decode, Mapping):
+        raise AudioReviewV2Error(
+            "contextual boundary exact target decode is missing"
+        )
+    try:
+        normalized_exact_words = _normalize_decoder_result(
+            {"words": exact_decode.get("words"), "segments": []}
+        )["words"]
+    except AudioReviewV2Error as exc:
+        raise AudioReviewV2Error(
+            "contextual boundary exact target word evidence is invalid"
+        ) from exc
+    exact_transcript = " ".join(
+        str(word["text"]).strip() for word in normalized_exact_words
+    ).strip()
+    if (
+        exact_decode.get("words") != normalized_exact_words
+        or exact_decode.get("transcript") != exact_transcript
+        or exact_decode.get("selected_word_count") != len(normalized_exact_words)
+    ):
+        raise AudioReviewV2Error(
+            "contextual boundary exact target word evidence mismatch"
+        )
+    semantic_staged_decodes = [
+        (
+            str(item.get("stage", "")),
+            exact_decode
+            if item.get("stage") == "exact_target_crop"
+            else {
+                "transcript": item.get("transcript", ""),
+                "words": [],
+            },
+        )
+        for item in bounded_decodes
+        if isinstance(item, Mapping)
+    ]
     stages = []
     for item in bounded_decodes:
         if not isinstance(item, Mapping):
@@ -1337,6 +1645,7 @@ def _validate_contextual_boundary_outcome(
             not isinstance(item.get("transcript_present"), bool)
             or not isinstance(item.get("usable_target_text"), bool)
             or not isinstance(item.get("known_short_clip_hallucination"), bool)
+            or not isinstance(item.get("one_millisecond_word_timing"), bool)
             or isinstance(item.get("exact_word_overlap_ms"), bool)
             or not isinstance(item.get("exact_word_overlap_ms"), int)
             or item.get("exact_word_overlap_ms") < 0
@@ -1347,12 +1656,25 @@ def _validate_contextual_boundary_outcome(
             _text_similarity(transcript, context_after),
         )
         known_short_clip_hallucination = _is_known_short_clip_hallucination(
-            transcript
+            transcript,
+            stage=stage,
+            decoded=(
+                exact_decode
+                if stage == "exact_target_crop"
+                else {"transcript": transcript, "words": []}
+            ),
+            staged_decodes=semantic_staged_decodes,
+        )
+        one_millisecond_word_timing = (
+            stage == "exact_target_crop"
+            and _has_one_millisecond_word_timing(exact_decode)
         )
         if (
             item.get("transcript_present") is not bool(transcript.strip())
             or item.get("known_short_clip_hallucination")
             is not known_short_clip_hallucination
+            or item.get("one_millisecond_word_timing")
+            is not one_millisecond_word_timing
             or item.get("usable_target_text")
             is not (
                 bool(transcript.strip())
@@ -1536,6 +1858,14 @@ def validate_audio_review_v2_report(
             raise AudioReviewV2Error(
                 f"audio-review outcome {uid} did not close the correction gate"
             )
+        if (
+            "overlapping_rescue_word_evidence"
+            in set(provisional_by_uid[uid].get("risk_flags", []))
+            and raw.get("source") not in {"manual", "acoustic_duplicate_policy"}
+        ):
+            raise AudioReviewV2Error(
+                "overlapping rescue requires acoustic duplicate or manual evidence"
+            )
         if raw.get("source") == "contextual_boundary_policy":
             _validate_contextual_boundary_outcome(
                 kind,
@@ -1590,6 +1920,38 @@ def validate_audio_review_v2_report(
     ]
     if duplicate_uids != expected_duplicate_uids:
         raise AudioReviewV2Error("audio-review duplicate outcome coverage mismatch")
+    overlapping_rescue_uids = {
+        uid
+        for uid, record in provisional_by_uid.items()
+        if "overlapping_rescue_word_evidence" in set(record.get("risk_flags", []))
+    }
+    if overlapping_rescue_uids:
+        _recomputed_decisions, recomputed_resolutions = (
+            _apply_acoustic_duplicate_policy(
+                inventory,
+                provisional_by_uid,
+                outcome_by_uid,
+                override_uids={
+                    uid
+                    for uid, outcome in outcome_by_uid.items()
+                    if outcome.get("source") == "manual"
+                },
+            )
+        )
+        expected_resolutions = [
+            resolution
+            for resolution in recomputed_resolutions
+            if resolution["utterance_uid"] in overlapping_rescue_uids
+        ]
+        persisted_resolutions = [
+            resolution
+            for resolution in duplicate_resolutions
+            if resolution.get("utterance_uid") in overlapping_rescue_uids
+        ]
+        if expected_resolutions != persisted_resolutions:
+            raise AudioReviewV2Error(
+                "overlapping rescue acoustic duplicate evidence mismatch"
+            )
     for uid, raw in outcome_by_uid.items():
         if raw.get("source") != "acoustic_duplicate_parent_correction":
             continue
@@ -1684,45 +2046,128 @@ def resolve_tr_audio_reviews_v2(
     review_input_sha256 = sha256_json(identity)
     final_output_file = Path(final_output_path)
     report_file = Path(report_path)
-    if not force and (final_output_file.exists() or final_output_file.is_symlink()):
-        if final_output_file.is_symlink() or not final_output_file.is_file():
-            raise AudioReviewV2Error(
-                "Completed audio-review output path is unsafe; preserve it"
-            )
-        if not report_file.is_file() or report_file.is_symlink():
-            raise AudioReviewV2Error(
-                "Completed audio-review output has no safe bound report; preserve it"
-            )
-        completed = validate_audio_review_v2_report(
-            input_pack_path,
-            provisional_output_path,
-            final_output_file,
-            report_file,
-        )
-        completed_input_sha256 = completed.get("review_input_sha256")
-        legacy_ep13_artifact = (
-            pack.manifest["episode"] == 13
-            and completed.get("config") == asdict(settings)
-            and sha256_file(report_file)
-            == _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256
-            and sha256_file(final_output_file)
-            == _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256
+    recovery_file = Path(recovery_path)
+    legacy_migration: dict[str, Any] | None = None
+    if (
+        not force
+        and final_output_file.is_file()
+        and not final_output_file.is_symlink()
+        and report_file.is_file()
+        and not report_file.is_symlink()
+        and sha256_file(report_file) == _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256
+        and sha256_file(final_output_file) == _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256
+    ):
+        required_hashes = (
+            (Path(input_pack_path), _EP13_LEGACY_TR_PACK_SHA256),
+            (Path(provisional_output_path), _EP13_LEGACY_PROVISIONAL_ZIP_SHA256),
+            (recovery_file, _EP13_LEGACY_RECOVERY_SHA256),
         )
         if (
-            completed_input_sha256 != review_input_sha256
-            and not legacy_ep13_artifact
+            pack.manifest["episode"] != 13
+            or any(
+                not path.is_file()
+                or path.is_symlink()
+                or sha256_file(path) != expected
+                for path, expected in required_hashes
+            )
         ):
             raise AudioReviewV2Error(
-                "Completed audio-review output belongs to different inputs, config, or code; preserve it"
+                "Episode 13 legacy decode migration artifact binding mismatch"
             )
-        if completed.get("manual_overrides_sha256") != sha256_json(overrides):
+        try:
+            legacy_report = json.loads(report_file.read_text(encoding="utf-8"))
+            legacy_recovery = json.loads(
+                recovery_file.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise AudioReviewV2Error(
-                "Completed audio-review output belongs to different manual overrides; preserve it"
+                "Episode 13 legacy decode migration evidence is unreadable"
+            ) from exc
+        legacy_final = validate_tr_correction_output(
+            input_pack_path, final_output_file
+        )
+        inventory_uids = [uid for uid, _kind, _evidence in inventory]
+        outcome_uids = [
+            item.get("utterance_uid")
+            for item in legacy_report.get("outcomes", [])
+            if isinstance(item, Mapping)
+        ]
+        recovery_decisions = legacy_recovery.get("machine_decisions")
+        if (
+            legacy_report.get("audio_review_sha256") != _report_sha(legacy_report)
+            or legacy_report.get("status") != "PASS"
+            or legacy_report.get("pending_count") != 0
+            or legacy_report.get("config") != asdict(settings)
+            or legacy_report.get("correction_input_sha256")
+            != pack.manifest["input_sha256"]
+            or legacy_report.get("provisional_output_sha256")
+            != provisional.output_sha256
+            or legacy_report.get("correction_output_sha256")
+            != legacy_final.output_sha256
+            or legacy_report.get("manual_overrides_sha256")
+            != sha256_json(overrides)
+            or outcome_uids != inventory_uids
+            or legacy_recovery.get("format") != AUDIO_REVIEW_V2_RECOVERY_FORMAT
+            or legacy_recovery.get("input_sha256")
+            != legacy_report.get("review_input_sha256")
+            or legacy_recovery.get("recovery_sha256")
+            != sha256_json(
+                {
+                    key: value
+                    for key, value in legacy_recovery.items()
+                    if key != "recovery_sha256"
+                }
             )
-        return completed
-    recovery_file = Path(recovery_path)
-    cached: dict[str, dict[str, Any]] = {}
-    if not force and recovery_file.is_file():
+            or not isinstance(recovery_decisions, Mapping)
+            or set(recovery_decisions) != set(inventory_uids)
+            or any(
+                not isinstance(value, Mapping)
+                for value in recovery_decisions.values()
+            )
+        ):
+            raise AudioReviewV2Error(
+                "Episode 13 legacy decode migration evidence mismatch"
+            )
+        legacy_migration = {
+            "machine_decisions": {
+                str(uid): copy.deepcopy(dict(value))
+                for uid, value in recovery_decisions.items()
+                if isinstance(uid, str) and isinstance(value, Mapping)
+            },
+            "decoder": copy.deepcopy(dict(legacy_report.get("decoder", {}))),
+        }
+    if not force and (final_output_file.exists() or final_output_file.is_symlink()):
+        if legacy_migration is not None:
+            pass
+        else:
+            if final_output_file.is_symlink() or not final_output_file.is_file():
+                raise AudioReviewV2Error(
+                    "Completed audio-review output path is unsafe; preserve it"
+                )
+            if not report_file.is_file() or report_file.is_symlink():
+                raise AudioReviewV2Error(
+                    "Completed audio-review output has no safe bound report; preserve it"
+                )
+            completed = validate_audio_review_v2_report(
+                input_pack_path,
+                provisional_output_path,
+                final_output_file,
+                report_file,
+            )
+            completed_input_sha256 = completed.get("review_input_sha256")
+            if completed_input_sha256 != review_input_sha256:
+                raise AudioReviewV2Error(
+                    "Completed audio-review output belongs to different inputs, config, or code; preserve it"
+                )
+            if completed.get("manual_overrides_sha256") != sha256_json(overrides):
+                raise AudioReviewV2Error(
+                    "Completed audio-review output belongs to different manual overrides; preserve it"
+                )
+            return completed
+    cached: dict[str, dict[str, Any]] = (
+        legacy_migration["machine_decisions"] if legacy_migration else {}
+    )
+    if not legacy_migration and not force and recovery_file.is_file():
         try:
             with recovery_file.open(encoding="utf-8") as handle:
                 recovery = json.load(handle)
@@ -1774,6 +2219,23 @@ def resolve_tr_audio_reviews_v2(
                 if uid in cached:
                     cached_decision = cached[uid]
                     try:
+                        if legacy_migration is not None:
+                            member = str(evidence["audio_member"])
+                            payload = archive.read(member)
+                            if hashlib.sha256(payload).hexdigest() != evidence["audio_sha256"]:
+                                raise AudioReviewV2Error(
+                                    f"Review WAV hash changed before migration: {member}"
+                                )
+                            clip_path = temporary_root / f"{position:03d}.wav"
+                            crop_path = temporary_root / f"{position:03d}-target.wav"
+                            clip_path.write_bytes(payload)
+                            _validate_legacy_decision_evidence(
+                                cached_decision,
+                                evidence,
+                                provisional_by_uid[uid],
+                                clip_path,
+                                crop_path,
+                            )
                         normalized_cached_words = _normalize_decoder_result(
                             {
                                 "words": cached_decision["target_decode"]["words"],
@@ -1809,11 +2271,16 @@ def resolve_tr_audio_reviews_v2(
                             cached_staged_decodes = [
                                 (
                                     str(item["stage"]),
-                                    {
+                                    copy.deepcopy(
+                                        cached_decision["exact_target_crop_decode"]
+                                    )
+                                    if item["stage"] == "exact_target_crop"
+                                    else {
                                         "transcript": str(item["transcript"]),
                                         "exact_word_overlap_ms": int(
                                             item["exact_word_overlap_ms"]
                                         ),
+                                        "words": [],
                                     },
                                 )
                                 for item in cached_audit["bounded_decodes"]
@@ -1893,12 +2360,21 @@ def resolve_tr_audio_reviews_v2(
                             recomputed["evidence_prompt_sha256"] = hashlib.sha256(
                                 expected_prompt.encode("utf-8")
                             ).hexdigest()
-                    except (KeyError, TypeError, ValueError, AudioReviewV2Error):
+                    except (KeyError, TypeError, ValueError, AudioReviewV2Error) as exc:
+                        if legacy_migration is not None:
+                            raise AudioReviewV2Error(
+                                f"Episode 13 legacy decode evidence is invalid: {uid}"
+                            ) from exc
                         recomputed = None
-                    if recomputed is not None and sha256_json(recomputed) == sha256_json(
-                        cached_decision
+                    if recomputed is not None and (
+                        legacy_migration is not None
+                        or sha256_json(recomputed) == sha256_json(cached_decision)
                     ):
-                        machine_decisions[uid] = cached_decision
+                        machine_decisions[uid] = (
+                            recomputed
+                            if legacy_migration is not None
+                            else cached_decision
+                        )
                         if progress is not None:
                             progress(
                                 f"Audio review {position}/{len(inventory)} resumed: {uid}"
@@ -2030,6 +2506,9 @@ def resolve_tr_audio_reviews_v2(
         if owns_decoder and runtime_decoder is not None:
             runtime_decoder.close()
 
+    if legacy_migration is not None:
+        save_recovery()
+
     final_decisions = {
         uid: copy.deepcopy(decision) for uid, decision in machine_decisions.items()
     }
@@ -2077,6 +2556,8 @@ def resolve_tr_audio_reviews_v2(
     decoder_provenance = (
         copy.deepcopy(dict(runtime_decoder.provenance))
         if runtime_decoder is not None
+        else copy.deepcopy(legacy_migration["decoder"])
+        if legacy_migration is not None
         else {
             "engine": "checkpoint-only",
             "model_name": settings.model_name,

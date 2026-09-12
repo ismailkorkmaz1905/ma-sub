@@ -118,13 +118,35 @@ def test_strict_runpod_doctor_retries_drive_timeouts(tmp_path, monkeypatch, caps
     assert "rclone_remote: OK" in capsys.readouterr().out
 
 
+def test_runpod_worker_doctor_does_not_require_or_contact_drive(tmp_path, monkeypatch, capsys):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.delenv("MAS_DRIVE_STRICT_REMOTE")
+    monkeypatch.setattr(
+        cli.shutil,
+        "which",
+        lambda name: None if name == "rclone" else name,
+    )
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("RunPod worker must not contact Drive")
+        ),
+    )
+
+    assert cli.doctor(runpod_worker=True) == 0
+    output = capsys.readouterr()
+    assert "MAS_DRIVE_STRICT_REMOTE: MISSING" not in output.err
+    assert "rclone_remote" not in output.out + output.err
+
+
 def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     script = (ROOT / "runpod" / "bootstrap.sh").read_text(encoding="utf-8")
     assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-/workspace/.cache/uv}"' in script
     assert 'MAS_BIN_DIR="${MAS_BIN_DIR:-/workspace/.local/bin}"' in script
     assert "denoland/deno/releases/download/v2.9.5" in script
     assert "sha256sum --check --status" in script
-    assert '"$MAS_BIN_DIR/rclone"' in script
+    assert 'downloads.rclone.org' not in script
     assert 'export UV_INSTALL_DIR="$MAS_BIN_DIR"' in script
     assert "timeout 300 apt-get -o Acquire::Retries=3 update" in script
     assert "timeout 600 apt-get -o Acquire::Retries=3 install" in script
@@ -188,10 +210,10 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert pre_clean < script.index('if ! validate_c0e3_venv; then')
     assert script.index('uv pip install --python "$candidate/bin/python"') < post_clean
     assert post_clean < script.index('if [[ -n "${MAS_NETWORK_VOLUME_QUOTA_BYTES:-}"')
-    assert post_clean < script.index('PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod')
+    assert post_clean < script.index('PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod-worker')
     assert script.count('uv venv --python 3.11 --relocatable "$candidate"') == 1
     assert "uv pip sync" not in script
-    assert 'PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod' in script
+    assert 'PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod-worker' in script
 
     opt_in_branch = script.split(
         'if [[ "${MAS_ALLOW_C0E3_VENV_ADOPTION:-}" == "1" ]]; then', 1

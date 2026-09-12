@@ -850,9 +850,6 @@ def _write_runtime_env(path, values, commit):
         "MAS_GMAIL_ADDRESS": values["MAS_GMAIL_ADDRESS"],
         "MAS_GMAIL_APP_PASSWORD": values["MAS_GMAIL_APP_PASSWORD"],
         "MAS_NOTIFY_TO": values["MAS_NOTIFY_TO"],
-        "MAS_DRIVE_STRICT_REMOTE": values["MAS_DRIVE_STRICT_REMOTE"],
-        "RCLONE_CONFIG": "/workspace/.mas-secrets/rclone.conf",
-        "MAS_RCLONE_CONFIG": "/workspace/.mas-secrets/rclone.conf",
         "MAS_GIT_COMMIT": commit,
         "MAS_VENV_DIR": "/workspace/ma-sub/.venv",
         "UV_CACHE_DIR": "/workspace/.cache/uv",
@@ -1049,7 +1046,7 @@ def run_remote_episode(episode, source_url=None):
                 )
             return publish_local_delivery(local_root, episode, remote)
         values = _required_environment()
-        commit, rclone_config = _local_preflight(values)
+        commit, _ = _local_preflight(values)
         _validate_local_tr_return(local_root, f"Muhtemel Ask {episode}.Bolum")
         preflight_local_id_return(local_root, episode, ROOT / "config" / "production")
         last_status = local_root / "work" / "remote-job-status.json"
@@ -1176,7 +1173,7 @@ def run_remote_episode(episode, source_url=None):
                                   MAS_NETWORK_VOLUME_QUOTA_BYTES=str(volume["size"] * 1_000_000_000),
                                   MAS_EPISODE=str(episode))
             result = _run_remote_session(episode, source_url, values=runtime_values,
-                                         commit=commit, rclone_config=rclone_config,
+                                         commit=commit,
                                          budget=_PaidBudget(episode_budget, lease), pod=lease.pod,
                                          resume_only=resume_lease)
         if result == READY_FOR_DELIVERY:
@@ -1597,7 +1594,7 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
         raise RunPodControllerError(f"remote pipeline failed with exit code {exit_code}")
 
 
-def _run_remote_session(episode, source_url, *, values, commit, rclone_config, budget, pod, resume_only=False):
+def _run_remote_session(episode, source_url, *, values, commit, budget, pod, resume_only=False):
     name = f"Muhtemel Ask {episode}.Bolum"
     local_root = episode_dir(episode)
     key = Path(values["MAS_RUNPOD_SSH_KEY"]).resolve()
@@ -1635,7 +1632,10 @@ def _run_remote_session(episode, source_url, *, values, commit, rclone_config, b
             _write_runtime_env(runtime_env, values, commit)
             ssh = _ssh_args(key, host, port)
             scp = _scp_args(key, host, port)
-            _network_retry(ssh + ["install -d -m 700 /workspace/.mas-secrets /workspace/.mas-upload"], budget=budget)
+            _network_retry(ssh + [
+                "install -d -m 700 /workspace/.mas-secrets /workspace/.mas-upload; "
+                "rm -f -- /workspace/.mas-secrets/rclone.conf"
+            ], budget=budget)
             _network_retry(scp + [str(archive), f"root@{host}:/workspace/.mas-upload/release.tar.gz"], budget=budget)
             _network_retry(scp + [str(runtime_env), f"root@{host}:/workspace/.mas-secrets/runtime.env"], budget=budget)
             if cookie is not None:
@@ -1643,8 +1643,6 @@ def _run_remote_session(episode, source_url, *, values, commit, rclone_config, b
                     scp + [str(cookie), f"root@{host}:/workspace/.mas-secrets/youtube-cookies.txt"],
                     budget=budget,
                 )
-            _network_retry(scp + [str(rclone_config), f"root@{host}:/workspace/.mas-secrets/rclone.conf"], budget=budget)
-
             deploy_command = (
                 "set -euo pipefail; "
                 "chmod 600 /workspace/.mas-secrets/*; "

@@ -16,16 +16,18 @@ from .runlog import RunLog
 from .runpod_controller import run_remote_episode
 
 
-def _runpod_preflight():
+def _runpod_preflight(*, worker_only=False):
     failures = []
 
-    for name in (
+    required = [
         "MAS_GMAIL_ADDRESS",
         "MAS_GMAIL_APP_PASSWORD",
-        "MAS_DRIVE_STRICT_REMOTE",
         "RUNPOD_POD_ID",
         "RUNPOD_API_KEY",
-    ):
+    ]
+    if not worker_only:
+        required.append("MAS_DRIVE_STRICT_REMOTE")
+    for name in required:
         if not os.getenv(name):
             failures.append(f"{name}: MISSING")
 
@@ -58,10 +60,10 @@ def _runpod_preflight():
     except Exception:
         failures.append("cuda: torch unavailable")
 
-    remote = os.getenv("MAS_DRIVE_STRICT_REMOTE", "")
-    if remote and ":" not in remote:
+    remote = os.getenv("MAS_DRIVE_STRICT_REMOTE", "") if not worker_only else ""
+    if not worker_only and remote and ":" not in remote:
         failures.append("rclone_remote: invalid remote path")
-    elif remote and shutil.which("rclone"):
+    elif not worker_only and remote and shutil.which("rclone"):
         remote_name = remote.split(":", 1)[0] + ":"
         try:
             configured = subprocess.run(
@@ -104,20 +106,23 @@ def _runpod_preflight():
     return 1 if failures else 0
 
 
-def doctor(strict_runpod=False):
+def doctor(strict_runpod=False, runpod_worker=False):
     print("mas doctor")
     for executable in ("python", "ffmpeg", "ffprobe", "git", "rclone"):
         print(f"{executable}: {'OK' if shutil.which(executable) else 'MISSING'}")
-    if strict_runpod:
+    if strict_runpod or runpod_worker:
+        required_tools = ("python", "ffmpeg", "ffprobe", "git")
+        if not runpod_worker:
+            required_tools += ("rclone",)
         missing_tools = [
             executable
-            for executable in ("python", "ffmpeg", "ffprobe", "git", "rclone")
+            for executable in required_tools
             if not shutil.which(executable)
         ]
         if missing_tools:
             print("required_tools: MISSING " + ", ".join(missing_tools), file=sys.stderr)
             return 1
-        return _runpod_preflight()
+        return _runpod_preflight(worker_only=runpod_worker)
     try:
         import torch
         print(f"torch: {torch.__version__}; cuda={torch.cuda.is_available()}")
@@ -176,6 +181,7 @@ def main(argv=None):
     status_parser.add_argument("episode", type=int)
     doctor_parser = commands.add_parser("doctor")
     doctor_parser.add_argument("--strict-runpod", action="store_true")
+    doctor_parser.add_argument("--strict-runpod-worker", action="store_true")
     commands.add_parser("test")
     commands.add_parser("notify-test")
     pilot_parser = commands.add_parser("subtitle-pilot")
@@ -206,7 +212,12 @@ def main(argv=None):
             elif args.command == "status":
                 result = status(args.episode)
             elif args.command == "doctor":
-                result = doctor(True) if args.strict_runpod else doctor()
+                if args.strict_runpod_worker:
+                    result = doctor(runpod_worker=True)
+                elif args.strict_runpod:
+                    result = doctor(strict_runpod=True)
+                else:
+                    result = doctor()
             elif args.command == "test":
                 result = test()
             elif args.command == "notify-test":

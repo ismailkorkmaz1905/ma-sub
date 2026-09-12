@@ -1143,6 +1143,9 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(
     runpod_controller._write_runtime_env(target, values, "a" * 40)
     content = target.read_text(encoding="utf-8")
     assert "export RUNPOD_API_KEY='api secret'" in content
+    assert "MAS_DRIVE_STRICT_REMOTE" not in content
+    assert "RCLONE_CONFIG" not in content
+    assert "gdrive:path with spaces" not in content
     assert "MAS_GIT_COMMIT=" + "a" * 40 in content
     assert "MAS_YTDLP_COOKIES" not in content
     assert "UV_CACHE_DIR=/workspace/.cache/uv" in content

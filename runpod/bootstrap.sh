@@ -62,18 +62,6 @@ if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; 
   done
 fi
 
-if ! command -v rclone >/dev/null 2>&1; then
-  archive="$(mktemp)"
-  extract="$(mktemp -d)"
-  trap 'rm -f "$archive"; rm -rf "$extract"' EXIT
-  curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    --connect-timeout 15 --max-time 300 --retry 3 \
-    https://downloads.rclone.org/v1.75.0/rclone-v1.75.0-linux-amd64.zip \
-    --output "$archive"
-  python3 -m zipfile -e "$archive" "$extract"
-  install -m 755 "$extract/rclone-v1.75.0-linux-amd64/rclone" "$MAS_BIN_DIR/rclone"
-fi
-
 command -v uv >/dev/null 2>&1 || {
   export UV_INSTALL_DIR="$MAS_BIN_DIR"
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
@@ -350,4 +338,4 @@ if evidence["network_volume_free_bytes"] < 1000000000:
     raise RuntimeError("Network volume has less than 1 GB available for source/audio preparation")
 '
 fi
-PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod
+PATH="$VENV/bin:$PATH" ./mas doctor --strict-runpod-worker

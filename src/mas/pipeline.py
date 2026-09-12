@@ -97,6 +97,13 @@ STAGE_NEXT_STEPS = {
 }
 
 
+def _requires_external_delivery():
+    return (
+        os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1"
+        or bool(os.getenv("RUNPOD_POD_ID", "").strip())
+    )
+
+
 def _stage_result_details(name, details, elapsed):
     lines = [
         f"Sonuç: {STAGE_NOTIFICATION_NAMES.get(name, name)} tamamlandı.",
@@ -511,6 +518,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
     encoder = os.getenv("MAS_MP4_ENCODER", "h264_nvenc")
     target = float(os.getenv("MAS_MP4_TARGET_GB", "3"))
     encoder_options = json.loads(os.environ["MAS_MP4_ENCODER_OPTIONS"]) if os.getenv("MAS_MP4_ENCODER_OPTIONS") else None
+    external_delivery = _requires_external_delivery()
     id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
     sample_approval = dirs["review"] / "mp4-sample-approval.json"
     if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1" and encoder != "h264_nvenc":
@@ -834,10 +842,10 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         notify(episode, "MP4 örnekleri inceleme bekliyor", "Örnekleri inceleyip kaynak/ayar bağlı onay kaydını tamamlayın.")
         return WAIT_MP4_SAMPLE
 
-    if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1":
+    if external_delivery:
         write_delivery_export(root, episode)
         set_stage(state_path, state, "drive_readback", "blocked",
-                  reason="local controller will publish after verified GPU shutdown")
+                  reason="external controller must publish after verified GPU shutdown")
         return READY_FOR_DELIVERY
 
     remote_root = os.getenv("MAS_DRIVE_STRICT_REMOTE")
@@ -864,10 +872,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         "Sonraki adım: teslimat makbuzunu arşivleyin.",
     )
     set_stage(state_path, state, "compute_shutdown", "running")
-    if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1":
-        shutdown = {"requested": False, "reason": "external_controller", "delegated": True}
-    else:
-        shutdown = stop_current_pod()
+    shutdown = stop_current_pod()
     set_stage(state_path, state, "compute_shutdown", "pass", **shutdown)
     print("STRICT PASS")
     return 0

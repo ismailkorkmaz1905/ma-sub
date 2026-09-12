@@ -19,6 +19,27 @@ def test_state_module_has_no_unverified_generic_reuse_api():
     assert not hasattr(state, "reusable")
 
 
+def test_runpod_worker_requires_external_delivery(monkeypatch):
+    monkeypatch.delenv("MAS_EXTERNAL_RUNPOD_CONTROLLER", raising=False)
+    monkeypatch.setenv("RUNPOD_POD_ID", "pod123")
+
+    assert pipeline._requires_external_delivery() is True
+
+
+def test_local_worker_keeps_local_delivery(monkeypatch):
+    monkeypatch.delenv("MAS_EXTERNAL_RUNPOD_CONTROLLER", raising=False)
+    monkeypatch.delenv("RUNPOD_POD_ID", raising=False)
+
+    assert pipeline._requires_external_delivery() is False
+
+
+def test_external_controller_requires_external_delivery_without_pod_env(monkeypatch):
+    monkeypatch.setenv("MAS_EXTERNAL_RUNPOD_CONTROLLER", "1")
+    monkeypatch.delenv("RUNPOD_POD_ID", raising=False)
+
+    assert pipeline._requires_external_delivery() is True
+
+
 def test_strict_finalize_input_binding_covers_inputs_and_producer(tmp_path, monkeypatch):
     producer = tmp_path / "producer.py"
     input_path = tmp_path / "input.json"

@@ -202,7 +202,7 @@ export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
 ./runpod/run-episode.sh 11
 ```
 
-`run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. Under the local controller, the controller owns secret cleanup and externally verified shutdown. A standalone in-Pod run retains its provider-side failure-stop fallback.
+`run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. A RunPod worker only prepares and exports the verified delivery, then exits with the collection handoff code. The external controller owns Drive publication, secret cleanup, and externally verified shutdown; a standalone in-Pod run cannot publish or claim shutdown PASS.
 
 When `MAS_RUNPOD_AUTO_MIGRATE=1`, an exact provider "not enough free GPUs"
 response triggers bounded migration instead of failing the episode. The

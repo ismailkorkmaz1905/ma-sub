@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v10"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v11"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 MAX_INDEPENDENT_CONTEXT_RECOVERIES = 32
 DURATION_VAD_FIELDS = frozenset(
@@ -2297,11 +2297,13 @@ def _resolve_alignment_overlaps(
                     )
                     if component_resolved:
                         break
-    pair_edge_overlaps = _unsafe_word_overlaps(
+    live_residual_overlaps = _unsafe_word_overlaps(
         [word for words in selected.values() for word in words]
     )
+    live_residual_components = _overlap_components(live_residual_overlaps, order)
+    live_pairs: list[tuple[str, str]] = []
     seen_pair_edges: set[tuple[str, str]] = set()
-    for left_word, right_word in pair_edge_overlaps:
+    for left_word, right_word in live_residual_overlaps:
         left_uid = str(left_word["utterance_uid"])
         right_uid = str(right_word["utterance_uid"])
         if order[left_uid] > order[right_uid]:
@@ -2310,22 +2312,27 @@ def _resolve_alignment_overlaps(
         if left_uid == right_uid or pair in seen_pair_edges:
             continue
         seen_pair_edges.add(pair)
+        live_pairs.append(pair)
         left_item = by_uid[left_uid]
         right_item = by_uid[right_uid]
-        cut_ms = (
-            int(left_item["coarse_end_ms"])
-            + int(right_item["coarse_start_ms"])
-        ) // 2
+        left_coarse_end = int(left_item["coarse_end_ms"])
+        right_coarse_start = int(right_item["coarse_start_ms"])
+        if left_coarse_end <= right_coarse_start:
+            left_window_end = left_coarse_end
+            right_window_start = right_coarse_start
+        else:
+            left_window_end = right_coarse_start
+            right_window_start = left_coarse_end
         for uid, window_start, window_end, side in (
             (
                 left_uid,
                 int(left_item["start_ms"]),
-                min(int(left_item["end_ms"]), cut_ms),
+                min(int(left_item["end_ms"]), left_window_end),
                 "right",
             ),
             (
                 right_uid,
-                max(int(right_item["start_ms"]), cut_ms),
+                max(int(right_item["start_ms"]), right_window_start),
                 int(right_item["end_ms"]),
                 "left",
             ),
@@ -2357,13 +2364,61 @@ def _resolve_alignment_overlaps(
                 words,
             )
             adaptive_candidate_count += 1
+    for component_index, component_uids in enumerate(
+        live_residual_components, start=1
+    ):
+        if len(component_uids) < 3:
+            continue
+        component_uid_set = set(component_uids)
+        windows = {
+            uid: [int(by_uid[uid]["start_ms"]), int(by_uid[uid]["end_ms"])]
+            for uid in component_uids
+        }
+        for left_uid, right_uid in live_pairs:
+            if left_uid not in component_uid_set or right_uid not in component_uid_set:
+                continue
+            left_coarse_end = int(by_uid[left_uid]["coarse_end_ms"])
+            right_coarse_start = int(by_uid[right_uid]["coarse_start_ms"])
+            if left_coarse_end <= right_coarse_start:
+                left_window_end = left_coarse_end
+                right_window_start = right_coarse_start
+            else:
+                left_window_end = right_coarse_start
+                right_window_start = left_coarse_end
+            windows[left_uid][1] = min(windows[left_uid][1], left_window_end)
+            windows[right_uid][0] = max(windows[right_uid][0], right_window_start)
+        for uid in sorted(component_uids, key=order.__getitem__):
+            window_start, window_end = windows[uid]
+            if window_end <= window_start:
+                continue
+            try:
+                words = _alignment_candidate(
+                    by_uid[uid],
+                    window_start_ms=window_start,
+                    window_end_ms=window_end,
+                    segment_index=order[uid] + 1,
+                    align=align,
+                    align_model=align_model,
+                    align_metadata=align_metadata,
+                    audio=audio,
+                    device=device,
+                    call_kwargs=call_kwargs,
+                    min_word_score=min_word_score,
+                    max_word_duration_ms=max_word_duration_ms,
+                    max_outward_drift_ms=max_outward_drift_ms,
+                    vad_regions=vad_regions,
+                )
+            except Exception:
+                continue
+            add_option(uid, f"component-edge-{component_index}", words)
+            adaptive_candidate_count += 1
     conflict_uids = {
         str(word["utterance_uid"])
-        for overlap in residual_before_partition
+        for overlap in live_residual_overlaps
         for word in overlap
     }
     partition_uids = set(conflict_uids)
-    for component_uids in residual_components:
+    for component_uids in live_residual_components:
         partition_uids.update(contextual_component_uids(component_uids))
     for mode, partition_boundaries in (
         ("partition", boundaries),
@@ -2407,7 +2462,7 @@ def _resolve_alignment_overlaps(
             adaptive_candidate_count += 1
 
     resolved_component_count = 0
-    for seed_uids in residual_components:
+    for seed_uids in live_residual_components:
         component_uids = contextual_component_uids(seed_uids)
         option_sets = [options[uid] for uid in component_uids]
         combination_count = math.prod(len(option_set) for option_set in option_sets)

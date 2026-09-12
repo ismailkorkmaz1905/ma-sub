@@ -11,6 +11,18 @@ from mas import runpod_controller
 from mas.reliability import BudgetExceeded
 
 
+def _remote_identity(request):
+    episode = request["episode"]
+    commit = request["commit"]
+    input_sha = request["input_sha256"]
+    return {
+        "episode": episode,
+        "commit": commit,
+        "input_sha256": input_sha,
+        "token": hashlib.sha256(f"{episode}\n{commit}\n{input_sha}\n".encode()).hexdigest(),
+    }
+
+
 def test_local_tr_return_must_match_current_pack(tmp_path, monkeypatch):
     name = "Muhtemel Ask 11.Bolum"
     pack = tmp_path / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
@@ -389,7 +401,23 @@ def test_expected_terminal_remote_job_keeps_input_identity(tmp_path, exit_code):
     ) == (base, 0)
 
 
-def test_stale_collection_failure_marker_does_not_reset_ready_attempt(tmp_path):
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("format", "mas-remote-result-collection-failure-0"),
+        ("episode", 12),
+        ("base_input_sha256", "d" * 64),
+        ("input_sha256", "d" * 64),
+        ("attempt", 0),
+        ("exit_code", 124),
+        ("request_sha256", "d" * 64),
+        ("relative_path", "work/other.json"),
+        ("storage_path", "/tmp/other.json"),
+        ("envelope_sha256", "d" * 64),
+        ("status_identity", None),
+    ],
+)
+def test_mismatched_collection_failure_marker_fails_closed(tmp_path, field, wrong):
     request_path = tmp_path / "remote-job-request.json"
     status_path = tmp_path / "remote-job-status.json"
     marker_path = tmp_path / "remote-result-collection-failure.json"
@@ -406,31 +434,64 @@ def test_stale_collection_failure_marker_does_not_reset_ready_attempt(tmp_path):
         json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
         encoding="utf-8",
     )
+    status_identity = _remote_identity(request)
+    if field == "status_identity":
+        status_identity["input_sha256"] = "d" * 64
     status_path.write_text(
-        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY}),
+        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY,
+                    "identity": status_identity}),
         encoding="utf-8",
     )
-    stale = {
+    failure = {
         "format": "mas-remote-result-collection-failure-1",
+        "episode": 13,
         "base_input_sha256": base,
-        "input_sha256": base,
-        "attempt": 0,
+        "input_sha256": input_sha,
+        "attempt": 1,
         "exit_code": runpod_controller.READY_FOR_DELIVERY,
-        "request_sha256": "c" * 64,
+        "request_sha256": runpod_controller.digest(request),
+        "relative_path": "work/delivery-export.json",
+        "storage_path": (
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum/"
+            "work/delivery-export.json"
+        ),
     }
+    if field not in {"envelope_sha256", "status_identity"}:
+        failure[field] = wrong
     marker_path.write_text(
-        json.dumps({"data": stale, "sha256": runpod_controller.digest(stale)}),
+        json.dumps({"data": failure, "sha256": (
+            wrong if field == "envelope_sha256" else runpod_controller.digest(failure)
+        )}),
         encoding="utf-8",
     )
 
-    next_sha, attempt = runpod_controller._remote_attempt_identity(
-        base, request_path, status_path
+    with pytest.raises(runpod_controller.RunPodControllerError, match="mismatch"):
+        runpod_controller._remote_attempt_identity(base, request_path, status_path)
+
+
+def test_missing_collection_failure_marker_fails_closed(tmp_path):
+    request_path = tmp_path / "remote-job-request.json"
+    status_path = tmp_path / "remote-job-status.json"
+    base = "a" * 64
+    request = {
+        "commit": "b" * 40,
+        "episode": 13,
+        "input_sha256": base,
+        "base_input_sha256": base,
+        "attempt": 0,
+    }
+    request_path.write_text(
+        json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY,
+                    "identity": _remote_identity(request)}),
+        encoding="utf-8",
     )
 
-    assert attempt == 2
-    assert next_sha == runpod_controller.digest(
-        {"base_input_sha256": base, "attempt": 2}
-    )
+    with pytest.raises(runpod_controller.RunPodControllerError, match="evidence is missing"):
+        runpod_controller._remote_attempt_identity(base, request_path, status_path)
 
 
 def test_delivery_export_failure_records_current_attempt(tmp_path, monkeypatch):
@@ -452,7 +513,8 @@ def test_delivery_export_failure_records_current_attempt(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     status_path.write_text(
-        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY}),
+        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY,
+                    "identity": _remote_identity(request)}),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -482,7 +544,11 @@ def test_delivery_export_failure_records_current_attempt(tmp_path, monkeypatch):
         (work / "remote-result-collection-failure.json").read_text(encoding="utf-8")
     )
     assert marker["sha256"] == runpod_controller.digest(marker["data"])
-    assert "relative_path" not in marker["data"]
+    assert marker["data"]["relative_path"] == "work/delivery-export.json"
+    assert marker["data"]["storage_path"] == (
+        "/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum/"
+        "work/delivery-export.json"
+    )
     assert runpod_controller._remote_attempt_identity(
         base, request_path, status_path
     ) == (
@@ -516,7 +582,8 @@ def test_missing_external_delivery_result_advances_remote_identity(
         encoding="utf-8",
     )
     status_path.write_text(
-        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY}),
+        json.dumps({"status": "EXITED", "exit_code": runpod_controller.READY_FOR_DELIVERY,
+                    "identity": _remote_identity(request)}),
         encoding="utf-8",
     )
     record = {

@@ -1276,6 +1276,12 @@ def _record_result_collection_failure(local_root, exit_code, record=None):
     attempt = data.get("attempt", 0)
     if type(attempt) is not int or attempt < 0:
         raise RunPodControllerError("remote job attempt evidence is invalid")
+    if (not isinstance(record, dict)
+            or not isinstance(record.get("relative_path"), str)
+            or "storage_path" not in record
+            or (record["storage_path"] is not None
+                and not isinstance(record["storage_path"], str))):
+        raise RunPodControllerError("remote collection failure path evidence is incomplete")
     failure = {
         "format": "mas-remote-result-collection-failure-1",
         "episode": data.get("episode"),
@@ -1284,12 +1290,49 @@ def _record_result_collection_failure(local_root, exit_code, record=None):
         "attempt": attempt,
         "exit_code": exit_code,
         "request_sha256": request["sha256"],
+        "relative_path": record["relative_path"],
+        "storage_path": record["storage_path"],
     }
-    if isinstance(record, dict):
-        failure["relative_path"] = record.get("relative_path")
-        failure["storage_path"] = record.get("storage_path")
     atomic_json(work / "remote-result-collection-failure.json",
                 {"data": failure, "sha256": digest(failure)})
+
+
+def _collection_failure_paths_match(failure, data, status_path):
+    relative = failure.get("relative_path")
+    storage = failure.get("storage_path")
+    if ("relative_path" not in failure or "storage_path" not in failure
+            or not isinstance(relative, str) or not relative
+            or (storage is not None and not isinstance(storage, str))):
+        return False
+    episode = data.get("episode")
+    export_relative = "work/delivery-export.json"
+    export_storage = (
+        f"/workspace/ma-sub/EPISODES/Muhtemel Ask {episode}.Bolum/"
+        "work/delivery-export.json"
+    )
+    if relative == export_relative:
+        return storage == export_storage
+    try:
+        safe_relative(status_path.parent.parent, relative)
+    except ValueError:
+        return False
+    external = f"/tmp/mas-ep{episode}-output/{Path(relative).name}"
+    if storage is not None and storage != external:
+        return False
+    manifest_path = status_path.with_name("delivery-export.json")
+    if not manifest_path.is_file():
+        return False
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = manifest.get("files")
+    if (manifest.get("episode") != episode or manifest.get("mode") != "strict"
+            or not isinstance(files, list)):
+        return False
+    return any(
+        isinstance(record, dict)
+        and record.get("relative_path") == relative
+        and record.get("storage_path") == storage
+        for record in files
+    )
 
 
 def _remote_attempt_identity(base_input_sha, request_path, status_path):
@@ -1304,17 +1347,6 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
         raise RunPodControllerError("remote job request integrity mismatch")
     exit_code = status.get("exit_code") if status.get("status") == "EXITED" else None
     failure_path = status_path.with_name("remote-result-collection-failure.json")
-    if exit_code == READY_FOR_DELIVERY and failure_path.is_file():
-        saved = json.loads(failure_path.read_text(encoding="utf-8"))
-        failure = saved.get("data")
-        if not isinstance(failure, dict) or saved.get("sha256") != digest(failure):
-            raise RunPodControllerError("remote result collection failure integrity mismatch")
-        prior_base = data.get("base_input_sha256", data.get("input_sha256"))
-        attempt = data.get("attempt", 0)
-        if type(attempt) is not int or attempt < 0:
-            raise RunPodControllerError("remote job attempt evidence is invalid")
-        if failure.get("format") != "mas-remote-result-collection-failure-1":
-            raise RunPodControllerError("remote result collection failure format mismatch")
     if exit_code == READY_FOR_DELIVERY:
         prior_base = data.get("base_input_sha256", data.get("input_sha256"))
         if prior_base != base_input_sha:
@@ -1322,6 +1354,36 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
         attempt = data.get("attempt", 0)
         if type(attempt) is not int or attempt < 0:
             raise RunPodControllerError("remote job attempt evidence is invalid")
+        expected_status_identity = {
+            "episode": data.get("episode"),
+            "commit": data.get("commit"),
+            "input_sha256": data.get("input_sha256"),
+            "token": hashlib.sha256(
+                (f"{data.get('episode')}\n{data.get('commit')}\n"
+                 f"{data.get('input_sha256')}\n").encode()
+            ).hexdigest(),
+        }
+        if status.get("identity") != expected_status_identity:
+            raise RunPodControllerError("remote result collection status identity mismatch")
+        if not failure_path.is_file():
+            raise RunPodControllerError("remote result collection failure evidence is missing")
+        saved = json.loads(failure_path.read_text(encoding="utf-8"))
+        failure = saved.get("data")
+        if not isinstance(failure, dict) or saved.get("sha256") != digest(failure):
+            raise RunPodControllerError("remote result collection failure integrity mismatch")
+        expected = {
+            "format": "mas-remote-result-collection-failure-1",
+            "episode": data.get("episode"),
+            "base_input_sha256": prior_base,
+            "input_sha256": data.get("input_sha256"),
+            "attempt": attempt,
+            "exit_code": exit_code,
+            "request_sha256": request["sha256"],
+        }
+        if any(failure.get(key) != value for key, value in expected.items()):
+            raise RunPodControllerError("remote result collection failure binding mismatch")
+        if not _collection_failure_paths_match(failure, data, status_path):
+            raise RunPodControllerError("remote result collection failure path mismatch")
         attempt += 1
         return digest({"base_input_sha256": base_input_sha, "attempt": attempt}), attempt
     if exit_code in (None, 0, 20, 21, READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
@@ -1438,7 +1500,10 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
     if exit_code in (READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
         export_name = "delivery-export.json" if exit_code == READY_FOR_DELIVERY else "sample-export.json"
         export_path = temporary / export_name
-        current_record = None
+        current_record = {
+            "relative_path": f"work/{export_name}",
+            "storage_path": f"{remote_root}/work/{export_name}",
+        }
         try:
             _network_retry(scp + [f"root@{host}:{remote_root}/work/{export_name}", str(export_path)],
                            budget=budget, total_timeout=60)
@@ -1446,10 +1511,13 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
             expected_mode = "strict" if exit_code == READY_FOR_DELIVERY else "review"
             if manifest.get("episode") != episode or manifest.get("mode") != expected_mode:
                 raise RunPodControllerError("delivery export identity mismatch")
-            for record in manifest["files"]:
-                current_record = record
-                _download_record(record, local_root, remote_root, scp, host, budget)
             atomic_json(local_root / "work" / export_name, manifest)
+            for record in manifest["files"]:
+                current_record = {
+                    "relative_path": record.get("relative_path"),
+                    "storage_path": record.get("storage_path"),
+                }
+                _download_record(record, local_root, remote_root, scp, host, budget)
         except BaseException:
             if exit_code == READY_FOR_DELIVERY:
                 _record_result_collection_failure(local_root, exit_code, current_record)

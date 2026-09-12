@@ -935,11 +935,11 @@ class ForcedAlignmentTests(unittest.TestCase):
             "Hicbir sey yapmadim Ben ona ne yaptim",
             [call["text"] for call in fake.align_calls],
         )
-        self.assertGreaterEqual(
+        self.assertEqual(
             [call["text"] for call in fake.align_calls].count(
                 "Hicbir sey yapmadim Ben ona ne yaptim"
             ),
-            4,
+            1,
         )
         resolution = data["provenance"]["overlap_resolution"]
         self.assertEqual(resolution["selected_mode_counts"], {"joint": 4})
@@ -1466,12 +1466,16 @@ class ForcedAlignmentTests(unittest.TestCase):
                 }
             ],
         }
-        late_enabled = False
-        joint_texts = []
+        joint_calls = []
 
         def align(transcript, *args, **kwargs):
-            joint_texts.append(transcript[0]["text"])
-            if not late_enabled:
+            call = (
+                transcript[0]["text"],
+                transcript[0]["start"],
+                transcript[0]["end"],
+            )
+            joint_calls.append(call)
+            if call != ("Alpha Bravo", 0.8, 2.2):
                 return _result(
                     [
                         {"word": "Alpha", "start": 1.1, "end": 1.7},
@@ -1485,17 +1489,8 @@ class ForcedAlignmentTests(unittest.TestCase):
                 ]
             )
 
-        original_stabilize = forced_align._stabilize_overlap_selection
-
-        def stabilize(*args, **kwargs):
-            nonlocal late_enabled
-            original_stabilize(*args, **kwargs)
-            late_enabled = True
-
         with patch.object(
             forced_align, "_alignment_candidate", side_effect=ForcedAlignmentError
-        ), patch.object(
-            forced_align, "_stabilize_overlap_selection", side_effect=stabilize
         ):
             selected, _, resolution = forced_align._resolve_alignment_overlaps(
                 source,
@@ -1512,7 +1507,8 @@ class ForcedAlignmentTests(unittest.TestCase):
                 vad_regions=[],
             )
 
-        self.assertEqual(joint_texts[-1], "Alpha Bravo")
+        self.assertEqual(joint_calls[-1], ("Alpha Bravo", 0.8, 2.2))
+        self.assertEqual(len(joint_calls), len(set(joint_calls)))
         self.assertEqual(resolution["selected_mode_counts"], {"joint": 2})
         self.assertEqual(
             (selected["utt-alpha"][0]["start_ms"], selected["utt-alpha"][0]["end_ms"]),
@@ -1578,10 +1574,16 @@ class ForcedAlignmentTests(unittest.TestCase):
         }
         for expected_error, late_words in rejection_cases.items():
             with self.subTest(expected_error=expected_error):
-                late_enabled = False
+                joint_calls = []
 
                 def align(transcript, *args, **kwargs):
-                    if not late_enabled:
+                    call = (
+                        transcript[0]["text"],
+                        transcript[0]["start"],
+                        transcript[0]["end"],
+                    )
+                    joint_calls.append(call)
+                    if call != ("Alpha Bravo", 0.8, 2.2):
                         return _result(
                             [
                                 {"word": "Alpha", "start": 1.1, "end": 1.7},
@@ -1590,21 +1592,10 @@ class ForcedAlignmentTests(unittest.TestCase):
                         )
                     return _result(late_words)
 
-                original_stabilize = forced_align._stabilize_overlap_selection
-
-                def stabilize(*args, **kwargs):
-                    nonlocal late_enabled
-                    original_stabilize(*args, **kwargs)
-                    late_enabled = True
-
                 with patch.object(
                     forced_align,
                     "_alignment_candidate",
                     side_effect=ForcedAlignmentError,
-                ), patch.object(
-                    forced_align,
-                    "_stabilize_overlap_selection",
-                    side_effect=stabilize,
                 ):
                     with self.assertRaisesRegex(
                         ForcedAlignmentError, expected_error
@@ -1623,6 +1614,8 @@ class ForcedAlignmentTests(unittest.TestCase):
                             max_outward_drift_ms=DEFAULT_MAX_OUTWARD_DRIFT_MS,
                             vad_regions=[],
                         )
+                self.assertEqual(joint_calls[-1], ("Alpha Bravo", 0.8, 2.2))
+                self.assertEqual(len(joint_calls), len(set(joint_calls)))
 
     def test_reviewed_dialogue_does_not_establish_distinct_speakers(self) -> None:
         coarse = [

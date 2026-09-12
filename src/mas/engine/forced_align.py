@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v13"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v14"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 MAX_FINAL_STABILIZATION_ROUNDS = 4
 MAX_INDEPENDENT_CONTEXT_RECOVERIES = 32
@@ -2142,6 +2142,7 @@ def _resolve_alignment_overlaps(
         return True
 
     adaptive_candidate_count = 0
+    attempted_joint_calls: set[tuple[int, int, str]] = set()
 
     def add_joint_component_options(
         target_uids: Sequence[str],
@@ -2152,7 +2153,6 @@ def _resolve_alignment_overlaps(
         require_complete: bool = False,
     ) -> bool:
         nonlocal adaptive_candidate_count
-        joint_diagnostics["attempts"] += 1
         target_uid_set = set(target_uids)
         group = [by_uid[uid] for uid in context_uids]
         joint_start = min(int(item["start_ms"]) for item in group)
@@ -2167,13 +2167,19 @@ def _resolve_alignment_overlaps(
                 max(int(item["coarse_end_ms"]) for item in group) + padding_ms,
             )
         joint_text = " ".join(str(item["text"]) for item in group)
+        joint_model_text = _alignment_model_text(joint_text)
+        joint_call = (joint_start, joint_end, joint_model_text)
+        if joint_call in attempted_joint_calls:
+            return False
+        attempted_joint_calls.add(joint_call)
+        joint_diagnostics["attempts"] += 1
         try:
             joint_raw = align(
                 [
                     {
                         "start": joint_start / 1000.0,
                         "end": joint_end / 1000.0,
-                        "text": _alignment_model_text(joint_text),
+                        "text": joint_model_text,
                     }
                 ],
                 align_model,
@@ -2711,6 +2717,7 @@ def _resolve_alignment_overlaps(
                     group_uids,
                     group_uids,
                     f"final-residual-{component_index}-{group_index}",
+                    padding_ms=200,
                     require_complete=True,
                 )
                 if selected_joint and not component_has_unsafe_overlap(seed_uids):

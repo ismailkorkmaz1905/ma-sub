@@ -128,7 +128,7 @@ def _translation_quality_issues(source, target):
     for source_forms, required in RELIGIOUS_RULES:
         if any(form in source_folded for form in source_forms) and required not in target_folded:
             issues.append(f"religious expression must contain: {required}")
-    if "allah" in source_folded and "allah" not in target_folded:
+    if re.search(r"(?<![a-z])allah(?![a-z])", source_folded) and "allah" not in target_folded:
         issues.append("Allah was not preserved")
     return issues
 
@@ -377,7 +377,7 @@ def finalize_emergency_segment(episode, translations, *, root=None):
         "timing_adjustment_count": len(timing_adjustments),
         "maximum_observed_cps": round(max_cps, 6),
         "manifest": _artifact(output / "manifest.json", episode_root),
-        "translation_return": _artifact(Path(translations), episode_root)
+        "translation_return": _artifact(Path(translations).resolve(), episode_root.resolve())
         if Path(translations).resolve().is_relative_to(episode_root.resolve())
         else {
             "path": str(Path(translations).resolve()),

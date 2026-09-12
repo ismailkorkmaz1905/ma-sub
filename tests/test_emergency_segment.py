@@ -130,6 +130,27 @@ def test_finalize_rejects_changed_binding_and_extends_unreadable_translation(tmp
     assert (output / "indonesian_timing_adjustments.jsonl").is_file()
 
 
+def test_finalize_accepts_relative_translation_path_inside_episode(tmp_path, monkeypatch):
+    root, corrected = _episode(tmp_path)
+    prepare_emergency_segment(1, corrected, root=root)
+    output = root / "emergency" / "segment-timing"
+    work = _load_jsonl(output / "translation_work.jsonl")
+    for record in work:
+        record["id_translation"] = "Ya."
+    returned = output / "id_return.jsonl"
+    returned.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in work),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    relative = returned.relative_to(tmp_path)
+    receipt_path = finalize_emergency_segment(1, relative, root=root)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["translation_return"]["path"] == (
+        "emergency/segment-timing/id_return.jsonl"
+    )
+
+
 def test_translation_quality_checks_numbers_names_and_religious_terms():
     issues = _translation_quality_issues(
         "Allah'ım, Kadir 10:30'da gelecek.",
@@ -138,9 +159,10 @@ def test_translation_quality_checks_numbers_names_and_religious_terms():
     assert "numbers changed: ['10:30'] -> ['11:30']" in issues
     assert "canonical name missing: Kadir" in issues
     assert "religious expression must contain: ya allah" in issues
-    assert "Allah was not preserved" in issues
 
     assert not _translation_quality_issues(
         "Allah'ım, Kadir 10:30'da gelecek.",
         "Ya Allah, Kadir akan datang pukul 10:30.",
     )
+    assert not _translation_quality_issues("Vallahi geleceğim.", "Sumpah, aku akan datang.")
+    assert "Allah was not preserved" in _translation_quality_issues("Allah", "Ya...")

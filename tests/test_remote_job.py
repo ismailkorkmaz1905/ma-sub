@@ -22,14 +22,14 @@ def _race_start(root, gate, queue):
         queue.put(("error", str(exc)))
 
 
-def _wait(root, expected, timeout=5):
+def _wait(root, expected, timeout=5, input_sha256=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        value = status_job(root, 13, COMMIT)
+        value = status_job(root, 13, COMMIT, input_sha256)
         if value["status"] == expected:
             return value
         time.sleep(0.02)
-    raise AssertionError(status_job(root, 13, COMMIT))
+    raise AssertionError(status_job(root, 13, COMMIT, input_sha256))
 
 
 @pytest.mark.skipif(os.name != "posix", reason="remote detached jobs require POSIX")
@@ -133,7 +133,7 @@ def test_explicit_recovery_restarts_lost_job_and_preserves_evidence(tmp_path, mo
     assert recovery["identity"] == identity
     assert recovery["records"][0]["state"] == stale_state
     assert recovery["records"][0]["claim"] == stale_claim
-    _wait(tmp_path, "EXITED")
+    _wait(tmp_path, "EXITED", input_sha256="c" * 64)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="remote detached jobs require POSIX")

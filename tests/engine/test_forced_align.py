@@ -1348,6 +1348,282 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertEqual(chosen["utt-0"][1][0]["start_ms"], 0)
         self.assertEqual(attempts, 695)
 
+    def test_final_stabilization_rejects_new_overlap_relation(self) -> None:
+        order = {"utt-a": 0, "utt-b": 1, "utt-c": 2}
+
+        def word(uid, start, end):
+            return [{"utterance_uid": uid, "start_ms": start, "end_ms": end}]
+
+        selected = {
+            "utt-a": word("utt-a", 0, 100),
+            "utt-b": word("utt-b", 50, 150),
+            "utt-c": word("utt-c", 200, 300),
+        }
+        options = {
+            "utt-a": [
+                ("independent", selected["utt-a"]),
+                ("edge-partition", word("utt-a", 220, 260)),
+            ],
+            "utt-b": [("independent", selected["utt-b"])],
+            "utt-c": [("independent", selected["utt-c"])],
+        }
+        modes = {uid: "independent" for uid in selected}
+
+        forced_align._stabilize_overlap_selection(
+            selected,
+            options,
+            modes,
+            order,
+            lambda seed: list(seed),
+        )
+
+        self.assertEqual(
+            forced_align._overlap_pair_signature(selected, order),
+            frozenset({("utt-a", "utt-b")}),
+        )
+        self.assertEqual(selected["utt-a"][0]["start_ms"], 0)
+
+    def test_final_stabilization_resolves_after_overlapping_context_selections(self) -> None:
+        order = {"utt-a": 0, "utt-b": 1, "utt-c": 2}
+
+        def word(uid, start, end):
+            return [{"utterance_uid": uid, "start_ms": start, "end_ms": end}]
+
+        selected = {
+            "utt-a": word("utt-a", 0, 100),
+            "utt-b": word("utt-b", 90, 190),
+            "utt-c": word("utt-c", 180, 280),
+        }
+        options = {
+            "utt-a": [("context-left", selected["utt-a"])],
+            "utt-b": [
+                ("context-right", selected["utt-b"]),
+                ("edge-partition", word("utt-b", 105, 175)),
+            ],
+            "utt-c": [("context-right", selected["utt-c"])],
+        }
+        modes = {
+            "utt-a": "context-left",
+            "utt-b": "context-right",
+            "utt-c": "context-right",
+        }
+
+        forced_align._stabilize_overlap_selection(
+            selected,
+            options,
+            modes,
+            order,
+            lambda seed: ["utt-a", "utt-b", "utt-c"],
+        )
+
+        self.assertFalse(forced_align._overlap_pair_signature(selected, order))
+        self.assertEqual(
+            (selected["utt-b"][0]["start_ms"], selected["utt-b"][0]["end_ms"]),
+            (105, 175),
+        )
+        self.assertEqual(modes["utt-b"], "edge-partition")
+
+    def test_final_residual_single_path_resolves_adjacent_disjoint_cues(self) -> None:
+        source = validate_coarse_segments(
+            [
+                {
+                    "start_ms": 500,
+                    "end_ms": 2200,
+                    "coarse_start_ms": 1000,
+                    "coarse_end_ms": 1500,
+                    "text": "Alpha",
+                    "asr_text": "Alpha",
+                    "deletion_audio_reviewed": False,
+                    "utterance_uid": "utt-alpha",
+                },
+                {
+                    "start_ms": 800,
+                    "end_ms": 2800,
+                    "coarse_start_ms": 1500,
+                    "coarse_end_ms": 2000,
+                    "text": "Bravo",
+                    "asr_text": "Bravo",
+                    "deletion_audio_reviewed": False,
+                    "utterance_uid": "utt-bravo",
+                },
+            ]
+        )
+        independent = {
+            "utt-alpha": [
+                {
+                    "utterance_uid": "utt-alpha",
+                    "text": "Alpha",
+                    "start_ms": 1100,
+                    "end_ms": 1700,
+                }
+            ],
+            "utt-bravo": [
+                {
+                    "utterance_uid": "utt-bravo",
+                    "text": "Bravo",
+                    "start_ms": 1600,
+                    "end_ms": 1900,
+                }
+            ],
+        }
+        late_enabled = False
+        joint_texts = []
+
+        def align(transcript, *args, **kwargs):
+            joint_texts.append(transcript[0]["text"])
+            if not late_enabled:
+                return _result(
+                    [
+                        {"word": "Alpha", "start": 1.1, "end": 1.7},
+                        {"word": "Bravo", "start": 1.6, "end": 1.9},
+                    ]
+                )
+            return _result(
+                [
+                    {"word": "Alpha", "start": 1.1, "end": 1.4},
+                    {"word": "Bravo", "start": 1.6, "end": 1.9},
+                ]
+            )
+
+        original_stabilize = forced_align._stabilize_overlap_selection
+
+        def stabilize(*args, **kwargs):
+            nonlocal late_enabled
+            original_stabilize(*args, **kwargs)
+            late_enabled = True
+
+        with patch.object(
+            forced_align, "_alignment_candidate", side_effect=ForcedAlignmentError
+        ), patch.object(
+            forced_align, "_stabilize_overlap_selection", side_effect=stabilize
+        ):
+            selected, _, resolution = forced_align._resolve_alignment_overlaps(
+                source,
+                independent,
+                align=align,
+                align_model=object(),
+                align_metadata={},
+                audio=object(),
+                device="cuda",
+                call_kwargs={},
+                min_word_score=DEFAULT_MIN_WORD_SCORE,
+                max_word_duration_ms=DEFAULT_MAX_WORD_DURATION_MS,
+                max_outward_drift_ms=DEFAULT_MAX_OUTWARD_DRIFT_MS,
+                vad_regions=[],
+            )
+
+        self.assertEqual(joint_texts[-1], "Alpha Bravo")
+        self.assertEqual(resolution["selected_mode_counts"], {"joint": 2})
+        self.assertEqual(
+            (selected["utt-alpha"][0]["start_ms"], selected["utt-alpha"][0]["end_ms"]),
+            (1100, 1400),
+        )
+        self.assertEqual(
+            (selected["utt-bravo"][0]["start_ms"], selected["utt-bravo"][0]["end_ms"]),
+            (1600, 1900),
+        )
+
+    def test_final_residual_single_path_rejects_mismatch_and_low_score(self) -> None:
+        source = validate_coarse_segments(
+            [
+                {
+                    "start_ms": 500,
+                    "end_ms": 2200,
+                    "coarse_start_ms": 1000,
+                    "coarse_end_ms": 1500,
+                    "text": "Alpha",
+                    "asr_text": "Alpha",
+                    "deletion_audio_reviewed": False,
+                    "utterance_uid": "utt-alpha",
+                },
+                {
+                    "start_ms": 800,
+                    "end_ms": 2800,
+                    "coarse_start_ms": 1500,
+                    "coarse_end_ms": 2000,
+                    "text": "Bravo",
+                    "asr_text": "Bravo",
+                    "deletion_audio_reviewed": False,
+                    "utterance_uid": "utt-bravo",
+                },
+            ]
+        )
+        independent = {
+            "utt-alpha": [
+                {
+                    "utterance_uid": "utt-alpha",
+                    "text": "Alpha",
+                    "start_ms": 1100,
+                    "end_ms": 1700,
+                }
+            ],
+            "utt-bravo": [
+                {
+                    "utterance_uid": "utt-bravo",
+                    "text": "Bravo",
+                    "start_ms": 1600,
+                    "end_ms": 1900,
+                }
+            ],
+        }
+        rejection_cases = {
+            "lexical alignment coverage failed": [
+                {"word": "Bravo", "start": 1.1, "end": 1.4},
+                {"word": "Alpha", "start": 1.6, "end": 1.9},
+            ],
+            "below the required minimum": [
+                {"word": "Alpha", "start": 1.1, "end": 1.4},
+                {"word": "Bravo", "start": 1.6, "end": 1.9, "score": 0.01},
+            ],
+        }
+        for expected_error, late_words in rejection_cases.items():
+            with self.subTest(expected_error=expected_error):
+                late_enabled = False
+
+                def align(transcript, *args, **kwargs):
+                    if not late_enabled:
+                        return _result(
+                            [
+                                {"word": "Alpha", "start": 1.1, "end": 1.7},
+                                {"word": "Bravo", "start": 1.6, "end": 1.9},
+                            ]
+                        )
+                    return _result(late_words)
+
+                original_stabilize = forced_align._stabilize_overlap_selection
+
+                def stabilize(*args, **kwargs):
+                    nonlocal late_enabled
+                    original_stabilize(*args, **kwargs)
+                    late_enabled = True
+
+                with patch.object(
+                    forced_align,
+                    "_alignment_candidate",
+                    side_effect=ForcedAlignmentError,
+                ), patch.object(
+                    forced_align,
+                    "_stabilize_overlap_selection",
+                    side_effect=stabilize,
+                ):
+                    with self.assertRaisesRegex(
+                        ForcedAlignmentError, expected_error
+                    ):
+                        forced_align._resolve_alignment_overlaps(
+                            source,
+                            independent,
+                            align=align,
+                            align_model=object(),
+                            align_metadata={},
+                            audio=object(),
+                            device="cuda",
+                            call_kwargs={},
+                            min_word_score=DEFAULT_MIN_WORD_SCORE,
+                            max_word_duration_ms=DEFAULT_MAX_WORD_DURATION_MS,
+                            max_outward_drift_ms=DEFAULT_MAX_OUTWARD_DRIFT_MS,
+                            vad_regions=[],
+                        )
+
     def test_reviewed_dialogue_does_not_establish_distinct_speakers(self) -> None:
         coarse = [
             {

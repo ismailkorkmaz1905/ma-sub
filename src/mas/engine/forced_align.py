@@ -51,8 +51,9 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v11"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v13"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
+MAX_FINAL_STABILIZATION_ROUNDS = 4
 MAX_INDEPENDENT_CONTEXT_RECOVERIES = 32
 DURATION_VAD_FIELDS = frozenset(
     {
@@ -1886,6 +1887,142 @@ def _bounded_overlap_search(
     return search({}, component_uids), search_attempts
 
 
+def _overlap_pair_signature(
+    selected: Mapping[str, list[dict[str, Any]]],
+    order: Mapping[str, int],
+) -> frozenset[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    words = [word for aligned in selected.values() for word in aligned]
+    for left, right in _unsafe_word_overlaps(words):
+        left_uid = str(left["utterance_uid"])
+        right_uid = str(right["utterance_uid"])
+        if (order[left_uid], left_uid) > (order[right_uid], right_uid):
+            left_uid, right_uid = right_uid, left_uid
+        pairs.add((left_uid, right_uid))
+    return frozenset(pairs)
+
+
+def _strict_existing_option_selection(
+    component_uids: Sequence[str],
+    options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
+    selected: Mapping[str, list[dict[str, Any]]],
+    order: Mapping[str, int],
+) -> dict[str, tuple[str, list[dict[str, Any]]]] | None:
+    option_sets = [options[uid] for uid in component_uids]
+    combination_count = math.prod(len(option_set) for option_set in option_sets)
+    if combination_count > MAX_OVERLAP_COMBINATIONS:
+        chosen, _ = _bounded_overlap_search(
+            component_uids,
+            options,
+            selected,
+            order,
+            MAX_OVERLAP_COMBINATIONS,
+        )
+        return chosen
+    component_uid_set = set(component_uids)
+    envelope_start = min(
+        int(word["start_ms"])
+        for option_set in option_sets
+        for _, words in option_set
+        for word in words
+    )
+    envelope_end = max(
+        int(word["end_ms"])
+        for option_set in option_sets
+        for _, words in option_set
+        for word in words
+    )
+    outside_words = [
+        word
+        for uid, words in selected.items()
+        if uid not in component_uid_set
+        for word in words
+        if int(word["end_ms"]) > envelope_start
+        and int(word["start_ms"]) < envelope_end
+    ]
+    best: tuple[Any, ...] | None = None
+    best_score: tuple[int, int, int] | None = None
+    for combination in itertools.product(*option_sets):
+        trial_words = outside_words + [
+            word for _, words in combination for word in words
+        ]
+        if any(
+            str(left["utterance_uid"]) in component_uid_set
+            or str(right["utterance_uid"]) in component_uid_set
+            for left, right in _unsafe_word_overlaps(trial_words)
+        ):
+            continue
+        score = (
+            sum(mode == "joint" for mode, _ in combination),
+            sum(mode == "independent" for mode, _ in combination),
+            sum(mode.startswith("padding-") for mode, _ in combination),
+        )
+        if best_score is None or score > best_score:
+            best = combination
+            best_score = score
+    if best is None:
+        return None
+    return dict(zip(component_uids, best))
+
+
+def _stabilize_overlap_selection(
+    selected: dict[str, list[dict[str, Any]]],
+    options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
+    selected_mode_by_uid: dict[str, str],
+    order: Mapping[str, int],
+    contextual_component_uids: Any,
+) -> None:
+    for _ in range(MAX_FINAL_STABILIZATION_ROUNDS):
+        round_signature = _overlap_pair_signature(selected, order)
+        if not round_signature:
+            return
+        overlaps = _unsafe_word_overlaps(
+            [word for words in selected.values() for word in words]
+        )
+        components = _overlap_components(overlaps, order)
+        changed = False
+        for seed_uids in components:
+            current_signature = _overlap_pair_signature(selected, order)
+            if not any(
+                left in seed_uids or right in seed_uids
+                for left, right in current_signature
+            ):
+                continue
+            component_uids = contextual_component_uids(seed_uids)
+            candidate_options = {
+                uid: list(options[uid]) for uid in component_uids
+            }
+            for uid in component_uids:
+                selected_option = (
+                    selected_mode_by_uid[uid],
+                    selected[uid],
+                )
+                if not any(
+                    mode == selected_option[0] and words == selected_option[1]
+                    for mode, words in candidate_options[uid]
+                ):
+                    candidate_options[uid].append(selected_option)
+            chosen = _strict_existing_option_selection(
+                component_uids,
+                candidate_options,
+                selected,
+                order,
+            )
+            if chosen is None:
+                continue
+            trial = dict(selected)
+            trial.update({uid: option[1] for uid, option in chosen.items()})
+            trial_signature = _overlap_pair_signature(trial, order)
+            if not trial_signature < current_signature:
+                continue
+            for uid, (mode, words) in chosen.items():
+                selected[uid] = words
+                selected_mode_by_uid[uid] = mode
+            changed = True
+        if not changed or not _overlap_pair_signature(selected, order) < round_signature:
+            return
+
+
 def _resolve_alignment_overlaps(
     source: Sequence[Mapping[str, Any]],
     independent: Mapping[str, list[dict[str, Any]]],
@@ -2012,6 +2149,7 @@ def _resolve_alignment_overlaps(
         component_index: str,
         *,
         padding_ms: int | None = None,
+        require_complete: bool = False,
     ) -> bool:
         nonlocal adaptive_candidate_count
         joint_diagnostics["attempts"] += 1
@@ -2103,11 +2241,6 @@ def _resolve_alignment_overlaps(
                     joint_diagnostics["candidate_validation_failures"] += 1
                     record_joint_failure(f"{component_index}/{uid}: {exc}")
                     continue
-                before = len(options[uid])
-                add_option(uid, "joint", words)
-                added = len(options[uid]) - before
-                adaptive_candidate_count += added
-                joint_diagnostics["candidate_options_added"] += added
                 joint_candidates[uid] = words
         except Exception as exc:
             joint_diagnostics["align_failures"] += 1
@@ -2115,6 +2248,15 @@ def _resolve_alignment_overlaps(
             return False
         if not joint_candidates:
             return False
+        if require_complete and set(joint_candidates) != target_uid_set:
+            return False
+        if not require_complete:
+            for uid, words in joint_candidates.items():
+                before = len(options[uid])
+                add_option(uid, "joint", words)
+                added = len(options[uid]) - before
+                adaptive_candidate_count += added
+                joint_diagnostics["candidate_options_added"] += added
         active_coarse: list[Mapping[str, Any]] = []
         for item in sorted(
             (by_uid[uid] for uid in joint_candidates),
@@ -2150,6 +2292,13 @@ def _resolve_alignment_overlaps(
             for left, right in _unsafe_word_overlaps(trial_words)
         ):
             return False
+        if require_complete:
+            for uid, words in joint_candidates.items():
+                before = len(options[uid])
+                add_option(uid, "joint", words)
+                added = len(options[uid]) - before
+                adaptive_candidate_count += added
+                joint_diagnostics["candidate_options_added"] += added
         for uid, words in joint_candidates.items():
             selected[uid] = words
             selected_mode_by_uid[uid] = "joint"
@@ -2533,6 +2682,47 @@ def _resolve_alignment_overlaps(
             selected[uid] = words
             selected_mode_by_uid[uid] = mode
         resolved_component_count += 1
+
+    _stabilize_overlap_selection(
+        selected,
+        options,
+        selected_mode_by_uid,
+        order,
+        contextual_component_uids,
+    )
+
+    final_residual_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    if final_residual_overlaps:
+        final_residual_components = _overlap_components(
+            final_residual_overlaps, order
+        )
+        for component_index, seed_uids in enumerate(
+            final_residual_components, start=1
+        ):
+            component_uids = sorted(seed_uids, key=order.__getitem__)
+            context_uids = contextual_component_uids(component_uids, radius=1)
+            candidate_groups = [component_uids]
+            if context_uids != component_uids:
+                candidate_groups.append(context_uids)
+            for group_index, group_uids in enumerate(candidate_groups, start=1):
+                selected_joint = add_joint_component_options(
+                    group_uids,
+                    group_uids,
+                    f"final-residual-{component_index}-{group_index}",
+                    require_complete=True,
+                )
+                if selected_joint and not component_has_unsafe_overlap(seed_uids):
+                    resolved_component_count += 1
+                    break
+        _stabilize_overlap_selection(
+            selected,
+            options,
+            selected_mode_by_uid,
+            order,
+            contextual_component_uids,
+        )
 
     assigned_speakers: dict[str, str] = {}
     acoustic_components: list[dict[str, Any]] = []

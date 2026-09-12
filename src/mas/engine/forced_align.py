@@ -51,7 +51,7 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v9"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v10"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 MAX_INDEPENDENT_CONTEXT_RECOVERIES = 32
 DURATION_VAD_FIELDS = frozenset(
@@ -2297,6 +2297,63 @@ def _resolve_alignment_overlaps(
                     )
                     if component_resolved:
                         break
+    seen_pair_edges: set[tuple[str, str]] = set()
+    for left_word, right_word in residual_before_partition:
+        left_uid = str(left_word["utterance_uid"])
+        right_uid = str(right_word["utterance_uid"])
+        if order[left_uid] > order[right_uid]:
+            left_uid, right_uid = right_uid, left_uid
+        pair = (left_uid, right_uid)
+        if left_uid == right_uid or pair in seen_pair_edges:
+            continue
+        seen_pair_edges.add(pair)
+        left_item = by_uid[left_uid]
+        right_item = by_uid[right_uid]
+        cut_ms = (
+            int(left_item["coarse_end_ms"])
+            + int(right_item["coarse_start_ms"])
+        ) // 2
+        for uid, window_start, window_end, side in (
+            (
+                left_uid,
+                int(left_item["start_ms"]),
+                min(int(left_item["end_ms"]), cut_ms),
+                "right",
+            ),
+            (
+                right_uid,
+                max(int(right_item["start_ms"]), cut_ms),
+                int(right_item["end_ms"]),
+                "left",
+            ),
+        ):
+            if window_end <= window_start:
+                continue
+            try:
+                words = _alignment_candidate(
+                    by_uid[uid],
+                    window_start_ms=window_start,
+                    window_end_ms=window_end,
+                    segment_index=order[uid] + 1,
+                    align=align,
+                    align_model=align_model,
+                    align_metadata=align_metadata,
+                    audio=audio,
+                    device=device,
+                    call_kwargs=call_kwargs,
+                    min_word_score=min_word_score,
+                    max_word_duration_ms=max_word_duration_ms,
+                    max_outward_drift_ms=max_outward_drift_ms,
+                    vad_regions=vad_regions,
+                )
+            except Exception:
+                continue
+            add_option(
+                uid,
+                f"pair-edge-{side}-{order[left_uid] + 1}-{order[right_uid] + 1}",
+                words,
+            )
+            adaptive_candidate_count += 1
     conflict_uids = {
         str(word["utterance_uid"])
         for overlap in residual_before_partition

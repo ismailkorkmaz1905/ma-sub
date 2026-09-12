@@ -432,6 +432,37 @@ class ForcedAlignmentTests(unittest.TestCase):
         validate_forced_alignment_data(data)
 
     @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_checkpointed_alignment_marks_each_ctc_call(self, _model_hash):
+        results = [
+            _result([
+                {"word": "Merhaba,", "start": 1.1, "end": 1.4},
+                {"word": "dünya!", "start": 1.5, "end": 1.9},
+            ]),
+            _result([{"word": "Nasılsın?", "start": 4.1, "end": 4.7}]),
+        ]
+        marks = []
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "mas.engine.forced_align.mark_work_progress",
+                side_effect=lambda stage, **kwargs: marks.append((stage, kwargs)),
+            ):
+                align_corrected_segments(
+                    self._audio(directory),
+                    _coarse(),
+                    whisperx_module=_FakeWhisperX(results),
+                    checkpoint_dir=Path(directory) / "units",
+                )
+
+        self.assertEqual(
+            [
+                kwargs["completed"]
+                for stage, kwargs in marks
+                if stage == "forced_alignment:ctc"
+            ],
+            [1, 2],
+        )
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
     def test_changed_raw_alignment_producer_invalidates_cached_calls(
         self, _model_hash
     ):

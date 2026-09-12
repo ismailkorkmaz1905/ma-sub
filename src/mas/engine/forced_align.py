@@ -2297,8 +2297,11 @@ def _resolve_alignment_overlaps(
                     )
                     if component_resolved:
                         break
+    pair_edge_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
     seen_pair_edges: set[tuple[str, str]] = set()
-    for left_word, right_word in residual_before_partition:
+    for left_word, right_word in pair_edge_overlaps:
         left_uid = str(left_word["utterance_uid"])
         right_uid = str(right_word["utterance_uid"])
         if order[left_uid] > order[right_uid]:
@@ -2646,22 +2649,29 @@ def align_corrected_segments(
             ),
         })
         model_align = align
+        alignment_call_count = 0
 
         def align(transcript, model, metadata, audio, device, **kwargs):
+            nonlocal alignment_call_count
             key = digest({"transcript": transcript, "kwargs": kwargs})
             cached = journal.read(key)
-            if cached is not None:
-                return cached
-            result = _execute_alignment_call(
-                model_align,
-                transcript,
-                model,
-                metadata,
-                audio,
-                device,
-                kwargs,
+            if cached is None:
+                result = _execute_alignment_call(
+                    model_align,
+                    transcript,
+                    model,
+                    metadata,
+                    audio,
+                    device,
+                    kwargs,
+                )
+                journal.write(key, result)
+            else:
+                result = cached
+            alignment_call_count += 1
+            mark_work_progress(
+                "forced_alignment:ctc", completed=alignment_call_count
             )
-            journal.write(key, result)
             return result
 
     aligned_segments: list[dict[str, Any]] = []

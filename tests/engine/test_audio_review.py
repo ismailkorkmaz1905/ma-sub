@@ -7,13 +7,13 @@ import json
 import tempfile
 import unittest
 import wave
-from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
 from mas.engine.audio_review import (
-    _EP13_C0E3_AUDIO_REVIEW_CODE_SHA256,
+    _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256,
+    _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256,
     _FasterWhisperReviewDecoder,
     _report_sha,
     _write_exact_target_crop,
@@ -25,10 +25,8 @@ from mas.engine.audio_review import (
 from mas.engine.tr_correction import (
     create_tr_correction_output,
     create_tr_correction_pack,
-    read_tr_correction_pack,
     validate_tr_correction_output,
 )
-from mas.hashing import sha256_json
 
 
 AUDIT = {
@@ -740,7 +738,7 @@ class AudioReviewV2Tests(unittest.TestCase):
             self.assertEqual(hydrated, completed)
             self.assertEqual(resumed_decoder.call_count, 0)
 
-    def test_completed_ep13_review_hydrates_from_c0e3_producer_identity(self) -> None:
+    def test_completed_ep13_review_hydrates_only_exact_legacy_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = _make_files(Path(directory), episode=13)
             settings = AudioReviewV2Config(
@@ -752,22 +750,29 @@ class AudioReviewV2Tests(unittest.TestCase):
                 decoder=FakeDecoder([_decoded()]),
                 progress=None,
             )
-            pack = read_tr_correction_pack(paths[0])
-            provisional = validate_tr_correction_output(paths[0], paths[1])
             report = json.loads(paths[3].read_text(encoding="utf-8"))
-            report["review_input_sha256"] = sha256_json(
-                {
-                    "correction_input_sha256": pack.manifest["input_sha256"],
-                    "provisional_output_sha256": provisional.output_sha256,
-                    "config": asdict(settings),
-                    "code_sha256": _EP13_C0E3_AUDIO_REVIEW_CODE_SHA256,
-                }
-            )
+            report["review_input_sha256"] = "0" * 64
             report["audio_review_sha256"] = _report_sha(report)
             paths[3].write_text(json.dumps(report), encoding="utf-8")
             report_before = paths[3].read_bytes()
             final_before = paths[2].read_bytes()
             resumed_decoder = FakeDecoder([])
+            import mas.engine.audio_review as audio_review_module
+
+            real_sha256_file = audio_review_module.sha256_file
+
+            def artifact_sha256(path):
+                candidate = Path(path)
+                if candidate == paths[3]:
+                    return _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256
+                if candidate == paths[2]:
+                    return _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256
+                return real_sha256_file(path)
+
+            audio_review_module.sha256_file = artifact_sha256
+            self.addCleanup(
+                setattr, audio_review_module, "sha256_file", real_sha256_file
+            )
 
             hydrated = resolve_tr_audio_reviews_v2(
                 *paths,
@@ -781,7 +786,17 @@ class AudioReviewV2Tests(unittest.TestCase):
             self.assertEqual(paths[2].read_bytes(), final_before)
             self.assertEqual(paths[3].read_bytes(), report_before)
 
-    def test_c0e3_producer_identity_is_not_accepted_for_other_episodes(self) -> None:
+            with self.assertRaisesRegex(
+                AudioReviewV2Error, "different inputs, config, or code"
+            ):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    config=AudioReviewV2Config(beam_size=settings.beam_size + 1),
+                    decoder=FakeDecoder([]),
+                    progress=None,
+                )
+
+    def test_legacy_artifact_allowlist_is_not_accepted_for_other_episodes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = _make_files(Path(directory))
             resolve_tr_audio_reviews_v2(
@@ -789,18 +804,26 @@ class AudioReviewV2Tests(unittest.TestCase):
                 decoder=FakeDecoder([_decoded()]),
                 progress=None,
             )
-            pack = read_tr_correction_pack(paths[0])
-            provisional = validate_tr_correction_output(paths[0], paths[1])
             report = json.loads(paths[3].read_text(encoding="utf-8"))
-            identity = {
-                "correction_input_sha256": pack.manifest["input_sha256"],
-                "provisional_output_sha256": provisional.output_sha256,
-                "config": asdict(AudioReviewV2Config()),
-                "code_sha256": _EP13_C0E3_AUDIO_REVIEW_CODE_SHA256,
-            }
-            report["review_input_sha256"] = sha256_json(identity)
+            report["review_input_sha256"] = "0" * 64
             report["audio_review_sha256"] = _report_sha(report)
             paths[3].write_text(json.dumps(report), encoding="utf-8")
+            import mas.engine.audio_review as audio_review_module
+
+            real_sha256_file = audio_review_module.sha256_file
+
+            def artifact_sha256(path):
+                candidate = Path(path)
+                if candidate == paths[3]:
+                    return _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256
+                if candidate == paths[2]:
+                    return _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256
+                return real_sha256_file(path)
+
+            audio_review_module.sha256_file = artifact_sha256
+            self.addCleanup(
+                setattr, audio_review_module, "sha256_file", real_sha256_file
+            )
 
             with self.assertRaisesRegex(
                 AudioReviewV2Error, "different inputs, config, or code"

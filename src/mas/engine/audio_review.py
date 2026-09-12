@@ -963,8 +963,11 @@ def _report_sha(report: Mapping[str, Any]) -> str:
     )
 
 
-_EP13_C0E3_AUDIO_REVIEW_CODE_SHA256 = (
-    "db54921d324f35f5fc7eefa3435806388b2aed88ba529f9f79b4b1b716bdc2b5"
+_EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256 = (
+    "47540a5da0ca4f65b6c09b1865795d3690aa545ff3b1426cac5c0e512bc42138"
+)
+_EP13_LEGACY_TR_CORRECTED_ZIP_SHA256 = (
+    "b026480b2b8a08a68f4c068bb669f55a4753701301d682d21461f6b8df51471f"
 )
 
 
@@ -1697,15 +1700,17 @@ def resolve_tr_audio_reviews_v2(
             report_file,
         )
         completed_input_sha256 = completed.get("review_input_sha256")
-        legacy_identity = dict(identity)
-        legacy_identity["code_sha256"] = _EP13_C0E3_AUDIO_REVIEW_CODE_SHA256
-        legacy_ep13_input_sha256 = sha256_json(legacy_identity)
+        legacy_ep13_artifact = (
+            pack.manifest["episode"] == 13
+            and completed.get("config") == asdict(settings)
+            and sha256_file(report_file)
+            == _EP13_LEGACY_AUDIO_REVIEW_REPORT_SHA256
+            and sha256_file(final_output_file)
+            == _EP13_LEGACY_TR_CORRECTED_ZIP_SHA256
+        )
         if (
             completed_input_sha256 != review_input_sha256
-            and not (
-                pack.manifest["episode"] == 13
-                and completed_input_sha256 == legacy_ep13_input_sha256
-            )
+            and not legacy_ep13_artifact
         ):
             raise AudioReviewV2Error(
                 "Completed audio-review output belongs to different inputs, config, or code; preserve it"

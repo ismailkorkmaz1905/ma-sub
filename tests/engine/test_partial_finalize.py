@@ -6,7 +6,7 @@ import shutil
 import pytest
 
 import test_finalize as finalize_fixture
-from mas.engine import partial_finalize as partial
+from mas.engine import partial_finalize as partial, raw_asr
 from mas.engine.download import write_stage_marker
 from mas.engine.episode_archive import file_record
 from mas.engine.id_translation import create_id_translation_pack
@@ -16,6 +16,14 @@ from mas.reliability import atomic_json, digest
 
 @pytest.fixture
 def partial_fixture(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAS_RAW_ASR_AUTH_KEY", "1" * 64)
+    model_dir = tmp_path / "synthetic-model"
+    model_dir.mkdir()
+    for name in ("model.bin", "config.json", "tokenizer.json"):
+        (model_dir / name).write_bytes(b"fixture-model")
+    monkeypatch.setattr(raw_asr.primary_checkpoint, "resolve_model", lambda *_: model_dir)
+    monkeypatch.setattr(raw_asr.primary_checkpoint, "producer_identity",
+                        lambda *_: {"fixture_decoder": "synthetic-1"})
     old = finalize_fixture.FinalizeV2Tests()
     root, paths = old._workspace(str(tmp_path))
     old._inputs(root, paths)
@@ -37,6 +45,8 @@ def partial_fixture(tmp_path, monkeypatch):
         shutil.copyfile(paths[key], child_paths[key])
     raw = json.loads(child_paths['raw'].read_text(encoding='utf-8'))
     raw['audio_path'] = str(child_paths['audio'].resolve())
+    raw["producer_identity"] = raw_asr._completed_raw_asr_producer_identity()
+    raw = raw_asr._sign_raw_asr_artifact(raw, bytes.fromhex("1" * 64))
     atomic_json(child_paths['raw'], raw)
     write_stage_marker(child_paths['raw_marker'], stage='raw_asr_v2', input_sha256=raw['input_sha256'],
                        outputs={'raw_asr_v2': child_paths['raw']}, details={'audio_sha256': raw['audio_sha256']})
@@ -158,3 +168,67 @@ def test_finalizer_does_not_continue_or_publish_after_child_proof_exhausts_budge
     with pytest.raises(TimeoutError):
         partial.finalize_partial_episode(root, 12, 'part-001', total_timeout=1)
     assert not (child / 'work/partial-export.json').exists()
+
+
+@pytest.mark.parametrize('mutation', ['remove_signature', 'change_report', 'change_subtitle'])
+def test_partial_export_cannot_be_resealed_with_only_sha256(partial_fixture, mutation):
+    root, child, _, _, _, _ = partial_fixture
+    partial.finalize_partial_episode(root, 12, 'part-001')
+    export_path = child / 'work/partial-export.json'
+    export = json.loads(export_path.read_text(encoding='utf-8'))
+    report_path = root / export['report']['relative_path']
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    if mutation == 'remove_signature':
+        export.pop('producer_auth_tag')
+    else:
+        if mutation == 'change_report':
+            report['input_files'].pop('raw_asr_v2')
+        else:
+            subtitle = root / report['outputs']['id_srt']['relative_path']
+            text = subtitle.read_text(encoding='utf-8')
+            subtitle.write_text(text.replace('Defne 12 datang.', 'X' * 100), encoding='utf-8')
+            report['outputs']['id_srt'] = file_record(subtitle, root)
+        atomic_json(report_path, report)
+        export['report'] = file_record(report_path, root)
+        export['files'] = [file_record(root / record['relative_path'], root) for record in export['files']]
+    atomic_json(export_path, export)
+    with pytest.raises(ValueError, match='authentication'):
+        partial.validate_partial_export(root, 12, 'part-001')
+
+
+@pytest.mark.parametrize('key', ['', '2' * 64])
+def test_partial_export_rejects_missing_or_rotated_key(partial_fixture, monkeypatch, key):
+    root, _, _, _, _, _ = partial_fixture
+    partial.finalize_partial_episode(root, 12, 'part-001')
+    monkeypatch.setenv('MAS_RAW_ASR_AUTH_KEY', key)
+    with pytest.raises((ValueError, raw_asr.TranscriptionError)):
+        partial.validate_partial_export(root, 12, 'part-001')
+
+
+def test_partial_export_rejects_current_policy_change(partial_fixture):
+    root, _, _, _, _, _ = partial_fixture
+    partial.finalize_partial_episode(root, 12, 'part-001')
+    config = root.parent.parent / 'config/production/series.yaml'
+    config.write_text(config.read_text(encoding='utf-8') + '\n# policy changed\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='producer/configuration identity changed'):
+        partial.validate_partial_export(root, 12, 'part-001')
+
+
+def test_partial_finalizer_cannot_sign_an_unsigned_raw_artifact(partial_fixture):
+    root, child, _, paths, _, _ = partial_fixture
+    raw = json.loads(paths['raw'].read_text(encoding='utf-8'))
+    raw.pop('raw_asr_auth_tag')
+    atomic_json(paths['raw'], raw)
+    write_stage_marker(paths['raw_marker'], stage='raw_asr_v2', input_sha256=raw['input_sha256'],
+                       outputs={'raw_asr_v2': paths['raw']}, details={'audio_sha256': raw['audio_sha256']})
+    with pytest.raises(raw_asr.TranscriptionError, match='authentication failed'):
+        partial.finalize_partial_episode(root, 12, 'part-001')
+    assert not (child / 'work/partial-export.json').exists()
+
+
+def test_partial_inventory_is_not_defined_by_the_report_itself(partial_fixture):
+    root, child, _, _, plan, derived = partial_fixture
+    report = partial.finalize_partial_episode(root, 12, 'part-001')
+    report['input_files'].pop('tr_pack')
+    with pytest.raises(ValueError, match='complete canonical strict evidence inventory'):
+        partial._require_partial_inventory(report, plan, derived)

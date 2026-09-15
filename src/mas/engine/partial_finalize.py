@@ -1,8 +1,11 @@
 from pathlib import Path
 import math
+import hmac
 import time
 
 from . import finalize as full
+from .raw_asr import (RawASRV2Config, _raw_asr_auth_key, _raw_asr_auth_tag,
+                      _verify_raw_asr_artifact_auth, _verify_completed_raw_asr_producer)
 from .episode_archive import file_record
 from .part_audio import _verify_file, load_part_plan, validate_part_audio
 from .srt import assert_srt_roundtrip, parse_srt, write_srt
@@ -13,10 +16,80 @@ from ..hashing import sha256_file
 from ..reliability import atomic_json, digest, read_json
 
 
+_PARTIAL_REQUIRED_INPUTS = frozenset({
+    'source_video', 'download_metadata', 'download_marker', 'official_source', 'source_url',
+    'parent_audio', 'parent_audio_metadata', 'parent_audio_marker', 'part_plan', 'derived_audio',
+    'parent_vad', 'derived_audio_marker', 'raw_asr_v2', 'raw_asr_v2_marker',
+    'forced_alignment_v2', 'forced_alignment_v2_marker', 'audio_review', 'aligned_schema',
+    'tr_pack', 'tr_text_output', 'tr_output', 'id_pack', 'id_output', 'id_workspace_receipt',
+})
+_PARTIAL_PRODUCER_FILES = (
+    'partial_finalize.py', 'finalize.py', 'workflow.py', 'raw_asr.py', 'primary_checkpoint.py',
+    'forced_align.py', 'speaker.py', 'audio_review.py', 'part_audio.py', 'part_scope.py',
+    'tr_correction.py', 'id_translation.py', 'translation_workspace.py', 'aligned_schema.py',
+    'segmentation.py', 'speech_coverage.py', 'timing_qa.py', 'subtitle_qa.py', 'srt.py',
+    'translation_validation.py', 'speaker_evidence.py', 'download.py', 'media.py',
+    'episode_archive.py', 'segment.py', 'schema.py',
+)
+
+
+def _partial_export_producer_identity():
+    engine = Path(__file__).resolve().parent
+    paths = {name: engine / name for name in _PARTIAL_PRODUCER_FILES}
+    paths.update({name: ROOT / 'config/production' / name
+                  for name in ('series.yaml', 'names.yaml', 'religious_terms.yaml')})
+    paths['requirements.lock'] = engine.parents[2] / 'requirements.lock'
+    # Git may check out CRLF on the controller and LF on the worker.
+    # Normalize only line endings, not source text or configuration values.
+    return {name: digest(path.read_text(encoding='utf-8')) for name, path in paths.items()}
+
+
+def _partial_auth_key():
+    key = _raw_asr_auth_key(RawASRV2Config())
+    if key is None:
+        raise ValueError('Partial export authentication key is unavailable')
+    return key
+
+
+def _sign_partial_export(export, *, key, producer_identity):
+    signed = dict(export)
+    signed.pop('producer_auth_tag', None)
+    signed['auth_format'] = 'mas-strict-partial-export-auth-1'
+    signed['producer_identity'] = producer_identity
+    signed['producer_auth_tag'] = _raw_asr_auth_tag(key, 'strict-partial-export', signed)
+    return signed
+
+
+def _verify_partial_export_auth(export):
+    if not isinstance(export, dict) or export.get('auth_format') != 'mas-strict-partial-export-auth-1':
+        raise ValueError('Partial export is unsigned; preserve legacy evidence')
+    body = dict(export)
+    tag = body.pop('producer_auth_tag', None)
+    expected = _raw_asr_auth_tag(_partial_auth_key(), 'strict-partial-export', body)
+    if not isinstance(tag, str) or not hmac.compare_digest(tag, expected):
+        raise ValueError('Partial export authentication failed for the current key')
+    if export.get('producer_identity') != _partial_export_producer_identity():
+        raise ValueError('Partial export producer/configuration identity changed')
+
+
+def _require_partial_inventory(report, plan, derived):
+    required = set(_PARTIAL_REQUIRED_INPUTS)
+    if plan.get('captions') is not None:
+        required.add('parent_captions')
+    if derived.get('captions_path') is not None:
+        required.add('derived_captions')
+    if not isinstance(report.get('input_files'), dict) or set(report['input_files']) != required:
+        raise ValueError('Partial export requires the complete canonical strict evidence inventory')
+    if not isinstance(report.get('outputs'), dict) or set(report['outputs']) != {'tr_srt', 'id_srt'}:
+        raise ValueError('Partial export requires exactly the verified TR and ID subtitles')
+
+
 def finalize_partial_episode(root, episode, part_id, *, config_dir=None, total_timeout=300):
     if type(total_timeout) not in (int, float) or not math.isfinite(total_timeout) or not 0 < total_timeout <= 21600:
         raise ValueError('Partial finalization requires a bounded remaining episode allowance')
     deadline = time.monotonic() + total_timeout
+    auth_key = _partial_auth_key()
+    producer_identity = _partial_export_producer_identity()
 
     def remaining():
         value = deadline - time.monotonic()
@@ -85,6 +158,8 @@ def finalize_partial_episode(root, episode, part_id, *, config_dir=None, total_t
     before = full._evidence_snapshot(all_paths)
     remaining()
     raw, _ = full._load_json_file(paths['raw_asr_v2'], 'Child raw ASR')
+    _verify_raw_asr_artifact_auth(raw, auth_key)
+    _verify_completed_raw_asr_producer(raw)
     child_audio_sha = lineage['audio']['sha256']
     if (raw.get('episode') != episode or raw.get('audio_sha256') != child_audio_sha
             or Path(raw.get('audio_path', '')).resolve() != derived['audio_path'].resolve()):
@@ -211,6 +286,10 @@ def finalize_partial_episode(root, episode, part_id, *, config_dir=None, total_t
     export = {'episode': episode, 'part_id': part_id, 'mode': 'strict-partial-subtitles',
               'plan_sha256': sha256_file(root / 'work/part-plan.json'), 'report': file_record(report_path, root),
               'files': list({item['relative_path']: item for item in records}.values())}
+    _require_partial_inventory(report, plan, derived)
+    if _partial_auth_key() != auth_key or _partial_export_producer_identity() != producer_identity:
+        raise ValueError('Partial producer identity changed during finalization')
+    export = _sign_partial_export(export, key=auth_key, producer_identity=producer_identity)
     export_path = child / 'work/partial-export.json'
     if export_path.exists() and read_json(export_path) != export:
         raise ValueError('Existing partial export differs; preserve published evidence')
@@ -235,6 +314,8 @@ def validate_partial_export(root, episode, part_id=None, *, total_timeout=300):
     current = (root / 'work/partial-export.json' if part_id is None
                else safe_relative(root, f'parts/{part_id}/work/partial-export.json'))
     export = read_json(current)
+    _verify_partial_export_auth(export)
+    remaining()
     if (export.get('episode') != episode or export.get('mode') != 'strict-partial-subtitles'
             or (part_id is not None and export.get('part_id') != part_id)):
         raise ValueError('Partial export identity changed')
@@ -254,6 +335,7 @@ def validate_partial_export(root, episode, part_id=None, *, total_timeout=300):
     if export['report']['relative_path'] != expected_report or export['report'] not in records:
         raise ValueError('Partial report escaped scoped evidence inventory')
     report = read_json(verified_record(root, export['report']))
+    _require_partial_inventory(report, plan, derived)
     if (report.get('format') != 'mas-partial-finalization-1' or report.get('mode') != 'strict-partial'
             or report.get('status') != 'PASS' or report.get('episode') != episode
             or report.get('part_id') != part_id or report.get('full_episode_complete') is not False

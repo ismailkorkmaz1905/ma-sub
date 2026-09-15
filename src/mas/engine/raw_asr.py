@@ -2508,7 +2508,7 @@ def load_valid_raw_asr_v2(
         if cached_path != output_path.resolve():
             return None
         data = json.loads(cached_path.read_text(encoding="utf-8"))
-        return validate_persisted_raw_asr_v2(
+        validated = validate_persisted_raw_asr_v2(
             data,
             expected_input_sha256=marker_input_sha,
             audio_sha256=sha256_file(source),
@@ -2516,6 +2516,9 @@ def load_valid_raw_asr_v2(
             prepare_dir=destination,
             require_independent_vad=require_independent_vad,
         )
+        if require_independent_vad:
+            _verify_completed_raw_asr_producer(validated)
+        return validated
     except (
         KeyError,
         OSError,
@@ -2544,6 +2547,10 @@ def _unit_result_sha256(result: Any) -> str:
 
 def _raw_asr_auth_key(settings: RawASRV2Config) -> bytes | None:
     value = os.getenv(RAW_ASR_AUTH_KEY_ENV)
+    if value is None and os.getenv("RUNPOD_API_KEY"):
+        # Local controller validation uses the same derivation as the worker.
+        from ..runpod_controller import _derive_raw_asr_auth_key
+        value = _derive_raw_asr_auth_key(os.environ["RUNPOD_API_KEY"])
     if not value:
         if settings.allow_cpu_fallback or not settings.require_independent_vad:
             return None
@@ -2590,6 +2597,41 @@ def _verify_raw_asr_artifact_auth(data: Mapping[str, Any], key: bytes) -> None:
         raise TranscriptionError(
             "Completed raw ASR artifact authentication failed for the current key"
         )
+
+
+def _sign_raw_asr_recovery(data: Mapping[str, Any], key: bytes) -> dict[str, Any]:
+    signed = dict(data)
+    signed.pop("recovery_auth_tag", None)
+    signed["recovery_auth_tag"] = _raw_asr_auth_tag(key, "recovery-checkpoint", signed)
+    return signed
+
+
+def _verify_raw_asr_recovery_auth(data: Mapping[str, Any], key: bytes) -> None:
+    body = dict(data)
+    tag = body.pop("recovery_auth_tag", None)
+    expected = _raw_asr_auth_tag(key, "recovery-checkpoint", body)
+    if not isinstance(tag, str) or not hmac.compare_digest(tag, expected):
+        raise TranscriptionError("Recovery checkpoint authentication failed; preserve the evidence")
+
+
+def _completed_raw_asr_producer_identity() -> dict[str, Any]:
+    # Fingerprint without loading a GPU model. Never trust a model path in JSON.
+    try:
+        model_path = primary_checkpoint.resolve_model(RawASRV2Config().model_name)
+        return {
+            "model": primary_checkpoint.model_identity(model_path),
+            "producer": _raw_asr_producer_identity(),
+        }
+    except Exception as exc:
+        raise TranscriptionError("Current raw ASR producer identity is unavailable") from exc
+
+
+def _verify_completed_raw_asr_producer(data: Mapping[str, Any]) -> None:
+    supplied = data.get("producer_identity")
+    if not isinstance(supplied, Mapping) or set(supplied) != {"model", "producer"}:
+        raise TranscriptionError("Completed raw ASR lacks producer identity; preserve existing output")
+    if supplied != _completed_raw_asr_producer_identity():
+        raise TranscriptionError("Completed raw ASR producer/model identity changed; preserve existing output")
 
 
 def _signed_unit_result(
@@ -3028,9 +3070,7 @@ def _write_raw_asr_v2_recovery_checkpoint(
     """Persist expensive ASR/VAD evidence before bounded review gates run."""
 
     checkpoint_path = destination / RAW_ASR_V2_RECOVERY_FILENAME
-    atomic_write_json(
-        checkpoint_path,
-        {
+    checkpoint = {
             "format": RAW_ASR_V2_RECOVERY_FORMAT,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "episode": episode,
@@ -3068,8 +3108,11 @@ def _write_raw_asr_v2_recovery_checkpoint(
             "youtube_captions": list(youtube_captions),
             "speech_hole_records": list(speech_hole_records),
             "producer_receipts": dict(producer_receipts),
-        },
-    )
+        }
+    auth_key = _raw_asr_auth_key(settings)
+    if auth_key is not None:
+        checkpoint = _sign_raw_asr_recovery(checkpoint, auth_key)
+    atomic_write_json(checkpoint_path, checkpoint)
     return checkpoint_path
 
 
@@ -3283,6 +3326,8 @@ def recover_raw_asr_v2_from_checkpoint(
         expected_primary_identity=expected_primary_identity,
         auth_key=auth_key,
     )
+    # Authenticate all recovery metadata before any review WAV can be reused.
+    _verify_raw_asr_recovery_auth(checkpoint, auth_key)
     for coverage in (initial_coverage, final_coverage):
         try:
             require_v2_beta_speech_coverage_config(
@@ -3433,6 +3478,10 @@ def recover_raw_asr_v2_from_checkpoint(
         "format_version": RAW_ASR_V2_FORMAT_VERSION,
         "status": "completed",
         "input_sha256": input_sha,
+        "producer_identity": {
+            "model": expected_primary_identity["model"],
+            "producer": expected_primary_identity["producer"],
+        },
         "episode": episode,
         "audio_path": str(source_path.resolve()),
         "audio_sha256": audio_sha,
@@ -3591,6 +3640,7 @@ def transcribe_raw_audio_v2(
                     "Completed raw ASR cache is not authenticated by the current key; "
                     "an explicit force rerun is required"
                 ) from exc
+            _verify_completed_raw_asr_producer(completed)
         if require_resume:
             raise TranscriptionError("Scoped alignment retry requires a validated raw-ASR checkpoint")
         recovery_path = destination / RAW_ASR_V2_RECOVERY_FILENAME
@@ -4228,6 +4278,7 @@ def transcribe_raw_audio_v2(
             "format_version": RAW_ASR_V2_FORMAT_VERSION,
             "status": "completed",
             "input_sha256": input_sha,
+            "producer_identity": {"model": primary_model_identity, "producer": primary_producer},
             "episode": episode,
             "audio_path": str(source_path.resolve()),
             "audio_sha256": audio_sha,

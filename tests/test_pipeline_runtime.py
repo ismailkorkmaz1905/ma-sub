@@ -150,7 +150,8 @@ def test_offline_fixture_interruption_and_resume(tmp_path, monkeypatch):
     assert resumed["stages"]["fixture_verify"]["status"] == "pass"
 
 
-def test_production_stop_after_download_does_not_start_audio(tmp_path, monkeypatch):
+@pytest.mark.parametrize('execution', ['remote-nvenc-v1', 'local-qsv-v1'])
+def test_production_stop_after_download_does_not_start_audio(tmp_path, monkeypatch, execution):
     monkeypatch.setattr(pipeline, "episode_dir", lambda episode: tmp_path / str(episode))
     monkeypatch.setattr(
         pipeline,
@@ -167,10 +168,12 @@ def test_production_stop_after_download_does_not_start_audio(tmp_path, monkeypat
 
     monkeypatch.setattr(pipeline, "download_source", download)
     monkeypatch.setenv("MAS_EXTERNAL_RUNPOD_CONTROLLER", "1")
+    monkeypatch.setenv("MAS_DELIVERY_EXECUTION_PLAN", execution)
     monkeypatch.setenv("RUNPOD_POD_ID", "pod123")
     monkeypatch.setenv("MAS_MAX_RUNTIME_SECONDS", "1")
 
     def qualify(*args, **kwargs):
+        assert execution == 'remote-nvenc-v1', 'local QSV must not qualify a paid GPU encoder'
         receipt = tmp_path / "qualification.json"
         receipt.write_text(
             json.dumps({"projected_full_encode_seconds": 999}), encoding="utf-8"
@@ -300,7 +303,7 @@ def test_stage_records_elapsed_seconds_on_success_and_failure(tmp_path, monkeypa
     state = {"episode": 13}
     values = iter((10.0, 12.5, 20.0, 23.25))
     monkeypatch.setattr("mas.pipeline.time.monotonic", lambda: next(values))
-    monkeypatch.setattr("mas.pipeline.notify", lambda *args: None)
+    monkeypatch.setattr("mas.pipeline.notify", lambda *args, **kwargs: None)
     path = tmp_path / "state.json"
 
     _stage(path, state, "ok", lambda: {"value": 1, "path": "audio.wav"})
@@ -375,7 +378,7 @@ def test_stage_heartbeat_does_not_mark_useful_work(tmp_path, monkeypatch, capsys
         def join(self): pass
     monkeypatch.setattr(pipeline.threading, "Event", Event)
     monkeypatch.setattr(pipeline.threading, "Thread", Thread)
-    monkeypatch.setattr(pipeline, "notify", lambda *a: None)
+    monkeypatch.setattr(pipeline, "notify", lambda *a, **kw: None)
     monkeypatch.setattr(pipeline, "mark_work_progress", lambda stage, **kw: marks.append((stage, kw)))
     pipeline._stage(tmp_path / "state.json", {"episode": 11}, "audio", lambda: {})
     assert capsys.readouterr().out.count("RUNNING") == 2
@@ -562,10 +565,10 @@ def test_non_runpod_shutdown_is_noop(monkeypatch):
     assert stop_current_pod() == {"requested": False, "reason": "not_running_on_runpod"}
 
 
-def test_stage_notifies_start_and_failure(tmp_path, monkeypatch):
+def test_stage_only_notifies_failure_without_start_chatter(tmp_path, monkeypatch):
     state = {"episode": 13, "stages": {}}
     events = []
-    monkeypatch.setattr(pipeline, "notify", lambda episode, event, details=None: events.append((episode, event, details)))
+    monkeypatch.setattr(pipeline, "notify", lambda episode, event, details=None, **kwargs: events.append((episode, event, details)))
 
     def fail():
         raise ValueError("invalid returned ZIP")
@@ -577,39 +580,31 @@ def test_stage_notifies_start_and_failure(tmp_path, monkeypatch):
     assert events == [
         (
             13,
-            "Endonezce çeviri dönüşü doğrulaması başladı",
-            "Dönen Endonezce çevirinin kimliği, sırası ve değişmez alanları doğrulanacak.",
-        ),
-        (
-            13,
             "Endonezce çeviri dönüşü doğrulaması başarısız",
             "Sonuç: aşama tamamlanamadı.\n"
-            "Süre: 0.0 saniye.\n"
             "Hata: ValueError: invalid returned ZIP\n"
             "Sonraki adım: hatayı giderip aynı bölüm komutuyla güvenli devam edin.",
         ),
     ]
 
 
-def test_download_notification_explains_resume_check(tmp_path, monkeypatch):
+def test_only_fresh_major_milestones_enqueue_mail(tmp_path, monkeypatch):
     state = {"episode": 13, "stages": {}}
     events = []
     monkeypatch.setattr(
         pipeline,
         "notify",
-        lambda episode, event, details=None: events.append(
-            (episode, event, details)
+        lambda episode, event, details=None, **kwargs: events.append(
+            (episode, event, kwargs)
         ),
     )
 
     pipeline._stage(tmp_path / "state.json", state, "download", lambda: {})
 
-    assert events[0][1] == "kaynak dosyası kontrolü başladı"
-    assert "SHA-256 bütünlüğü" in events[0][2]
-    assert events[1][1] == "kaynak dosyası kontrolü tamamlandı"
-    assert "Sonuç: kaynak dosyası kontrolü tamamlandı." in events[1][2]
-    assert "Süre: " in events[1][2]
-    assert "Sonraki adım: ses dosyasını hazırlamak." in events[1][2]
+    assert events == []
+    pipeline._stage(tmp_path / 'state.json', state, 'raw_asr', lambda: {'resumed': False})
+    pipeline._stage(tmp_path / 'state.json', state, 'raw_asr', lambda: {'resumed': True})
+    assert len(events) == 1 and events[0][2]['kind'] == 'milestone'
 
 
 @pytest.mark.parametrize(

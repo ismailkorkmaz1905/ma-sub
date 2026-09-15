@@ -27,9 +27,11 @@ from .audio_review import (
     validate_audio_review_v2_report,
 )
 from .download import atomic_write_json, load_valid_stage_marker, sha256_file, utc_now_iso
-from .episode_archive import VIDEO_SUFFIXES, file_record, validate_episode_root
+from .episode_archive import VIDEO_SUFFIXES, file_record
+from ..config import ROOT
 from .forced_align import validate_forced_alignment_data
 from .id_translation import (
+    build_production_translation_policy,
     IDTranslationValidationResult,
     load_and_validate_id_translation_zip,
     validate_aligned_turkish_schema,
@@ -39,7 +41,7 @@ from .media import AUDIO_ALIGNMENT_VERSION, validate_audio_marker
 from .mux import mux_softsubs
 from .srt import SubtitleEntry, assert_srt_roundtrip, wrap_text, write_srt
 from .subtitle_qa import assert_final_qa, run_subtitle_qa
-from .timing_qa import assert_timing_qa_v2, run_timing_qa_v2
+from .timing_qa import TimingQAV2Config, assert_timing_qa_v2, run_timing_qa_v2
 from .tr_correction import (
     compute_input_sha256,
     read_tr_correction_pack,
@@ -398,6 +400,14 @@ def _episode_identity(episode: int) -> str:
     if isinstance(episode, bool) or not isinstance(episode, int) or episode < 1:
         raise FinalizationV2Error("episode must be a positive integer")
     return f"Muhtemel Ask {episode}.Bolum"
+
+
+def _validate_finalization_root(episode_root, episode):
+    root = Path(episode_root)
+    if (root.name != _episode_identity(episode) or root.is_symlink() or not root.is_dir()
+            or root.resolve().parent != (ROOT / "EPISODES").resolve(strict=True)):
+        raise FinalizationV2Error("Finalization requires the canonical checkout EPISODES child")
+    return root.resolve(strict=True)
 
 
 def _require_workflow_directory(root: Path, name: str) -> Path:
@@ -895,12 +905,12 @@ def finalize_episode_v2(
     """
 
     episode_name = _episode_identity(episode)
-    root = validate_episode_root(episode_root, episode)
+    root = _validate_finalization_root(episode_root, episode)
     source_dir = _require_workflow_directory(root, "source")
     prepare_dir = _require_workflow_directory(root, "prepare")
     translation_input_dir = _require_workflow_directory(root, "translation_input")
     translation_output_dir = _require_workflow_directory(root, "translation_output")
-    project_root = root.parent.parent
+    project_root = ROOT.resolve(strict=True)
 
     source, source_file_record = _source_record(root, source_video, episode_name)
     if source.parent != source_dir:
@@ -1125,15 +1135,16 @@ def finalize_episode_v2(
 
     # Recompute speech coverage from independent VAD and complete aligned
     # words, resegment, rebuild schema, and rerun the pre-ID timing gates.
+    schema_raw, _ = _load_json_file(schema_path, "Aligned Turkish V2 schema")
+    production_policy = (build_production_translation_policy(series_data, names_data, religious_data)
+                         if "production_policy" in schema_raw else None)
     artifacts = build_strict_v2_artifacts(
         raw_data,
         correction_output.records,
         forced_data,
         episode=episode,
         acoustic_audio_review=acoustic_audio_review,
-    )
-    schema_raw, _ = _load_json_file(
-        schema_path, "Aligned Turkish V2 schema"
+        production_policy=production_policy,
     )
     trusted_schema = validate_aligned_turkish_schema(schema_raw)
     if trusted_schema != artifacts.schema:
@@ -1210,6 +1221,9 @@ def finalize_episode_v2(
         id_zip_path,
         input_manifest=id_manifest,
     )
+    if 'production_policy' in trusted_schema:
+        from .translation_workspace import validate_id_workspace_output
+        validate_id_workspace_output(id_pack_path, id_zip_path)
     ordered_records = validation.ordered_records(trusted_schema)
     id_review_count = sum(
         record.get("review_required") is True
@@ -1234,6 +1248,7 @@ def finalize_episode_v2(
         speech_coverage_report=artifacts.speech_coverage_report,
         alignment_report=artifacts.alignment_report,
         id_text_by_uid=id_by_uid,
+        config=TimingQAV2Config(**production_policy["timing_qa"]) if production_policy else None,
     )
     assert_timing_qa_v2(timing_report)
 
@@ -1306,6 +1321,8 @@ def finalize_episode_v2(
         "id_translation_pack": id_pack_path,
         "id_translation_zip": id_zip_path,
     }
+    if 'production_policy' in trusted_schema:
+        episode_evidence_paths['id_workspace_receipt'] = Path(str(id_zip_path) + '.workspace.json')
     config_paths = {
         "series_config": series_path,
         "names_config": names_path,

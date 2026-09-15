@@ -20,18 +20,19 @@ from __future__ import annotations
 
 import importlib.metadata
 import hashlib
+import heapq
 import inspect
-import itertools
 import json
 import math
 import re
+import time
 import types
 import unicodedata
 from pathlib import Path
 from typing import Any, Mapping, Sequence, Union, get_args, get_origin
 
 from .speaker import overlap_is_unsafe, speaker_id
-from ..reliability import UnitJournal, digest
+from ..reliability import UnitJournal, atomic_json, digest
 from ..progress import mark_work_progress
 
 
@@ -51,10 +52,15 @@ EDITED_TOKEN_MIN_WORD_SCORE = 0.55
 AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
 DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
 ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
-OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v14"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v17"
 MAX_OVERLAP_COMBINATIONS = 2_097_152
 MAX_FINAL_STABILIZATION_ROUNDS = 4
 MAX_INDEPENDENT_CONTEXT_RECOVERIES = 32
+MAX_CONFLICT_ALIGNMENT_CALLS = 64
+MAX_CONFLICT_SEARCH_CHECKS = MAX_OVERLAP_COMBINATIONS
+MAX_CONFLICT_SECONDS = 120
+MAX_RECOVERY_SECONDS = 900
+MAX_RECOVERY_CONTEXT_GAP_MS = 1000
 DURATION_VAD_FIELDS = frozenset(
     {
         "duration_context",
@@ -74,6 +80,15 @@ class ForcedAlignmentError(RuntimeError):
 
 class _RecoverableIndependentAlignmentError(ForcedAlignmentError):
     pass
+
+
+class AlignmentConflictBlocked(ForcedAlignmentError):
+    def __init__(self, details):
+        self.details = details
+        super().__init__(
+            f"{details['reason']}: {details['message']}; "
+            f"unresolved component UIDs: {details['component_uids']}"
+        )
 
 
 def _alignment_model_text(value: str) -> str:
@@ -601,6 +616,60 @@ def _raw_aligned_words(result: Any, utterance_uid: str) -> list[Mapping[str, Any
 
 
 def _normalize_aligned_words(
+    result: Any,
+    coarse: Mapping[str, Any],
+    *,
+    segment_index: int,
+    first_word_index: int,
+    min_word_score: float,
+    max_word_duration_ms: int,
+    vad_regions: Sequence[Mapping[str, Any]],
+    checkpoint_journal: UnitJournal | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    key = None
+    cached = None
+    if checkpoint_journal is not None:
+        key = digest({
+            "raw_result": result, "source": coarse, "segment_index": segment_index,
+            "min_word_score": min_word_score,
+            "max_word_duration_ms": max_word_duration_ms,
+            "vad_regions": [region for region in vad_regions
+                            if int(region["end_ms"]) > int(coarse["start_ms"])
+                            and int(region["start_ms"]) < int(coarse["end_ms"])],
+        })
+        cached = checkpoint_journal.read(key)
+    if cached is None:
+        try:
+            words, punctuation_count = _normalize_aligned_words_uncached(
+                result, coarse, segment_index=segment_index, first_word_index=1,
+                min_word_score=min_word_score,
+                max_word_duration_ms=max_word_duration_ms, vad_regions=vad_regions,
+            )
+        except ForcedAlignmentError as exc:
+            if checkpoint_journal is not None:
+                checkpoint_journal.write(key, {
+                    "status": "REJECTED", "error": str(exc),
+                    "recoverable": isinstance(exc, _RecoverableIndependentAlignmentError),
+                    "utterance_uid": str(coarse["utterance_uid"]),
+                })
+            raise
+        cached = {"status": "VALIDATED", "words": words,
+                  "punctuation_count": punctuation_count}
+        if checkpoint_journal is not None:
+            checkpoint_journal.write(key, cached)
+    if not isinstance(cached, Mapping):
+        raise ForcedAlignmentError("invalid normalized alignment checkpoint payload")
+    if cached.get("status") == "REJECTED":
+        exception_type = (_RecoverableIndependentAlignmentError
+                          if cached["recoverable"] else ForcedAlignmentError)
+        raise exception_type(cached["error"])
+    if cached.get("status") != "VALIDATED":
+        raise ForcedAlignmentError("invalid normalized alignment checkpoint status")
+    return ([dict(word, word_index=first_word_index + offset)
+             for offset, word in enumerate(cached["words"])], cached["punctuation_count"])
+
+
+def _normalize_aligned_words_uncached(
     result: Any,
     coarse: Mapping[str, Any],
     *,
@@ -1725,6 +1794,7 @@ def _alignment_candidate(
     max_word_duration_ms: int,
     max_outward_drift_ms: int,
     vad_regions: Sequence[Mapping[str, Any]],
+    normalized_journal: UnitJournal | None = None,
 ) -> list[dict[str, Any]]:
     candidate = dict(coarse)
     candidate["start_ms"] = window_start_ms
@@ -1751,6 +1821,7 @@ def _alignment_candidate(
         min_word_score=min_word_score,
         max_word_duration_ms=max_word_duration_ms,
         vad_regions=vad_regions,
+        checkpoint_journal=normalized_journal,
     )
     drift = _segment_drift_audit(
         words,
@@ -1777,41 +1848,80 @@ def _alignment_candidate(
     return words
 
 
+def _timings_conflict(first, second=None):
+    ordered = ((start, end, speaker, 0) for start, end, speaker in first)
+    if second is not None:
+        ordered = heapq.merge(
+            ordered, ((start, end, speaker, 1) for start, end, speaker in second),
+            key=lambda item: item[:2],
+        )
+    active = []
+    for start, end, speaker, side in ordered:
+        active = [prior for prior in active if prior[0] > start]
+        if any((second is None or prior_side != side)
+               and overlap_is_unsafe(prior_speaker, speaker)
+               for _, prior_speaker, prior_side in active):
+            return True
+        active.append((end, speaker, side))
+    return False
+
+
+def _candidate_compatibility(component_uids, options, selected, work_check=None):
+    timings = {
+        (uid, index): sorted(
+            ((int(word["start_ms"]), int(word["end_ms"]), speaker_id(word, "candidate word"))
+             for word in words), key=lambda item: item[:2])
+        for uid in component_uids for index, (_, words) in enumerate(options[uid])
+    }
+    envelope_start = min(start for words in timings.values() for start, _, _ in words)
+    envelope_end = max(end for words in timings.values() for _, end, _ in words)
+    outside = sorted(
+        ((int(word["start_ms"]), int(word["end_ms"]), speaker_id(word, "neighbor word"))
+         for uid, words in selected.items() if uid not in component_uids for word in words
+         if int(word["end_ms"]) > envelope_start and int(word["start_ms"]) < envelope_end),
+        key=lambda item: item[:2],
+    )
+    fixed, pairs = {}, {}
+
+    def compatible(uid, index, chosen):
+        key = (uid, index)
+        if key not in fixed:
+            if work_check is not None:
+                work_check(search_checks=1)
+            fixed[key] = not (_timings_conflict(timings[key])
+                              or _timings_conflict(timings[key], outside))
+        if not fixed[key]:
+            return False
+        for other_uid, other_index in chosen.items():
+            other = (other_uid, other_index)
+            pair = tuple(sorted((key, other)))
+            if pair not in pairs:
+                if work_check is not None:
+                    work_check(search_checks=1)
+                pairs[pair] = not _timings_conflict(timings[key], timings[other])
+            if not pairs[pair]:
+                return False
+        return True
+
+    return compatible
+
+
 def _bounded_overlap_search(
     component_uids: Sequence[str],
     options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
     selected: Mapping[str, list[dict[str, Any]]],
     order: Mapping[str, int],
     max_attempts: int,
+    work_check: Any = None,
 ) -> tuple[dict[str, tuple[str, list[dict[str, Any]]]] | None, int]:
-    option_sets = [options[uid] for uid in component_uids]
-    envelope_start = min(
-        int(word["start_ms"])
-        for option_set in option_sets
-        for _, words in option_set
-        for word in words
-    )
-    envelope_end = max(
-        int(word["end_ms"])
-        for option_set in option_sets
-        for _, words in option_set
-        for word in words
-    )
-    outside_words = [
-        word
-        for uid, words in selected.items()
-        if uid not in component_uids
-        for word in words
-        if int(word["end_ms"]) > envelope_start
-        and int(word["start_ms"]) < envelope_end
-    ]
+    pair_compatible = _candidate_compatibility(component_uids, options, selected, work_check)
     ranked_options = {
         uid: sorted(
-            options[uid],
-            key=lambda option: (
-                0 if option[0] == "joint" else
-                1 if option[0] == "independent" else
-                2 if option[0].startswith("padding-") else 3
+            range(len(options[uid])),
+            key=lambda index: (
+                0 if options[uid][index][0] == "joint" else
+                1 if options[uid][index][0] == "independent" else
+                2 if options[uid][index][0].startswith("padding-") else 3
             ),
         )
         for uid in component_uids
@@ -1820,8 +1930,8 @@ def _bounded_overlap_search(
 
     def compatible(
         uid: str,
-        option: tuple[str, list[dict[str, Any]]],
-        chosen: Mapping[str, tuple[str, list[dict[str, Any]]]],
+        option: int,
+        chosen: Mapping[str, int],
     ) -> bool:
         nonlocal search_attempts
         if search_attempts >= max_attempts:
@@ -1831,20 +1941,15 @@ def _bounded_overlap_search(
                 f"limit {max_attempts}"
             )
         search_attempts += 1
-        comparison_words = outside_words + [
-            word for _, words in chosen.values() for word in words
-        ] + option[1]
-        return not any(
-            str(left["utterance_uid"]) == uid
-            or str(right["utterance_uid"]) == uid
-            for left, right in _unsafe_word_overlaps(comparison_words)
-        )
+        if work_check is not None:
+            work_check(search_checks=1)
+        return pair_compatible(uid, option, chosen)
 
     search_uids = sorted(
         component_uids,
         key=lambda uid: (len(ranked_options[uid]), order[uid]),
     )
-    greedy: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+    greedy: dict[str, int] = {}
     for uid in search_uids:
         for option in ranked_options[uid]:
             if compatible(uid, option, greedy):
@@ -1853,15 +1958,15 @@ def _bounded_overlap_search(
         else:
             break
     if len(greedy) == len(component_uids):
-        return greedy, search_attempts
+        return {uid: options[uid][index] for uid, index in greedy.items()}, search_attempts
 
     def search(
-        chosen: dict[str, tuple[str, list[dict[str, Any]]]],
+        chosen: dict[str, int],
         remaining: Sequence[str],
-    ) -> dict[str, tuple[str, list[dict[str, Any]]]] | None:
+    ) -> dict[str, int] | None:
         if not remaining:
             return dict(chosen)
-        viable_by_uid: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {}
+        viable_by_uid: dict[str, list[int]] = {}
         for uid in sorted(remaining, key=order.__getitem__):
             viable = [
                 option
@@ -1884,7 +1989,9 @@ def _bounded_overlap_search(
             del chosen[uid]
         return None
 
-    return search({}, component_uids), search_attempts
+    chosen = search({}, component_uids)
+    return (None if chosen is None else {uid: options[uid][index] for uid, index in chosen.items()},
+            search_attempts)
 
 
 def _overlap_pair_signature(
@@ -1907,7 +2014,72 @@ def _strict_existing_option_selection(
     options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
     selected: Mapping[str, list[dict[str, Any]]],
     order: Mapping[str, int],
+    *,
+    checkpoint_journal: UnitJournal | None = None,
+    work_check: Any = None,
+    objective: str = "preferred",
 ) -> dict[str, tuple[str, list[dict[str, Any]]]] | None:
+    key = None
+    if checkpoint_journal is not None:
+        candidate_words = [word for uid in component_uids
+                           for _, words in options[uid] for word in words]
+        envelope_start = min(int(word["start_ms"]) for word in candidate_words)
+        envelope_end = max(int(word["end_ms"]) for word in candidate_words)
+        key = digest({
+            "phase": "component-selection",
+            "objective": objective,
+            "uids": list(component_uids),
+            "options": {uid: [(mode, [{key: value for key, value in word.items()
+                                      if key != "word_index"} for word in words])
+                              for mode, words in options[uid]] for uid in component_uids},
+            "order": {uid: order[uid] for uid in component_uids},
+            "neighbors": [{key: value for key, value in word.items() if key != "word_index"}
+                          for uid, words in selected.items()
+                          if uid not in component_uids for word in words
+                          if int(word["end_ms"]) > envelope_start
+                          and int(word["start_ms"]) < envelope_end],
+        })
+        cached = checkpoint_journal.read(key)
+        if isinstance(cached, Mapping) and cached.get("status") == "EXHAUSTED":
+            return None
+        if isinstance(cached, Mapping) and cached.get("status") == "SELECTED":
+            indices = cached.get("indices")
+            if (isinstance(indices, Mapping) and set(indices) == set(component_uids)
+                    and all(type(index) is int and 0 <= index < len(options[uid])
+                            for uid, index in indices.items())):
+                chosen = {uid: options[uid][indices[uid]] for uid in component_uids}
+                trial = dict(selected)
+                trial.update({uid: words for uid, (_, words) in chosen.items()})
+                if not any(str(left["utterance_uid"]) in component_uids
+                           or str(right["utterance_uid"]) in component_uids
+                           for left, right in _unsafe_word_overlaps(
+                               [word for words in trial.values() for word in words])):
+                    return chosen
+    chosen = _strict_existing_option_selection_uncached(
+        component_uids, options, selected, order, work_check=work_check, objective=objective,
+    )
+    if checkpoint_journal is not None:
+        checkpoint_journal.write(key, {
+            "status": "EXHAUSTED" if chosen is None else "SELECTED",
+            "component_uids": list(component_uids),
+            "indices": None if chosen is None else {
+                uid: list(options[uid]).index(chosen[uid]) for uid in component_uids
+            },
+        })
+    return chosen
+
+
+def _strict_existing_option_selection_uncached(
+    component_uids: Sequence[str],
+    options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
+    selected: Mapping[str, list[dict[str, Any]]],
+    order: Mapping[str, int],
+    *,
+    work_check: Any = None,
+    objective: str = "preferred",
+) -> dict[str, tuple[str, list[dict[str, Any]]]] | None:
+    if objective not in ("preferred", "joint"):
+        raise ValueError("unknown component selection objective")
     option_sets = [options[uid] for uid in component_uids]
     combination_count = math.prod(len(option_set) for option_set in option_sets)
     if combination_count > MAX_OVERLAP_COMBINATIONS:
@@ -1917,52 +2089,39 @@ def _strict_existing_option_selection(
             selected,
             order,
             MAX_OVERLAP_COMBINATIONS,
+            work_check=work_check,
         )
         return chosen
-    component_uid_set = set(component_uids)
-    envelope_start = min(
-        int(word["start_ms"])
-        for option_set in option_sets
-        for _, words in option_set
-        for word in words
-    )
-    envelope_end = max(
-        int(word["end_ms"])
-        for option_set in option_sets
-        for _, words in option_set
-        for word in words
-    )
-    outside_words = [
-        word
-        for uid, words in selected.items()
-        if uid not in component_uid_set
-        for word in words
-        if int(word["end_ms"]) > envelope_start
-        and int(word["start_ms"]) < envelope_end
-    ]
-    best: tuple[Any, ...] | None = None
-    best_score: tuple[int, int, int] | None = None
-    for combination in itertools.product(*option_sets):
-        trial_words = outside_words + [
-            word for _, words in combination for word in words
-        ]
-        if any(
-            str(left["utterance_uid"]) in component_uid_set
-            or str(right["utterance_uid"]) in component_uid_set
-            for left, right in _unsafe_word_overlaps(trial_words)
-        ):
-            continue
-        score = (
-            sum(mode == "joint" for mode, _ in combination),
-            sum(mode == "independent" for mode, _ in combination),
-            sum(mode.startswith("padding-") for mode, _ in combination),
-        )
-        if best_score is None or score > best_score:
-            best = combination
-            best_score = score
-    if best is None:
-        return None
-    return dict(zip(component_uids, best))
+    compatible = _candidate_compatibility(component_uids, options, selected, work_check)
+    weights = [[(int(mode == "joint"),) if objective == "joint" else
+                (int(mode == "joint"), int(mode == "independent"), int(mode.startswith("padding-")))
+                for mode, _ in option_set] for option_set in option_sets]
+    width = 1 if objective == "joint" else 3
+    upper = [(0,) * width for _ in range(len(component_uids) + 1)]
+    for position in range(len(component_uids) - 1, -1, -1):
+        upper[position] = tuple(upper[position + 1][axis]
+                                + max(weight[axis] for weight in weights[position])
+                                for axis in range(width))
+    best, best_score = None, None
+
+    def search(position, chosen, score):
+        nonlocal best, best_score
+        if work_check is not None:
+            work_check(search_checks=1)
+        if best_score is not None and tuple(a + b for a, b in zip(score, upper[position])) <= best_score:
+            return
+        if position == len(component_uids):
+            best, best_score = dict(chosen), score
+            return
+        uid = component_uids[position]
+        for index, weight in enumerate(weights[position]):
+            if compatible(uid, index, chosen):
+                chosen[uid] = index
+                search(position + 1, chosen, tuple(a + b for a, b in zip(score, weight)))
+                del chosen[uid]
+
+    search(0, {}, (0,) * width)
+    return None if best is None else {uid: options[uid][index] for uid, index in best.items()}
 
 
 def _stabilize_overlap_selection(
@@ -1971,6 +2130,10 @@ def _stabilize_overlap_selection(
     selected_mode_by_uid: dict[str, str],
     order: Mapping[str, int],
     contextual_component_uids: Any,
+    *,
+    checkpoint_journal: UnitJournal | None = None,
+    work_check: Any = None,
+    work_activate: Any = None,
 ) -> None:
     for _ in range(MAX_FINAL_STABILIZATION_ROUNDS):
         round_signature = _overlap_pair_signature(selected, order)
@@ -1988,6 +2151,8 @@ def _stabilize_overlap_selection(
                 for left, right in current_signature
             ):
                 continue
+            if work_activate is not None:
+                work_activate(seed_uids, "stabilization")
             component_uids = contextual_component_uids(seed_uids)
             candidate_options = {
                 uid: list(options[uid]) for uid in component_uids
@@ -2007,6 +2172,8 @@ def _stabilize_overlap_selection(
                 candidate_options,
                 selected,
                 order,
+                checkpoint_journal=checkpoint_journal,
+                work_check=work_check,
             )
             if chosen is None:
                 continue
@@ -2023,6 +2190,62 @@ def _stabilize_overlap_selection(
             return
 
 
+def _component_cache_shape_valid(cached, component_uids, diagnostic_keys):
+    if not isinstance(cached, Mapping):
+        return False
+    try:
+        for field in ("selected", "options", "modes"):
+            if not isinstance(cached[field], Mapping) or set(cached[field]) != set(component_uids):
+                return False
+        if (not isinstance(cached["diagnostics"], Mapping)
+                or set(cached["diagnostics"]) != set(diagnostic_keys)
+                or not isinstance(cached["raw_results"], Mapping)):
+            return False
+        for value in [cached["candidate_count"], *cached["diagnostics"].values()]:
+            _require_integer(value, "component checkpoint count")
+        for key, sha256 in cached["raw_results"].items():
+            if (not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key)
+                    or not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256)):
+                return False
+        if not isinstance(cached["failure_examples"], list) or len(cached["failure_examples"]) > 5:
+            return False
+        for message in cached["failure_examples"]:
+            _require_nonempty_string(message, "component checkpoint failure")
+        if not isinstance(cached["joint_calls"], list):
+            return False
+        for start, end, text in cached["joint_calls"]:
+            _require_integer(start, "component checkpoint window start")
+            _require_integer(end, "component checkpoint window end", minimum=start + 1)
+            _require_nonempty_string(text, "component checkpoint transcript")
+        required_word_fields = {
+            "word_index", "segment_index", "segment_id", "utterance_uid", "text",
+            "start_ms", "end_ms", "score", "probability", "edit_kind",
+            "asr_token_index", "timing_source",
+        }
+        for uid in component_uids:
+            _require_nonempty_string(cached["modes"][uid], "component checkpoint mode")
+            if not isinstance(cached["options"][uid], list) or not cached["options"][uid]:
+                return False
+            for mode, words in [(cached["modes"][uid], cached["selected"][uid]),
+                                *cached["options"][uid]]:
+                _require_nonempty_string(mode, "component checkpoint option mode")
+                if not isinstance(words, list) or not words:
+                    return False
+                for word in words:
+                    if (not isinstance(word, dict) or not required_word_fields <= word.keys()
+                            or word["utterance_uid"] != uid):
+                        return False
+                    for field in ("word_index", "segment_index", "segment_id", "start_ms", "end_ms"):
+                        _require_integer(word[field], f"component checkpoint {field}")
+                    _finite_number(word["score"], "component checkpoint score")
+                    _finite_number(word["probability"], "component checkpoint probability")
+                    _require_nonempty_string(word["text"], "component checkpoint word")
+                    speaker_id(word, "component checkpoint word")
+    except (KeyError, TypeError, ValueError, ForcedAlignmentError):
+        return False
+    return True
+
+
 def _resolve_alignment_overlaps(
     source: Sequence[Mapping[str, Any]],
     independent: Mapping[str, list[dict[str, Any]]],
@@ -2037,7 +2260,12 @@ def _resolve_alignment_overlaps(
     max_word_duration_ms: int,
     max_outward_drift_ms: int,
     vad_regions: Sequence[Mapping[str, Any]],
+    normalized_journal: UnitJournal | None = None,
     initial_modes: Mapping[str, str] | None = None,
+    component_journal: UnitJournal | None = None,
+    raw_journal: UnitJournal | None = None,
+    raw_call_keys: list[str] | None = None,
+    prior_conflict_seconds: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str], dict[str, Any]]:
     by_uid = {str(item["utterance_uid"]): item for item in source}
     order = {str(item["utterance_uid"]): index for index, item in enumerate(source)}
@@ -2046,6 +2274,125 @@ def _resolve_alignment_overlaps(
         [word for words in selected.values() for word in words]
     )
     initial_components = _overlap_components(initial_overlaps, order)
+    failure_basis = digest({
+        "source": source, "independent": independent,
+        "journal_binding": component_journal.binding if component_journal else None,
+        "limits": [MAX_CONFLICT_ALIGNMENT_CALLS, MAX_CONFLICT_SEARCH_CHECKS,
+                   MAX_CONFLICT_SECONDS, MAX_RECOVERY_SECONDS],
+    })
+    if component_journal is not None:
+        failure_path = component_journal.root.parent / "latest-conflict-failure.json"
+        if failure_path.is_file():
+            saved = json.loads(failure_path.read_text(encoding="utf-8"))
+            details = saved.get("data")
+            if not isinstance(details, dict) or saved.get("sha256") != digest(details):
+                raise ForcedAlignmentError("conflict failure receipt checksum mismatch")
+            if not isinstance(details.get("raw_results"), Mapping):
+                raise ForcedAlignmentError("conflict failure raw evidence is invalid")
+            if details.get("failure_basis") == failure_basis and all(
+                raw_journal is not None and digest(raw_journal.read(key)) == sha256
+                for key, sha256 in details.get("raw_results", {}).items()
+            ):
+                raise AlignmentConflictBlocked(details)
+    conflict_budgets = [{"uids": {uid}, "seconds": seconds,
+                         "alignment_calls": 0, "search_checks": 0}
+                        for uid, seconds in (prior_conflict_seconds or {}).items()]
+    active_budget = None
+    active_started = None
+    total_recovery_seconds = sum((prior_conflict_seconds or {}).values())
+    active_phase = "initial"
+
+    def pause_work():
+        nonlocal active_started, total_recovery_seconds
+        if active_started is not None:
+            elapsed = time.monotonic() - active_started
+            active_budget["seconds"] += elapsed
+            total_recovery_seconds += elapsed
+            active_started = None
+
+    def block_conflict(reason, message):
+        pause_work()
+        unresolved = _unsafe_word_overlaps(
+            [word for words in selected.values() for word in words]
+        )
+        component_uids = sorted(active_budget["uids"], key=order.__getitem__)
+        details = {
+            "status": "BLOCKED", "reason": reason, "message": message,
+            "phase": active_phase, "component_uids": component_uids,
+            "unresolved_components": _overlap_components(unresolved, order),
+            "work": {key: active_budget[key]
+                     for key in ("seconds", "alignment_calls", "search_checks")},
+            "total_recovery_seconds": total_recovery_seconds,
+            "limits": {"seconds": MAX_CONFLICT_SECONDS,
+                       "alignment_calls": MAX_CONFLICT_ALIGNMENT_CALLS,
+                       "search_checks": MAX_CONFLICT_SEARCH_CHECKS,
+                       "total_recovery_seconds": MAX_RECOVERY_SECONDS},
+            "source_sha256": digest([by_uid[uid] for uid in component_uids]),
+            "candidate_state_sha256": digest({uid: selected[uid] for uid in component_uids}),
+            "failure_basis": failure_basis,
+            "raw_results": ({key: digest(raw_journal.read(key))
+                             for key in set(raw_call_keys or ())}
+                            if raw_journal is not None else {}),
+        }
+        details["failure_invariant"] = digest({
+            "reason": reason, "phase": active_phase, "component_uids": component_uids,
+            "source_sha256": details["source_sha256"],
+            "candidate_state_sha256": details["candidate_state_sha256"],
+            "limits": details["limits"],
+            "journal_binding": component_journal.binding if component_journal else None,
+            "raw_results": details["raw_results"],
+        })
+        if component_journal is not None:
+            component_journal.write(details["failure_invariant"], details)
+            atomic_json(component_journal.root.parent / "latest-conflict-failure.json",
+                        {"data": details, "sha256": digest(details)})
+        raise AlignmentConflictBlocked(details)
+
+    def activate_work(component_uids, phase):
+        nonlocal active_budget, active_started, active_phase
+        pause_work()
+        uid_set = set(component_uids)
+        matching = [budget for budget in conflict_budgets if budget["uids"] & uid_set]
+        if matching:
+            active_budget = matching[0]
+            for other in matching[1:]:
+                active_budget["uids"].update(other["uids"])
+                for key in ("seconds", "alignment_calls", "search_checks"):
+                    active_budget[key] += other[key]
+                conflict_budgets.remove(other)
+            active_budget["uids"].update(uid_set)
+        else:
+            active_budget = {"uids": uid_set, "seconds": 0.0,
+                             "alignment_calls": 0, "search_checks": 0}
+            conflict_budgets.append(active_budget)
+        active_phase = phase
+        active_started = time.monotonic()
+        check_work()
+
+    def check_work(*, alignment_calls=0, search_checks=0):
+        if active_budget is None:
+            return
+        if active_budget["alignment_calls"] + alignment_calls > MAX_CONFLICT_ALIGNMENT_CALLS:
+            block_conflict("conflict_alignment_budget", "fresh acoustic call limit reached")
+        if active_budget["search_checks"] + search_checks > MAX_CONFLICT_SEARCH_CHECKS:
+            block_conflict("conflict_search_budget", "candidate search limit reached")
+        active_budget["alignment_calls"] += alignment_calls
+        active_budget["search_checks"] += search_checks
+        elapsed = time.monotonic() - active_started if active_started is not None else 0.0
+        if active_budget["seconds"] + elapsed >= MAX_CONFLICT_SECONDS:
+            block_conflict("conflict_time_budget", "acoustic conflict time limit reached")
+        if total_recovery_seconds + elapsed >= MAX_RECOVERY_SECONDS:
+            block_conflict("recovery_time_budget", "episode acoustic recovery limit reached")
+
+    unbounded_align = align
+
+    def align(transcript, model, metadata, audio, device, **kwargs):
+        key = digest({"transcript": transcript, "kwargs": kwargs})
+        cached = raw_journal is not None and raw_journal.read(key) is not None
+        check_work(alignment_calls=0 if cached else 1)
+        result = unbounded_align(transcript, model, metadata, audio, device, **kwargs)
+        check_work()
+        return result
     initial_modes = initial_modes or {}
     options: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {
         uid: [(initial_modes.get(uid, "independent"), words)]
@@ -2063,8 +2410,11 @@ def _resolve_alignment_overlaps(
         "atomic_selections": 0,
         "failure_examples": [],
     }
+    component_failures: list[str] = []
 
     def record_joint_failure(message: str) -> None:
+        if len(component_failures) < 5:
+            component_failures.append(message)
         examples = joint_diagnostics["failure_examples"]
         if len(examples) < 5:
             examples.append(message)
@@ -2092,51 +2442,13 @@ def _resolve_alignment_overlaps(
                 f"overlap candidate budget exceeded: {combination_count} combinations "
                 f"for {', '.join(component_uids)}; limit {MAX_OVERLAP_COMBINATIONS}"
             )
-        envelope_start = min(
-            int(word["start_ms"])
-            for option_set in option_sets for _, words in option_set for word in words
+        chosen = _strict_existing_option_selection(
+            component_uids, options, selected, order,
+            checkpoint_journal=component_journal, work_check=check_work, objective="joint",
         )
-        envelope_end = max(
-            int(word["end_ms"])
-            for option_set in option_sets for _, words in option_set for word in words
-        )
-        outside_words = [
-            word
-            for uid, words in selected.items()
-            if uid not in component_uids
-            for word in words
-            if int(word["end_ms"]) > envelope_start
-            and int(word["start_ms"]) < envelope_end
-        ]
-        best: tuple[Any, ...] | None = None
-        best_joint_count = -1
-        for combination in itertools.product(*option_sets):
-            trial_words = [word for _, words in combination for word in words]
-            if _unsafe_word_overlaps(trial_words):
-                continue
-            trial_start = min(int(word["start_ms"]) for word in trial_words)
-            trial_end = max(int(word["end_ms"]) for word in trial_words)
-            nearby = [
-                word
-                for word in outside_words
-                if int(word["end_ms"]) > trial_start
-                and int(word["start_ms"]) < trial_end
-            ]
-            boundary_overlaps = [
-                overlap
-                for overlap in _unsafe_word_overlaps(nearby + trial_words)
-                if str(overlap[0]["utterance_uid"]) in component_uids
-                or str(overlap[1]["utterance_uid"]) in component_uids
-            ]
-            if boundary_overlaps:
-                continue
-            joint_count = sum(mode == "joint" for mode, _ in combination)
-            if joint_count > best_joint_count:
-                best = combination
-                best_joint_count = joint_count
-        if best is None:
+        if chosen is None:
             return False
-        for uid, (mode, words) in zip(component_uids, best):
+        for uid, (mode, words) in chosen.items():
             selected[uid] = words
             selected_mode_by_uid[uid] = mode
         return True
@@ -2153,8 +2465,13 @@ def _resolve_alignment_overlaps(
         require_complete: bool = False,
     ) -> bool:
         nonlocal adaptive_candidate_count
+        if not component_has_unsafe_overlap(target_uids):
+            return True
         target_uid_set = set(target_uids)
         group = [by_uid[uid] for uid in context_uids]
+        if any(int(right["coarse_start_ms"]) - int(left["coarse_end_ms"])
+               > MAX_RECOVERY_CONTEXT_GAP_MS for left, right in zip(group, group[1:])):
+            return False
         joint_start = min(int(item["start_ms"]) for item in group)
         joint_end = max(int(item["end_ms"]) for item in group)
         if padding_ms is not None:
@@ -2223,6 +2540,7 @@ def _resolve_alignment_overlaps(
                         min_word_score=min_word_score,
                         max_word_duration_ms=max_word_duration_ms,
                         vad_regions=vad_regions,
+                        checkpoint_journal=normalized_journal,
                     )
                     drift = _segment_drift_audit(
                         words,
@@ -2243,11 +2561,15 @@ def _resolve_alignment_overlaps(
                         or drift["late_outward_drift_ms"] > max_outward_drift_ms
                     ) and context is None:
                         continue
+                except AlignmentConflictBlocked:
+                    raise
                 except Exception as exc:
                     joint_diagnostics["candidate_validation_failures"] += 1
                     record_joint_failure(f"{component_index}/{uid}: {exc}")
                     continue
                 joint_candidates[uid] = words
+        except AlignmentConflictBlocked:
+            raise
         except Exception as exc:
             joint_diagnostics["align_failures"] += 1
             record_joint_failure(f"{component_index}: {exc}")
@@ -2323,6 +2645,16 @@ def _resolve_alignment_overlaps(
         positions = [order[uid] for uid in component_uids]
         start = max(0, min(positions) - radius)
         end = min(len(source), max(positions) + radius + 1)
+        for position in range(min(positions), start, -1):
+            if (int(source[position]["coarse_start_ms"])
+                    - int(source[position - 1]["coarse_end_ms"])) > MAX_RECOVERY_CONTEXT_GAP_MS:
+                start = position
+                break
+        for position in range(max(positions) + 1, end):
+            if (int(source[position]["coarse_start_ms"])
+                    - int(source[position - 1]["coarse_end_ms"])) > MAX_RECOVERY_CONTEXT_GAP_MS:
+                end = position
+                break
         return [str(item["utterance_uid"]) for item in source[start:end]]
 
     def component_has_unsafe_overlap(component_uids: Sequence[str]) -> bool:
@@ -2336,13 +2668,71 @@ def _resolve_alignment_overlaps(
         )
 
     for component_index, component_uids in enumerate(initial_components, start=1):
+        if not component_has_unsafe_overlap(component_uids):
+            continue
         group = [by_uid[uid] for uid in component_uids]
+        component_key = None
+        raw_call_start = len(raw_call_keys or ())
+        prior_joint_calls = set(attempted_joint_calls)
+        prior_candidate_count = adaptive_candidate_count
+        prior_diagnostics = {
+            key: value for key, value in joint_diagnostics.items()
+            if key != "failure_examples"
+        }
+        component_failures.clear()
+        if component_journal is not None and raw_journal is not None:
+            envelope_start = min(int(item["start_ms"]) for item in group)
+            envelope_end = max(int(item["end_ms"]) for item in group)
+            component_key = digest({
+                "component_index": component_index,
+                "source": group,
+                "order": {uid: order[uid] for uid in component_uids},
+                "modes": {uid: selected_mode_by_uid[uid] for uid in component_uids},
+                "words": {
+                    uid: [{key: value for key, value in word.items()
+                           if key != "word_index"} for word in words]
+                    for uid, words in selected.items()
+                    if uid in component_uids or any(
+                        int(word["end_ms"]) > envelope_start
+                        and int(word["start_ms"]) < envelope_end for word in words
+                    )
+                },
+                "vad_regions": [region for region in vad_regions
+                                if int(region["end_ms"]) > envelope_start
+                                and int(region["start_ms"]) < envelope_end],
+            })
+            cached = component_journal.read(component_key)
+            if _component_cache_shape_valid(cached, component_uids, prior_diagnostics) and all(
+                digest(raw_journal.read(key)) == sha256
+                for key, sha256 in cached["raw_results"].items()
+            ):
+                trial = dict(selected)
+                trial.update(cached["selected"])
+                if not any(
+                    str(left["utterance_uid"]) in component_uids
+                    or str(right["utterance_uid"]) in component_uids
+                    for left, right in _unsafe_word_overlaps(
+                        [word for words in trial.values() for word in words]
+                    )
+                ):
+                    selected.update(cached["selected"])
+                    selected_mode_by_uid.update(cached["modes"])
+                    options.update(cached["options"])
+                    attempted_joint_calls.update(
+                        tuple(call) for call in cached["joint_calls"]
+                    )
+                    adaptive_candidate_count += cached["candidate_count"]
+                    for key, count in cached["diagnostics"].items():
+                        joint_diagnostics[key] += count
+                    for message in cached["failure_examples"]:
+                        record_joint_failure(message)
+                    continue
+        activate_work(component_uids, "initial")
         atomically_selected = add_joint_component_options(
             component_uids, component_uids, str(component_index)
         )
-        if atomically_selected or select_component(component_uids):
-            continue
-        for item in group:
+        component_resolved = atomically_selected or select_component(component_uids)
+        for item in (() if component_resolved else group):
             uid = str(item["utterance_uid"])
             for padding_ms in (400, 300, 200, 100, 0):
                 window_start = max(
@@ -2369,13 +2759,30 @@ def _resolve_alignment_overlaps(
                         max_word_duration_ms=max_word_duration_ms,
                         max_outward_drift_ms=max_outward_drift_ms,
                         vad_regions=vad_regions,
+                        normalized_journal=normalized_journal,
                     )
+                except AlignmentConflictBlocked:
+                    raise
                 except Exception:
                     continue
                 add_option(uid, f"padding-{padding_ms}", words)
                 adaptive_candidate_count += 1
-        select_component(component_uids)
+        component_resolved = component_resolved or select_component(component_uids)
+        if component_resolved and component_key is not None:
+            component_journal.write(component_key, {
+                "selected": {uid: selected[uid] for uid in component_uids},
+                "modes": {uid: selected_mode_by_uid[uid] for uid in component_uids},
+                "options": {uid: options[uid] for uid in component_uids},
+                "joint_calls": sorted(attempted_joint_calls - prior_joint_calls),
+                "candidate_count": adaptive_candidate_count - prior_candidate_count,
+                "diagnostics": {key: joint_diagnostics[key] - count
+                                for key, count in prior_diagnostics.items()},
+                "failure_examples": list(component_failures),
+                "raw_results": {key: digest(raw_journal.read(key))
+                                for key in (raw_call_keys or [])[raw_call_start:]},
+            })
 
+    pause_work()
     anchors: list[int] = []
     for item in source:
         anchor = (int(item["coarse_start_ms"]) + int(item["coarse_end_ms"])) // 2
@@ -2400,6 +2807,7 @@ def _resolve_alignment_overlaps(
     )
     residual_components = _overlap_components(residual_before_partition, order)
     for component_index, seed_uids in enumerate(residual_components, start=1):
+        activate_work(seed_uids, "residual-context")
         component_resolved = not component_has_unsafe_overlap(seed_uids)
         seen_contexts: set[tuple[tuple[str, ...], int | None]] = set()
         for radius in (1, 2, 4, 8):
@@ -2455,7 +2863,6 @@ def _resolve_alignment_overlaps(
     live_residual_overlaps = _unsafe_word_overlaps(
         [word for words in selected.values() for word in words]
     )
-    live_residual_components = _overlap_components(live_residual_overlaps, order)
     live_pairs: list[tuple[str, str]] = []
     seen_pair_edges: set[tuple[str, str]] = set()
     for left_word, right_word in live_residual_overlaps:
@@ -2468,6 +2875,10 @@ def _resolve_alignment_overlaps(
             continue
         seen_pair_edges.add(pair)
         live_pairs.append(pair)
+    for left_uid, right_uid in live_pairs:
+        if (left_uid, right_uid) not in _overlap_pair_signature(selected, order):
+            continue
+        activate_work((left_uid, right_uid), "pair-edge")
         left_item = by_uid[left_uid]
         right_item = by_uid[right_uid]
         left_coarse_end = int(left_item["coarse_end_ms"])
@@ -2510,7 +2921,10 @@ def _resolve_alignment_overlaps(
                     max_word_duration_ms=max_word_duration_ms,
                     max_outward_drift_ms=max_outward_drift_ms,
                     vad_regions=vad_regions,
+                    normalized_journal=normalized_journal,
                 )
+            except AlignmentConflictBlocked:
+                raise
             except Exception:
                 continue
             add_option(
@@ -2519,11 +2933,27 @@ def _resolve_alignment_overlaps(
                 words,
             )
             adaptive_candidate_count += 1
+        chosen = _strict_existing_option_selection(
+            (left_uid, right_uid), options, selected, order,
+            checkpoint_journal=component_journal, work_check=check_work,
+        )
+        if chosen is not None and any(
+            mode.startswith("pair-edge-") for mode, _ in chosen.values()
+        ):
+            for uid, (mode, words) in chosen.items():
+                selected[uid] = words
+                selected_mode_by_uid[uid] = mode
+    live_residual_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    live_residual_components = _overlap_components(live_residual_overlaps, order)
+    component_edge_selected = False
     for component_index, component_uids in enumerate(
         live_residual_components, start=1
     ):
         if len(component_uids) < 3:
             continue
+        activate_work(component_uids, "component-edge")
         component_uid_set = set(component_uids)
         windows = {
             uid: [int(by_uid[uid]["start_ms"]), int(by_uid[uid]["end_ms"])]
@@ -2562,11 +2992,30 @@ def _resolve_alignment_overlaps(
                     max_word_duration_ms=max_word_duration_ms,
                     max_outward_drift_ms=max_outward_drift_ms,
                     vad_regions=vad_regions,
+                    normalized_journal=normalized_journal,
                 )
+            except AlignmentConflictBlocked:
+                raise
             except Exception:
                 continue
             add_option(uid, f"component-edge-{component_index}", words)
             adaptive_candidate_count += 1
+        chosen = _strict_existing_option_selection(
+            component_uids, options, selected, order,
+            checkpoint_journal=component_journal, work_check=check_work,
+        )
+        if chosen is not None and any(
+            mode.startswith("component-edge-") for mode, _ in chosen.values()
+        ):
+            for uid, (mode, words) in chosen.items():
+                selected[uid] = words
+                selected_mode_by_uid[uid] = mode
+            component_edge_selected = True
+    if component_edge_selected:
+        live_residual_overlaps = _unsafe_word_overlaps(
+            [word for words in selected.values() for word in words]
+        )
+        live_residual_components = _overlap_components(live_residual_overlaps, order)
     conflict_uids = {
         str(word["utterance_uid"])
         for overlap in live_residual_overlaps
@@ -2580,6 +3029,9 @@ def _resolve_alignment_overlaps(
         ("edge-partition", edge_boundaries),
     ):
         for uid in sorted(partition_uids, key=order.__getitem__):
+            owners = [seed for seed in live_residual_components
+                      if uid in contextual_component_uids(seed)]
+            activate_work([item for seed in owners for item in seed] or [uid], mode)
             position = order[uid]
             item = by_uid[uid]
             window_start = max(
@@ -2610,7 +3062,10 @@ def _resolve_alignment_overlaps(
                     max_word_duration_ms=max_word_duration_ms,
                     max_outward_drift_ms=max_outward_drift_ms,
                     vad_regions=vad_regions,
+                    normalized_journal=normalized_journal,
                 )
+            except AlignmentConflictBlocked:
+                raise
             except Exception:
                 continue
             add_option(uid, mode, words)
@@ -2618,73 +3073,18 @@ def _resolve_alignment_overlaps(
 
     resolved_component_count = 0
     for seed_uids in live_residual_components:
-        component_uids = contextual_component_uids(seed_uids)
-        option_sets = [options[uid] for uid in component_uids]
-        combination_count = math.prod(len(option_set) for option_set in option_sets)
-        envelope_start = min(
-            int(word["start_ms"])
-            for option_set in option_sets
-            for _, words in option_set
-            for word in words
-        )
-        envelope_end = max(
-            int(word["end_ms"])
-            for option_set in option_sets
-            for _, words in option_set
-            for word in words
-        )
-        outside_words = [
-            word
-            for uid, words in selected.items()
-            if uid not in component_uids
-            for word in words
-            if int(word["end_ms"]) > envelope_start
-            and int(word["start_ms"]) < envelope_end
-        ]
-        best: tuple[Any, ...] | None = None
-        if combination_count <= MAX_OVERLAP_COMBINATIONS:
-            best_score: tuple[int, int, int] | None = None
-            for combination in itertools.product(*option_sets):
-                trial_words = [word for _, words in combination for word in words]
-                if _unsafe_word_overlaps(trial_words):
-                    continue
-                trial_start = min(int(word["start_ms"]) for word in trial_words)
-                trial_end = max(int(word["end_ms"]) for word in trial_words)
-                nearby = [
-                    word
-                    for word in outside_words
-                    if int(word["end_ms"]) > trial_start
-                    and int(word["start_ms"]) < trial_end
-                ]
-                boundary_overlaps = [
-                    overlap
-                    for overlap in _unsafe_word_overlaps(nearby + trial_words)
-                    if str(overlap[0]["utterance_uid"]) in component_uids
-                    or str(overlap[1]["utterance_uid"]) in component_uids
-                ]
-                if boundary_overlaps:
-                    continue
-                score = (
-                    sum(mode == "joint" for mode, _ in combination),
-                    sum(mode == "independent" for mode, _ in combination),
-                    sum(mode.startswith("padding-") for mode, _ in combination),
-                )
-                if best_score is None or score > best_score:
-                    best = combination
-                    best_score = score
-        else:
-            chosen, _ = _bounded_overlap_search(
-                component_uids,
-                options,
-                selected,
-                order,
-                MAX_OVERLAP_COMBINATIONS,
-            )
-            if chosen is not None:
-                best = tuple(chosen[uid] for uid in component_uids)
-        if best is None:
+        if not component_has_unsafe_overlap(seed_uids):
             continue
-        for uid, (mode, words) in zip(component_uids, best):
+        component_uids = contextual_component_uids(seed_uids)
+        activate_work(seed_uids, "final-selection")
+        chosen = _strict_existing_option_selection(
+            component_uids, options, selected, order,
+            checkpoint_journal=component_journal,
+            work_check=check_work,
+        )
+        if chosen is None:
+            continue
+        for uid, (mode, words) in chosen.items():
             selected[uid] = words
             selected_mode_by_uid[uid] = mode
         resolved_component_count += 1
@@ -2695,6 +3095,9 @@ def _resolve_alignment_overlaps(
         selected_mode_by_uid,
         order,
         contextual_component_uids,
+        checkpoint_journal=component_journal,
+        work_check=check_work,
+        work_activate=activate_work,
     )
 
     final_residual_overlaps = _unsafe_word_overlaps(
@@ -2707,12 +3110,17 @@ def _resolve_alignment_overlaps(
         for component_index, seed_uids in enumerate(
             final_residual_components, start=1
         ):
+            if not component_has_unsafe_overlap(seed_uids):
+                continue
+            activate_work(seed_uids, "final-residual")
             component_uids = sorted(seed_uids, key=order.__getitem__)
             context_uids = contextual_component_uids(component_uids, radius=1)
             candidate_groups = [component_uids]
             if context_uids != component_uids:
                 candidate_groups.append(context_uids)
             for group_index, group_uids in enumerate(candidate_groups, start=1):
+                if not component_has_unsafe_overlap(seed_uids):
+                    break
                 selected_joint = add_joint_component_options(
                     group_uids,
                     group_uids,
@@ -2729,6 +3137,9 @@ def _resolve_alignment_overlaps(
             selected_mode_by_uid,
             order,
             contextual_component_uids,
+            checkpoint_journal=component_journal,
+            work_check=check_work,
+            work_activate=activate_work,
         )
 
     assigned_speakers: dict[str, str] = {}
@@ -2743,12 +3154,13 @@ def _resolve_alignment_overlaps(
             (str(left["utterance_uid"]), str(right["utterance_uid"]))
             for left, right in final_overlaps
         })
-        raise ForcedAlignmentError(
-            "same/unknown-speaker alignment overlap remains between "
+        block_conflict(
+            "unresolved_overlap", "same/unknown-speaker alignment overlap remains between "
             f"{prior['utterance_uid']} and {current['utterance_uid']}; "
             f"joint diagnostics: {joint_diagnostics}; "
             f"all {len(pairs)} unresolved UID pairs: {pairs}"
         )
+    pause_work()
     return selected, assigned_speakers, {
         "policy": OVERLAP_RESOLUTION_POLICY,
         "initial_overlap_count": len(initial_overlaps),
@@ -2786,6 +3198,56 @@ def _model_state_sha256(model, metadata):
     return hasher.hexdigest()
 
 
+def _alignment_resume_groups(scope, source, identity):
+    required = {"stage", "target_uids", "context_uids", *identity}
+    if not isinstance(scope, Mapping) or set(scope) != required:
+        raise ForcedAlignmentError("alignment resume scope fields are invalid")
+    if scope["stage"] != "forced_alignment" or any(
+        scope[key] != value for key, value in identity.items()
+    ):
+        raise ForcedAlignmentError("alignment resume scope identity mismatch")
+    source_uids = [str(item["utterance_uid"]) for item in source]
+    for field in ("target_uids", "context_uids"):
+        values = scope[field]
+        if (not isinstance(values, list) or not values
+                or any(not isinstance(uid, str) for uid in values)
+                or values != [uid for uid in source_uids if uid in values]):
+            raise ForcedAlignmentError(f"alignment resume {field} must be exact ordered unique UIDs")
+    targets = set(scope["target_uids"])
+    if len(targets) > MAX_INDEPENDENT_CONTEXT_RECOVERIES or not targets <= set(scope["context_uids"]):
+        raise ForcedAlignmentError("alignment resume target/context scope is not bounded")
+    positions = {uid: index for index, uid in enumerate(source_uids)}
+    target_positions = [positions[uid] for uid in targets]
+    for uid in scope["context_uids"]:
+        position = positions[uid]
+        if not any(abs(position - target) <= 8 and all(
+            int(source[index]["coarse_start_ms"])
+            - int(source[index - 1]["coarse_end_ms"]) <= MAX_RECOVERY_CONTEXT_GAP_MS
+            for index in range(min(position, target) + 1, max(position, target) + 1)
+        ) for target in target_positions):
+            raise ForcedAlignmentError("alignment resume context crosses an unrelated scene")
+    groups = []
+    context_positions = {positions[uid] for uid in scope["context_uids"]}
+    for start in sorted(context_positions):
+        for end in range(start + 1, min(len(source), start + 17) + 1):
+            if end - 1 not in context_positions:
+                break
+            if end - start > 1 and (
+                int(source[end - 1]["coarse_start_ms"])
+                - int(source[end - 2]["coarse_end_ms"]) > MAX_RECOVERY_CONTEXT_GAP_MS
+            ):
+                break
+            group = source[start:end]
+            if not any(str(item["utterance_uid"]) in targets for item in group):
+                continue
+            groups.append({
+                "start": min(int(item["start_ms"]) for item in group) / 1000.0,
+                "end": max(int(item["end_ms"]) for item in group) / 1000.0,
+                "text": _alignment_model_text(" ".join(str(item["text"]) for item in group)),
+            })
+    return groups
+
+
 def align_corrected_segments(
     audio_path: str | Path,
     coarse_segments: Sequence[Mapping[str, Any]],
@@ -2800,6 +3262,7 @@ def align_corrected_segments(
     whisperx_module: Any | None = None,
     whisperx_version: str | None = None,
     checkpoint_dir: str | Path | None = None,
+    resume_scope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Force-align corrected Turkish text and return strict JSON-ready data.
 
@@ -2837,6 +3300,8 @@ def align_corrected_segments(
         )
     trusted_vad_regions = _trusted_vad_regions(vad_regions)
     source = validate_coarse_segments(coarse_segments)
+    if resume_scope is not None and checkpoint_dir is None:
+        raise ForcedAlignmentError("bounded alignment resume requires retained raw checkpoints")
     path = Path(audio_path)
     if not path.is_file():
         raise ForcedAlignmentError(f"alignment audio does not exist: {path}")
@@ -2885,6 +3350,10 @@ def align_corrected_segments(
 
     call_kwargs, interpolation_mode = _align_call_kwargs(align)
     model_state_sha256 = None
+    journal = None
+    component_journal = None
+    normalized_journal = None
+    raw_call_keys: list[str] = []
     if checkpoint_dir is not None:
         model_state_sha256 = _model_state_sha256(align_model, align_metadata)
         journal = UnitJournal(Path(checkpoint_dir), {
@@ -2900,7 +3369,38 @@ def align_corrected_segments(
                 Path(__file__).resolve().parents[3] / "requirements.lock"
             ),
         })
+        component_journal = UnitJournal(Path(checkpoint_dir) / "components", {
+            "raw_binding": journal.binding,
+            "resolver_sha256": _audio_sha256(Path(__file__)),
+            "speaker_policy_sha256": _audio_sha256(Path(__file__).with_name("speaker.py")),
+            "policy": OVERLAP_RESOLUTION_POLICY,
+            "min_word_score": min_word_score,
+            "max_word_duration_ms": max_word_duration_ms,
+            "max_outward_drift_ms": max_outward_drift_ms,
+            "max_combinations": MAX_OVERLAP_COMBINATIONS,
+            "max_stabilization_rounds": MAX_FINAL_STABILIZATION_ROUNDS,
+        })
         model_align = align
+        normalized_journal = UnitJournal(Path(checkpoint_dir) / "normalized", {
+            "raw_binding": journal.binding,
+            "producer_sha256": _audio_sha256(Path(__file__)),
+        })
+        resume_identity = {
+            "audio_sha256": audio_sha256,
+            "model_state_sha256": model_state_sha256,
+            "raw_alignment_binding": journal.binding,
+            "source_sha256": digest(source),
+        }
+        allowed_groups = (_alignment_resume_groups(resume_scope, source, resume_identity)
+                          if resume_scope is not None else None)
+        identity_record = {
+            "stage": "forced_alignment", **resume_identity,
+            "source_uids": [str(item["utterance_uid"]) for item in source],
+            "source": source,
+        }
+        atomic_json(Path(checkpoint_dir) / "resume-identity.json", {
+            "data": identity_record, "sha256": digest(identity_record),
+        })
         alignment_call_count = 0
 
         def align(transcript, model, metadata, audio, device, **kwargs):
@@ -2908,6 +3408,18 @@ def align_corrected_segments(
             key = digest({"transcript": transcript, "kwargs": kwargs})
             cached = journal.read(key)
             if cached is None:
+                if allowed_groups is not None and not (
+                    isinstance(transcript, list) and len(transcript) == 1
+                    and any(transcript[0]["text"] == group["text"]
+                            and transcript[0]["start"] >= group["start"]
+                            and transcript[0]["end"] <= group["end"]
+                            for group in allowed_groups)
+                ):
+                    raise AlignmentConflictBlocked({
+                        "status": "BLOCKED", "reason": "resume_scope_violation",
+                        "message": "uncached CTC request is outside authorized target/context",
+                        "component_uids": list(resume_scope["target_uids"]),
+                    })
                 result = _execute_alignment_call(
                     model_align,
                     transcript,
@@ -2920,6 +3432,7 @@ def align_corrected_segments(
                 journal.write(key, result)
             else:
                 result = cached
+            raw_call_keys.append(key)
             alignment_call_count += 1
             mark_work_progress(
                 "forced_alignment:ctc", completed=alignment_call_count
@@ -2952,6 +3465,8 @@ def align_corrected_segments(
                 device,
                 **call_kwargs,
             )
+        except AlignmentConflictBlocked:
+            raise
         except Exception as exc:
             raise ForcedAlignmentError(
                 f"WhisperX alignment failed for {coarse['utterance_uid']}: {exc}"
@@ -2965,6 +3480,7 @@ def align_corrected_segments(
                 min_word_score=min_word_score,
                 max_word_duration_ms=max_word_duration_ms,
                 vad_regions=trusted_vad_regions,
+                checkpoint_journal=normalized_journal,
             )
         except ForcedAlignmentError as exc:
             utterance_uid = str(coarse["utterance_uid"])
@@ -3039,11 +3555,60 @@ def align_corrected_segments(
         )
 
     initial_modes = {uid: "independent" for uid in independent_by_uid}
+    prior_conflict_seconds = {}
     if 0 < len(recoverable_issues) <= MAX_INDEPENDENT_CONTEXT_RECOVERIES:
+        recovery_started = time.monotonic()
+        failure_basis = digest({
+            "phase": "independent-context", "source": source,
+            "journal_binding": component_journal.binding if component_journal else None,
+            "limits": [MAX_CONFLICT_SECONDS, MAX_RECOVERY_SECONDS],
+        })
+        if component_journal is not None:
+            failure_path = component_journal.root.parent / "latest-conflict-failure.json"
+            if failure_path.is_file():
+                saved = json.loads(failure_path.read_text(encoding="utf-8"))
+                details = saved.get("data")
+                if not isinstance(details, dict) or saved.get("sha256") != digest(details):
+                    raise ForcedAlignmentError("conflict failure receipt checksum mismatch")
+                if not isinstance(details.get("raw_results"), Mapping):
+                    raise ForcedAlignmentError("conflict failure raw evidence is invalid")
+                if details.get("failure_basis") == failure_basis and all(
+                    digest(journal.read(key)) == sha256
+                    for key, sha256 in details["raw_results"].items()
+                ):
+                    raise AlignmentConflictBlocked(details)
+
+        def check_independent_context_budget(uid, started):
+            elapsed = time.monotonic() - started
+            total_elapsed = time.monotonic() - recovery_started
+            if elapsed < MAX_CONFLICT_SECONDS and total_elapsed < MAX_RECOVERY_SECONDS:
+                return
+            details = {
+                "status": "BLOCKED", "phase": "independent-context",
+                "reason": ("conflict_time_budget" if elapsed >= MAX_CONFLICT_SECONDS
+                           else "recovery_time_budget"),
+                "message": "independent acoustic context recovery time limit reached",
+                "component_uids": [uid], "unresolved_components": [[uid]],
+                "work": {"seconds": elapsed}, "total_recovery_seconds": total_elapsed,
+                "failure_basis": failure_basis,
+                "raw_results": ({key: digest(journal.read(key)) for key in set(raw_call_keys)}
+                                if journal is not None else {}),
+            }
+            details["failure_invariant"] = digest({
+                "failure_basis": failure_basis, "reason": details["reason"],
+                "component_uids": [uid], "raw_results": details["raw_results"],
+            })
+            if component_journal is not None:
+                component_journal.write(details["failure_invariant"], details)
+                atomic_json(component_journal.root.parent / "latest-conflict-failure.json",
+                            {"data": details, "sha256": digest(details)})
+            raise AlignmentConflictBlocked(details)
+
         source_order = {
             str(item["utterance_uid"]): index for index, item in enumerate(source)
         }
         for utterance_uid in sorted(recoverable_issues, key=source_order.__getitem__):
+            context_started = time.monotonic()
             position = source_order[utterance_uid]
             item = source[position]
             ranges = [
@@ -3063,12 +3628,15 @@ def align_corrected_segments(
                 group = source[start:end]
                 if any(
                     int(left["coarse_end_ms"]) > int(right["coarse_start_ms"])
+                    or int(right["coarse_start_ms"]) - int(left["coarse_end_ms"])
+                    > MAX_RECOVERY_CONTEXT_GAP_MS
                     for left, right in zip(group, group[1:])
                 ):
                     continue
                 joint_start = min(int(context["start_ms"]) for context in group)
                 joint_end = max(int(context["end_ms"]) for context in group)
                 try:
+                    check_independent_context_budget(utterance_uid, context_started)
                     raw_result = align(
                         [
                             {
@@ -3085,6 +3653,7 @@ def align_corrected_segments(
                         device,
                         **call_kwargs,
                     )
+                    check_independent_context_budget(utterance_uid, context_started)
                     raw_words = _raw_aligned_words(
                         raw_result, f"independent-context-{utterance_uid}"
                     )
@@ -3110,6 +3679,7 @@ def align_corrected_segments(
                         min_word_score=min_word_score,
                         max_word_duration_ms=max_word_duration_ms,
                         vad_regions=trusted_vad_regions,
+                        checkpoint_journal=normalized_journal,
                     )
                     drift = _segment_drift_audit(
                         words,
@@ -3130,6 +3700,8 @@ def align_corrected_segments(
                         or drift["late_outward_drift_ms"] > max_outward_drift_ms
                     ) and context is None:
                         continue
+                except AlignmentConflictBlocked:
+                    raise
                 except Exception:
                     continue
                 independent_by_uid[utterance_uid] = words
@@ -3137,6 +3709,7 @@ def align_corrected_segments(
                 raw_punctuation_only_count += punctuation_count
                 alignment_issues.pop(utterance_uid, None)
                 break
+            prior_conflict_seconds[utterance_uid] = time.monotonic() - context_started
 
     if alignment_issues:
         raise ForcedAlignmentError(
@@ -3159,6 +3732,11 @@ def align_corrected_segments(
             max_outward_drift_ms=max_outward_drift_ms,
             vad_regions=trusted_vad_regions,
             initial_modes=initial_modes,
+            component_journal=component_journal,
+            raw_journal=journal,
+            raw_call_keys=raw_call_keys,
+            normalized_journal=normalized_journal,
+            prior_conflict_seconds=prior_conflict_seconds,
         )
     )
     aligned_segments = []

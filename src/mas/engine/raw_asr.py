@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import wave
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
@@ -74,6 +75,7 @@ V2_BETA_ORPHAN_CAPTION_MAX_UNEXPLAINED_RUN_MS = 229
 V2_BETA_ORPHAN_CAPTION_MIN_ABSOLUTE_EVIDENCE_MS = 120
 V2_BETA_ORPHAN_CAPTION_TRAILING_DISPLAY_TOLERANCE_MS = 500
 V2_BETA_CORRECTION_MAX_INTERNAL_WORD_GAP_MS = 650
+V2_BETA_CORRECTION_REVIEW_WORD_GAP_MS = 5_000
 V2_BETA_ORPHAN_CAPTION_MIN_LEXICAL_ASR_OVERLAP_MS = 120
 V2_BETA_ORPHAN_CAPTION_MIN_SHARED_TOKENS = 2
 V2_BETA_ORPHAN_CAPTION_MIN_CHARACTER_BIGRAM_DICE = 0.50
@@ -115,9 +117,10 @@ class RawASRV2Config:
     # 90% of independently detected speech. The hard cap still stops runaway
     # VAD/ASR mismatches before hundreds of targeted model calls are launched.
     rescue_max_spans: int = 96
-    rescue_max_span_fraction: float = 0.10
+    rescue_max_span_fraction: float = 0.11
     rescue_adaptive_min_coverage_ratio: float = 0.90
     rescue_hard_max_spans: int = 192
+    rescue_mandatory_hard_max_spans: int = 256
     hallucination_max_vad_overlap_ratio: float = 0.20
     hallucination_min_avg_logprob: float = -0.80
     hallucination_max_no_speech_prob: float = 0.50
@@ -150,6 +153,7 @@ class RawASRV2Config:
     correction_max_internal_word_gap_ms: int = (
         V2_BETA_CORRECTION_MAX_INTERNAL_WORD_GAP_MS
     )
+    correction_review_word_gap_ms: int = V2_BETA_CORRECTION_REVIEW_WORD_GAP_MS
     orphan_caption_min_lexical_asr_overlap_ms: int = (
         V2_BETA_ORPHAN_CAPTION_MIN_LEXICAL_ASR_OVERLAP_MS
     )
@@ -281,6 +285,8 @@ class RawASRV2Config:
             isinstance(self.correction_max_internal_word_gap_ms, bool)
             or not isinstance(self.correction_max_internal_word_gap_ms, int)
             or self.correction_max_internal_word_gap_ms < 1
+            or type(self.correction_review_word_gap_ms) is not int
+            or self.correction_review_word_gap_ms < self.correction_max_internal_word_gap_ms
             or isinstance(
                 self.orphan_caption_min_lexical_asr_overlap_ms, bool
             )
@@ -341,6 +347,9 @@ class RawASRV2Config:
                 "rescue_hard_max_spans must be an integer greater than or "
                 "equal to rescue_max_spans"
             )
+        if (type(self.rescue_mandatory_hard_max_spans) is not int
+                or not self.rescue_hard_max_spans <= self.rescue_mandatory_hard_max_spans <= 256):
+            raise ValueError("rescue_mandatory_hard_max_spans must be between rescue_hard_max_spans and 256")
         if (
             isinstance(self.review_clip_padding_ms, bool)
             or not isinstance(self.review_clip_padding_ms, int)
@@ -476,6 +485,123 @@ def effective_rescue_span_limit(
         config.rescue_hard_max_spans,
         max(config.rescue_max_spans, proportional_limit),
     )
+
+
+def _bounded_rescue_batches(spans, *, limit, hard_limit, mandatory_hard_limit=None, trusted_intervals=()):
+    absolute_limit = hard_limit if mandatory_hard_limit is None else mandatory_hard_limit
+    if len(spans) > absolute_limit:
+        raise TranscriptionError(
+            f"Speech-hole rescue requires {len(spans)} spans, above hard limit {absolute_limit}"
+        )
+    ordinary_count = sum(not span.get("required_source_records") for span in spans)
+    if ordinary_count > hard_limit:
+        raise TranscriptionError(f"Ordinary speech-hole rescue requires {ordinary_count} spans, above hard limit {hard_limit}")
+    batches = [dict(span, source_rescue_span_indices=[index])
+               for index, span in enumerate(spans, start=1)]
+    max_duration = max((span["end_ms"] - span["start_ms"] for span in spans), default=0)
+    while len(batches) > limit:
+        eligible = [
+            (right["start_ms"] - left["end_ms"], index)
+            for index, (left, right) in enumerate(zip(batches, batches[1:]))
+            if right["end_ms"] - left["start_ms"] <= min(
+                max_duration, left.get("max_duration_ms", max_duration),
+                right.get("max_duration_ms", max_duration))
+            and (not left.get("required_source_records") and not right.get("required_source_records")
+                 or left.get("required_source_records") == right.get("required_source_records")
+                 and left["end_ms"] == right["start_ms"])
+            and not any(left["end_ms"] < trusted["end_ms"]
+                        and trusted["start_ms"] < right["start_ms"]
+                        for trusted in trusted_intervals)
+        ]
+        if not eligible:
+            break
+        _, index = min(eligible)
+        left, right = batches[index:index + 2]
+        merged = dict(left, end_ms=right["end_ms"])
+        if "max_duration_ms" in left or "max_duration_ms" in right:
+            merged["max_duration_ms"] = min(left.get("max_duration_ms", max_duration),
+                                             right.get("max_duration_ms", max_duration))
+        for key in ("issue_ids", "speech_region_indices", "reasons", "source_rescue_span_indices"):
+            merged[key] = sorted(set(left.get(key, []) + right.get(key, [])))
+        sources = left.get("required_source_records", []) + right.get("required_source_records", [])
+        if sources:
+            merged["required_source_records"] = [
+                {"source_id": source_id, "source_sha256": digest}
+                for source_id, digest in sorted({(item["source_id"], item["source_sha256"]) for item in sources})
+            ]
+        batches[index:index + 2] = [merged]
+    ordinary_count = sum(not batch.get("required_source_records") for batch in batches)
+    if len(batches) > limit and ordinary_count > limit:
+        raise TranscriptionError(
+            f"Speech-hole rescue cannot fit {limit} batches without exceeding "
+            f"original maximum duration {max_duration} ms or crossing trusted dialogue; "
+            f"remaining={len(batches)}"
+        )
+    for index, batch in enumerate(batches, start=1):
+        batch["rescue_span_index"] = index
+        batch["duration_ms"] = batch["end_ms"] - batch["start_ms"]
+    return batches
+
+
+def _rescue_budget_audit(batches, *, limit, hard_limit, mandatory_hard_limit=None):
+    overflow = max(0, len(batches) - limit)
+    return {
+        "adaptive_target": limit,
+        "hard_limit": hard_limit,
+        "mandatory_hard_limit": hard_limit if mandatory_hard_limit is None else mandatory_hard_limit,
+        "actual_batch_count": len(batches),
+        "mandatory_batch_count": sum(bool(batch.get("required_source_records")) for batch in batches),
+        "mandatory_overflow_count": overflow,
+        "mandatory_overflow_reason": "preserve_required_incomplete_source_evidence" if overflow else None,
+    }
+
+
+def _plan_rescue_batches(initial_coverage, vad_regions, segments, words, settings):
+    metrics = initial_coverage["metrics"]
+    ratio = metrics.get("independent_vad_speech_coverage_ratio", metrics["speech_coverage_ratio"])
+    limit = effective_rescue_span_limit(settings, vad_region_count=len(vad_regions), speech_coverage_ratio=ratio)
+    hard_limit = (settings.rescue_hard_max_spans if ratio >= settings.rescue_adaptive_min_coverage_ratio else limit)
+    batches = _bounded_rescue_batches(
+        initial_coverage["rescue_spans"], limit=limit, hard_limit=hard_limit,
+        mandatory_hard_limit=settings.rescue_mandatory_hard_max_spans,
+        trusted_intervals=_coverage_intervals_for_segments(segments, words),
+    )
+    return batches, _rescue_budget_audit(
+        batches, limit=limit, hard_limit=hard_limit,
+        mandatory_hard_limit=settings.rescue_mandatory_hard_max_spans,
+    )
+
+
+def validate_raw_rescue_plan(raw_asr_data):
+    try:
+        saved_settings = dict(raw_asr_data["model"]["settings"])
+        for key in ("extra_audio_review_uids", "hallucination_text_markers"):
+            if key in saved_settings:
+                saved_settings[key] = tuple(saved_settings[key])
+        settings = RawASRV2Config(**saved_settings)
+        if "rescue_mandatory_hard_max_spans" not in saved_settings:
+            raise TranscriptionError("rescue policy lacks mandatory absolute ceiling")
+        canonical = RawASRV2Config()
+        for key in ("rescue_max_spans", "rescue_max_span_fraction", "rescue_adaptive_min_coverage_ratio",
+                    "rescue_hard_max_spans", "rescue_mandatory_hard_max_spans"):
+            if getattr(settings, key) != getattr(canonical, key):
+                raise TranscriptionError(f"rescue policy is not canonical: {key}")
+        require_v2_beta_speech_coverage_config(settings.speech_coverage_config())
+        segments = [segment for segment in raw_asr_data["segments"]
+                    if not str(segment.get("source", "main")).startswith("rescue")]
+        vad_regions, words = raw_asr_data["vad_regions"], raw_asr_data["words"]
+        expected_initial = _analyze_raw_speech_coverage(
+            vad_regions, segments, words, config=settings.speech_coverage_config(),
+        )
+        expected_batches, expected_budget = _plan_rescue_batches(expected_initial, vad_regions, segments, words, settings)
+        if raw_asr_data.get("initial_speech_coverage") != expected_initial:
+            raise TranscriptionError("initial speech coverage differs from canonical primary evidence")
+        if raw_asr_data.get("rescue_batches") != expected_batches:
+            raise TranscriptionError("rescue batches differ from canonical primary evidence")
+        if raw_asr_data.get("rescue_budget_audit") != expected_budget:
+            raise TranscriptionError("rescue budget audit differs from canonical policy and batch identities")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TranscriptionError(f"canonical rescue execution proof is invalid: {exc}") from exc
 
 
 def validate_publishable_raw_asr_v2_policy(
@@ -626,7 +752,9 @@ def consume_coarse_segments(
                 "start_ms": start_ms,
                 "end_ms": end_ms,
                 "text": text,
-                "word_timing_complete": bool(text) and bool(local_words),
+                "word_timing_complete": _segment_has_complete_word_inventory(
+                    {"text": text, "words": local_words}
+                ),
                 "words": local_words,
                 "source": source,
                 "asr_audit": {
@@ -673,13 +801,19 @@ def merge_rescue_evidence(
     """Merge only genuinely new rescue evidence; never overwrite primary text."""
 
     merged_segments = [dict(item) for item in primary_segments]
+    incomplete_ids = {
+        str(item["segment_id"])
+        for item in primary_segments
+        if "words" in item and not _segment_has_complete_word_inventory(item)
+    }
     for segment in rescue_segments:
         rescue_text = str(segment.get("text", "")).strip()
         if not rescue_text:
             continue
         rescue_normalized = _normalized_lexical_text(rescue_text)
         duplicate = any(
-            _overlap_ms(existing, segment) > 0
+            str(existing.get("segment_id", "")) not in incomplete_ids
+            and _overlap_ms(existing, segment) > 0
             and (
                 _normalized_lexical_text(existing.get("text", ""))
                 == rescue_normalized
@@ -711,7 +845,8 @@ def merge_rescue_evidence(
     for word in rescue_words:
         duration = int(word["end_ms"]) - int(word["start_ms"])
         duplicate = any(
-            _overlap_ms(existing, word) >= max(1, min(duration, int(existing["end_ms"]) - int(existing["start_ms"])) // 2)
+            str(existing.get("segment_id", "")) not in incomplete_ids
+            and _overlap_ms(existing, word) >= max(1, min(duration, int(existing["end_ms"]) - int(existing["start_ms"])) // 2)
             and str(existing.get("text", "")).strip().casefold()
             == str(word.get("text", "")).strip().casefold()
             for existing in merged_words
@@ -775,10 +910,112 @@ def _is_known_subtitle_hallucination(text: Any) -> bool:
     return _normalized_lexical_text(text) in {"altyazı m k", "altyazı k m"}
 
 
+def _segment_has_complete_word_inventory(segment: Mapping[str, Any]) -> bool:
+    words = segment.get("words")
+    if not isinstance(words, list) or not words:
+        return False
+    if any(
+        not isinstance(word, Mapping)
+        or not str(word.get("text", "")).strip()
+        or type(word.get("start_ms")) is not int
+        or type(word.get("end_ms")) is not int
+        or word["start_ms"] < 0
+        or word["end_ms"] <= word["start_ms"]
+        for word in words
+    ):
+        return False
+    ordered = sorted(words, key=lambda word: (word["start_ms"], word["end_ms"]))
+    return bool(str(segment.get("text", "")).strip()) and (
+        _normalized_lexical_text("".join(str(word["text"]) for word in ordered))
+        == _normalized_lexical_text(segment["text"])
+    )
+
+
+def _coverage_intervals_for_segments(segments, words):
+    # Keep the complete raw inventory for audit; incomplete owners cannot
+    # conceal VAD holes just because they emitted some plausible word times.
+    build_coverage_intervals(words)
+    complete_words = {
+        (str(segment["segment_id"]), word["start_ms"], word["end_ms"], word["text"])
+        for segment in segments
+        if _segment_has_complete_word_inventory(segment)
+        for word in segment["words"]
+    }
+    return build_coverage_intervals([
+        word for word in words
+        if (str(word.get("segment_id", "")), word["start_ms"], word["end_ms"], word["text"])
+        in complete_words
+    ])
+
+
+def _excluded_incomplete_segments(segments, *, episode):
+    excluded = []
+    for segment in segments:
+        if _segment_has_complete_word_inventory(segment):
+            continue
+        records = build_correction_utterances([segment], episode=episode)
+        excluded.append({
+            "segment_id": str(segment["segment_id"]),
+            "segment_sha256": sha256_json(segment),
+            "utterance_uid": records[0]["utterance_uid"] if records else None,
+            "start_ms": segment["start_ms"], "end_ms": segment["end_ms"],
+            "disposition": "excluded_incomplete_asr_hypothesis",
+            "reason": "incomplete_provisional_word_timing",
+        })
+    return excluded
+
+
+def _analyze_raw_speech_coverage(vad_regions, segments, words, *, config):
+    return analyze_speech_coverage(
+        vad_regions, _coverage_intervals_for_segments(segments, words), config=config,
+        required_uncovered_intervals=required_speech_coverage_regions(segments, vad_regions),
+        include_required_outside_vad=True,
+    )
+
+
+def required_acoustic_review_regions(segments, vad_regions):
+    regions = []
+    for source in required_speech_coverage_regions(segments, vad_regions):
+        cursor = source["start_ms"]
+        outside = []
+        for vad in vad_regions:
+            if vad["end_ms"] <= cursor:
+                continue
+            if vad["start_ms"] >= source["end_ms"]:
+                break
+            if vad["start_ms"] > cursor:
+                outside.append((cursor, vad["start_ms"]))
+            cursor = max(cursor, vad["end_ms"])
+        if cursor < source["end_ms"]:
+            outside.append((cursor, source["end_ms"]))
+        for start, end in outside:
+            for start_ms in range(start, end, 10_000):
+                regions.append(dict(source, start_ms=start_ms, end_ms=min(end, start_ms + 10_000)))
+    return sorted(regions, key=lambda item: (item["start_ms"], item["end_ms"], item["source_id"]))
+
+
+def required_speech_coverage_regions(segments, vad_regions):
+    regions = []
+    for segment in segments:
+        if _segment_has_complete_word_inventory(segment):
+            continue
+        bounds = [{"start_ms": segment["start_ms"], "end_ms": segment["end_ms"]}]
+        bounds.extend({"start_ms": word["start_ms"], "end_ms": word["end_ms"]}
+                      for word in segment.get("words", [])
+                      if isinstance(word, Mapping) and str(word.get("text", "")).strip()
+                      and type(word.get("start_ms")) is int and type(word.get("end_ms")) is int
+                      and word["start_ms"] >= 0 and word["end_ms"] > word["start_ms"])
+        source_sha = sha256_json(segment)
+        regions.extend(dict(bound, source_id=str(segment["segment_id"]), source_sha256=source_sha)
+                       for bound in build_coverage_intervals(bounds, merge_touching=True))
+    return sorted(regions, key=lambda item: (item["start_ms"], item["end_ms"], item["source_id"]))
+
+
 def _split_segment_for_correction(
-    segment: Mapping[str, Any], *, max_internal_word_gap_ms: int
+    segment: Mapping[str, Any], *, max_internal_word_gap_ms: int,
+    review_word_gap_ms: int = V2_BETA_CORRECTION_REVIEW_WORD_GAP_MS,
 ) -> list[dict[str, Any]]:
-    """Split one coarse ASR segment only where timed words prove a long gap.
+    """Split one coarse ASR segment at provisional timed-word gaps.
 
     faster-whisper may place words tens of seconds apart in one segment after
     VAD time restoration. Treating the segment bounds as one utterance makes a
@@ -822,6 +1059,12 @@ def _split_segment_for_correction(
             return [copied]
         words.append(dict(raw_word))
     words.sort(key=lambda item: (int(item["start_ms"]), int(item["end_ms"])))
+    leading_gap = words[0]["start_ms"] - int(segment["start_ms"])
+    trailing_gap = int(segment["end_ms"]) - words[-1]["end_ms"]
+    if (leading_gap >= review_word_gap_ms or trailing_gap >= review_word_gap_ms
+            or any(right["start_ms"] - left["end_ms"] >= review_word_gap_ms
+                   for left, right in zip(words, words[1:]))):
+        copied["provisional_word_gap_requires_audio_review"] = True
     reconstructed = "".join(str(word["text"]) for word in words).strip()
     if _normalized_lexical_text(reconstructed) != _normalized_lexical_text(
         segment.get("text", "")
@@ -856,6 +1099,13 @@ def _split_segment_for_correction(
         ).strip()
         derived["words"] = [dict(word) for word in group]
         derived["word_timing_complete"] = True
+        if ((group_index == 1 and leading_gap >= review_word_gap_ms)
+                or (group_index == len(groups) and trailing_gap >= review_word_gap_ms)
+                or (group_index > 1
+             and group[0]["start_ms"] - groups[group_index - 2][-1]["end_ms"] >= review_word_gap_ms)
+                or (group_index < len(groups)
+                    and groups[group_index][0]["start_ms"] - group[-1]["end_ms"] >= review_word_gap_ms)):
+            derived["provisional_word_gap_requires_audio_review"] = True
         split.append(derived)
     return split
 
@@ -869,6 +1119,7 @@ def build_correction_utterances(
     max_internal_word_gap_ms: int = (
         V2_BETA_CORRECTION_MAX_INTERNAL_WORD_GAP_MS
     ),
+    review_word_gap_ms: int = V2_BETA_CORRECTION_REVIEW_WORD_GAP_MS,
 ) -> list[dict[str, Any]]:
     """Create stable coarse utterance records for Turkish correction."""
 
@@ -880,6 +1131,8 @@ def build_correction_utterances(
         or max_internal_word_gap_ms < 1
     ):
         raise ValueError("max_internal_word_gap_ms must be a positive integer")
+    if type(review_word_gap_ms) is not int or review_word_gap_ms < max_internal_word_gap_ms:
+        raise ValueError("review_word_gap_ms must be an integer >= max_internal_word_gap_ms")
     materialized: list[dict[str, Any]] = []
     for segment in segments:
         if not str(segment.get("text", "")).strip():
@@ -888,6 +1141,7 @@ def build_correction_utterances(
             _split_segment_for_correction(
                 segment,
                 max_internal_word_gap_ms=max_internal_word_gap_ms,
+                review_word_gap_ms=review_word_gap_ms,
             )
         )
     materialized.sort(
@@ -938,6 +1192,8 @@ def build_correction_utterances(
         risk_flags: list[str] = []
         if not bool(segment.get("word_timing_complete")):
             risk_flags.append("incomplete_provisional_word_timing")
+        if segment.get("provisional_word_gap_requires_audio_review") is True:
+            risk_flags.append("provisional_word_gap_requires_audio_review")
         if str(segment.get("source", "main")).startswith("rescue"):
             risk_flags.append("speech_hole_rescue_asr")
         records.append(
@@ -1027,6 +1283,25 @@ def _extract_review_clip(
     return clip_start_ms, clip_end_ms
 
 
+def _speech_hole_metadata(issue, *, episode, utterances):
+    start_ms, end_ms = int(issue["start_ms"]), int(issue["end_ms"])
+    prior = [item for item in utterances if int(item.get("coarse_end_ms", -1)) <= start_ms]
+    following = [item for item in utterances if int(item.get("coarse_start_ms", 1 << 62)) >= end_ms]
+    identity = json.dumps(
+        {"episode": episode, "start_ms": start_ms, "end_ms": end_ms, "issue_id": issue.get("issue_id")},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    hole_uid = f"MA{episode:02d}-HOLE-{hashlib.sha256(identity).hexdigest()[:16]}"
+    return {
+        "hole_uid": hole_uid, "start_ms": start_ms, "end_ms": end_ms,
+        "reason": ", ".join(str(item) for item in issue.get("reasons", [])) or "unresolved_speech",
+        "context_before": str(prior[-1].get("asr_text", "")) if prior else "",
+        "context_after": str(following[0].get("asr_text", "")) if following else "",
+        "risk_flags": ["unresolved_vad_speech", "manual_audio_review_required"],
+        "audio_member": f"speech_hole_audio/{hole_uid}.wav",
+    }
+
+
 def build_speech_hole_records(
     coverage_report: Mapping[str, Any],
     *,
@@ -1035,6 +1310,7 @@ def build_speech_hole_records(
     audio_output_root: str | Path,
     utterances: Sequence[Mapping[str, Any]] = (),
     config: RawASRV2Config | None = None,
+    existing_records: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Extract final unresolved VAD regions as auditable WAV-backed records."""
 
@@ -1062,58 +1338,37 @@ def build_speech_hole_records(
     clip_root = output_root / "speech_hole_audio"
     clip_root.mkdir(parents=True, exist_ok=True)
     holes: list[dict[str, Any]] = []
+    reusable_by_uid = {item["hole_uid"]: item for item in validate_speech_holes(existing_records)}
     for issue in unresolved_issues:
-        start_ms = int(issue["start_ms"])
-        end_ms = int(issue["end_ms"])
-        before = ""
-        after = ""
-        prior = [
-            item for item in utterances if int(item.get("coarse_end_ms", -1)) <= start_ms
-        ]
-        following = [
-            item for item in utterances if int(item.get("coarse_start_ms", 1 << 62)) >= end_ms
-        ]
-        if prior:
-            before = str(prior[-1].get("asr_text", ""))
-        if following:
-            after = str(following[0].get("asr_text", ""))
-        identity = json.dumps(
-            {
-                "episode": episode,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "issue_id": issue.get("issue_id"),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        reasons = issue.get("reasons", [])
-        reason = ", ".join(str(item) for item in reasons) or "unresolved_speech"
-        hole_uid = f"MA{episode:02d}-HOLE-{hashlib.sha256(identity).hexdigest()[:16]}"
-        audio_member = f"speech_hole_audio/{hole_uid}.wav"
-        clip_path = output_root / audio_member
+        canonical = _speech_hole_metadata(issue, episode=episode, utterances=utterances)
+        clip_path = output_root / canonical["audio_member"]
+        existing = reusable_by_uid.get(canonical["hole_uid"])
+        if existing is not None and all(existing[key] == value for key, value in canonical.items()):
+            _validate_persisted_review_audio(existing, prepare_dir=output_root, label="recovery speech-hole")
+            holes.append(dict(existing, hole_index=len(holes) + 1))
+            continue
+        if clip_path.exists():
+            retained = clip_root / "retained" / sha256_file(clip_path) / clip_path.name
+            retained.parent.mkdir(parents=True, exist_ok=True)
+            if not retained.exists():
+                shutil.copy2(clip_path, retained)
+            if sha256_file(retained) != sha256_file(clip_path):
+                raise TranscriptionError("Could not preserve superseded speech-hole WAV")
         clip_start_ms, clip_end_ms = _extract_review_clip(
             source_audio,
             clip_path,
-            target_start_ms=start_ms,
-            target_end_ms=end_ms,
+            target_start_ms=canonical["start_ms"],
+            target_end_ms=canonical["end_ms"],
             padding_ms=settings.review_clip_padding_ms,
             minimum_duration_ms=settings.review_clip_min_duration_ms,
         )
         clip_size = clip_path.stat().st_size
         holes.append(
             {
-                "hole_uid": hole_uid,
+                **canonical,
                 "hole_index": len(holes) + 1,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
                 "clip_start_ms": clip_start_ms,
                 "clip_end_ms": clip_end_ms,
-                "reason": reason,
-                "context_before": before,
-                "context_after": after,
-                "risk_flags": ["unresolved_vad_speech", "manual_audio_review_required"],
-                "audio_member": audio_member,
                 "audio_sha256": sha256_file(clip_path),
                 "audio_size_bytes": clip_size,
             }
@@ -1185,6 +1440,12 @@ def build_asr_hallucination_records(
     if isinstance(episode, bool) or not isinstance(episode, int) or episode <= 0:
         raise TranscriptionError("episode must be a positive integer")
     trusted_utterances = validate_input_utterances(utterances)
+    incomplete = [item["utterance_uid"] for item in trusted_utterances
+                  if "incomplete_provisional_word_timing" in item["risk_flags"]]
+    if incomplete:
+        raise TranscriptionError(
+            f"Incomplete ASR hypotheses must be excluded before review WAV extraction: {incomplete}"
+        )
     if isinstance(vad_regions, (str, bytes, bytearray)) or not isinstance(
         vad_regions, Sequence
     ):
@@ -1276,6 +1537,10 @@ def build_asr_hallucination_records(
         structural_reasons: list[str] = []
         confidence_reasons: list[str] = []
         is_orphan_caption = "orphan_youtube_caption" in utterance["risk_flags"]
+        if "provisional_word_gap_requires_audio_review" in utterance["risk_flags"]:
+            structural_reasons.append("provisional_word_gap_requires_audio_review")
+        if "incomplete_provisional_word_timing" in utterance["risk_flags"]:
+            structural_reasons.append("incomplete_provisional_word_timing")
         if is_orphan_caption:
             structural_reasons.append(
                 "orphan_youtube_caption_without_asr_or_vad_overlap"
@@ -1899,6 +2164,29 @@ def _validate_persisted_raw_asr_v2(
     for key in ("model", "initial_speech_coverage", "speech_coverage"):
         if not isinstance(data.get(key), Mapping):
             errors.append(f"{key} is not an object")
+    if all(isinstance(data.get(key), list) for key in ("segments", "words", "vad_regions")):
+        try:
+            coverage = data.get("speech_coverage", {})
+            recomputed = _analyze_raw_speech_coverage(
+                data["vad_regions"], data["segments"], data["words"],
+                config=SpeechCoverageConfig(**dict(coverage["config"])),
+            )
+            if recomputed != coverage:
+                errors.append("speech coverage does not match complete lexical word inventory")
+            expected_holes = sorted(
+                (issue["start_ms"], issue["end_ms"])
+                for issue in recomputed["coverage_issues"]
+                if issue["classification"] == "unresolved_speech"
+            )
+            actual_holes = sorted(
+                (hole["start_ms"], hole["end_ms"])
+                for hole in data.get("speech_hole_records", [])
+            )
+            if expected_holes != actual_holes:
+                errors.append("speech-hole inventory does not match complete lexical word coverage")
+            validate_raw_rescue_plan(data)
+        except (KeyError, TypeError, ValueError, TranscriptionError) as exc:
+            errors.append(f"complete lexical word coverage validation failed: {exc}")
     vad_value = data.get("vad_regions")
     if isinstance(vad_value, list):
         derived_independent_vad = (
@@ -1932,6 +2220,44 @@ def _validate_persisted_raw_asr_v2(
                 candidates_value
             )
             trusted_utterances = validate_input_utterances(utterances_value)
+            persisted_by_uid = {item["utterance_uid"]: item for item in trusted_utterances}
+            settings = data["model"]["settings"]
+            excluded = _excluded_incomplete_segments(data["segments"], episode=episode)
+            if data.get("excluded_incomplete_segments", []) != excluded:
+                raise ValueError("excluded incomplete segment audit does not match raw ownership")
+            if data.get("required_acoustic_review_regions") != required_acoustic_review_regions(data["segments"], data["vad_regions"]):
+                raise ValueError("required acoustic review regions do not match raw ownership")
+            if any(item["utterance_uid"] in persisted_by_uid for item in excluded):
+                raise ValueError("excluded incomplete ASR hypothesis remains in correction input")
+            expected_utterances = build_correction_utterances(
+                [segment for segment in data["segments"] if _segment_has_complete_word_inventory(segment)],
+                episode=episode,
+                max_internal_word_gap_ms=settings["correction_max_internal_word_gap_ms"],
+                review_word_gap_ms=settings["correction_review_word_gap_ms"],
+            )
+            holes_by_uid = {hole["hole_uid"]: hole for hole in data["speech_hole_records"]}
+            for issue in data["speech_coverage"]["coverage_issues"]:
+                if issue["classification"] != "unresolved_speech":
+                    continue
+                canonical = _speech_hole_metadata(issue, episode=episode, utterances=expected_utterances)
+                actual = holes_by_uid.get(canonical["hole_uid"])
+                if actual is None or any(actual[key] != value for key, value in canonical.items()):
+                    raise ValueError("speech-hole canonical identity/reason/context mismatch")
+            for expected in expected_utterances:
+                persisted = persisted_by_uid.get(expected["utterance_uid"])
+                if persisted is None or any(
+                    persisted[key] != expected[key]
+                    for key in ("coarse_start_ms", "coarse_end_ms", "asr_text")
+                ):
+                    raise ValueError("raw segment and correction utterance ownership mismatch")
+                required_flags = set(expected["risk_flags"])
+                if data.get("independent_vad") is True and required_flags.intersection({
+                    "incomplete_provisional_word_timing",
+                    "provisional_word_gap_requires_audio_review",
+                }):
+                    required_flags.update({"suspected_asr_hallucination", "manual_audio_review_required"})
+                if not required_flags.issubset(persisted["risk_flags"]):
+                    raise ValueError("raw segment correction is missing mandatory acoustic risk flags")
             flagged = {
                 str(item["utterance_uid"]): item
                 for item in trusted_utterances
@@ -2031,7 +2357,7 @@ def _validate_persisted_raw_asr_v2(
                     "non-independent debug artifact cannot carry hallucination "
                     "review candidates"
                 )
-        except (OSError, RuntimeError, TRCorrectionError, ValueError) as exc:
+        except (KeyError, TypeError, OSError, RuntimeError, TRCorrectionError, ValueError) as exc:
             errors.append(f"ASR hallucination validation failed: {exc}")
     return errors
 
@@ -2217,6 +2543,8 @@ def _write_raw_asr_v2_recovery_checkpoint(
     speech_coverage: Mapping[str, Any],
     rescue_failures: Sequence[Mapping[str, Any]],
     rescue_span_count: int,
+    rescue_batches: Sequence[Mapping[str, Any]],
+    rescue_budget_audit: Mapping[str, Any],
     youtube_captions: Sequence[Mapping[str, Any]],
     speech_hole_records: Sequence[Mapping[str, Any]],
 ) -> Path:
@@ -2258,6 +2586,8 @@ def _write_raw_asr_v2_recovery_checkpoint(
             "speech_coverage": dict(speech_coverage),
             "rescue_failures": list(rescue_failures),
             "rescue_span_count": rescue_span_count,
+            "rescue_batches": list(rescue_batches),
+            "rescue_budget_audit": dict(rescue_budget_audit),
             "youtube_captions": list(youtube_captions),
             "speech_hole_records": list(speech_hole_records),
         },
@@ -2364,6 +2694,7 @@ def recover_raw_asr_v2_from_checkpoint(
         ) from exc
     postprocess_only_fields = {
         "correction_max_internal_word_gap_ms",
+        "correction_review_word_gap_ms",
         "extra_audio_review_uids",
         "orphan_caption_min_lexical_asr_overlap_ms",
         "orphan_caption_min_shared_tokens",
@@ -2431,6 +2762,7 @@ def recover_raw_asr_v2_from_checkpoint(
     final_coverage = json.loads(
         json.dumps(final_coverage, ensure_ascii=False, allow_nan=False)
     )
+    validate_raw_rescue_plan(checkpoint)
     for coverage in (initial_coverage, final_coverage):
         try:
             require_v2_beta_speech_coverage_config(
@@ -2477,10 +2809,34 @@ def recover_raw_asr_v2_from_checkpoint(
         load_vtt_captions(caption_file) if caption_file is not None else []
     )
     correction_utterances = build_correction_utterances(
-        segments,
+        [segment for segment in segments if _segment_has_complete_word_inventory(segment)],
         episode=episode,
         youtube_captions=youtube_captions,
         max_internal_word_gap_ms=settings.correction_max_internal_word_gap_ms,
+        review_word_gap_ms=settings.correction_review_word_gap_ms,
+    )
+    # Recovery reuses expensive inference, not a legacy coverage conclusion
+    # that may have credited words from an incomplete/repetitive segment.
+    primary_segments = [
+        segment for segment in segments
+        if not str(segment.get("source", "main")).startswith("rescue")
+    ]
+    initial_coverage = _analyze_raw_speech_coverage(
+        vad_regions, primary_segments, words,
+        config=settings.speech_coverage_config(),
+    )
+    final_coverage = _analyze_raw_speech_coverage(
+        vad_regions, segments, words,
+        config=settings.speech_coverage_config(),
+    )
+    speech_hole_records = build_speech_hole_records(
+        final_coverage,
+        episode=episode,
+        audio_path=source_path,
+        audio_output_root=destination,
+        utterances=correction_utterances,
+        config=settings,
+        existing_records=speech_hole_records,
     )
     correction_utterances = include_speech_holes_for_correction(
         correction_utterances,
@@ -2511,6 +2867,8 @@ def recover_raw_asr_v2_from_checkpoint(
             settings.orphan_caption_min_character_bigram_dice
         ),
     )
+    excluded_incomplete_segments = _excluded_incomplete_segments(segments, episode=episode)
+    excluded_uids = {item["utterance_uid"] for item in excluded_incomplete_segments}
     correction_utterances, asr_hallucination_records = (
         build_asr_hallucination_records(
             correction_utterances,
@@ -2519,7 +2877,7 @@ def recover_raw_asr_v2_from_checkpoint(
             audio_path=source_path,
             audio_output_root=destination,
             config=settings,
-            review_request_uids=requested_hallucination_reviews,
+            review_request_uids=[uid for uid in requested_hallucination_reviews if uid not in excluded_uids],
         )
     )
 
@@ -2574,6 +2932,8 @@ def recover_raw_asr_v2_from_checkpoint(
         },
         "language": str(saved_model.get("language", settings.language)),
         "segments": segments,
+        "excluded_incomplete_segments": excluded_incomplete_segments,
+        "required_acoustic_review_regions": required_acoustic_review_regions(segments, vad_regions),
         "words": words,
         "vad_regions": vad_regions,
         "vad_fallback_reason": checkpoint.get("vad_fallback_reason"),
@@ -2581,6 +2941,8 @@ def recover_raw_asr_v2_from_checkpoint(
         "initial_speech_coverage": initial_coverage,
         "speech_coverage": final_coverage,
         "rescue_failures": rescue_failures,
+        "rescue_batches": checkpoint.get("rescue_batches", []),
+        "rescue_budget_audit": checkpoint.get("rescue_budget_audit"),
         "youtube_captions": youtube_captions,
         "correction_utterances": correction_utterances,
         "speech_hole_records": speech_hole_records,
@@ -2654,9 +3016,12 @@ def transcribe_raw_audio_v2(
     captions_path: str | Path | None = None,
     hallucination_review_utterance_uids: Sequence[str] = (),
     force: bool = False,
+    require_resume: bool = False,
 ) -> dict[str, Any]:
     """Run raw ASR, rescue VAD holes, and persist a correction-first artifact."""
 
+    if force and require_resume:
+        raise TranscriptionError("Scoped alignment retry cannot force raw-ASR inference")
     if isinstance(episode, bool) or not isinstance(episode, int) or episode <= 0:
         raise TranscriptionError("episode must be a positive integer")
     settings, requested_hallucination_reviews = _settings_with_review_requests(
@@ -2693,6 +3058,8 @@ def transcribe_raw_audio_v2(
         if cached is not None:
             cached["resumed"] = True
             return cached
+        if require_resume:
+            raise TranscriptionError("Scoped alignment retry requires a validated raw-ASR checkpoint")
         recovery_path = destination / RAW_ASR_V2_RECOVERY_FILENAME
         if recovery_path.is_file():
             return recover_raw_asr_v2_from_checkpoint(
@@ -2895,22 +3262,21 @@ def transcribe_raw_audio_v2(
                 "evidence; speech coverage cannot be proven"
             )
         coverage_config = settings.speech_coverage_config()
-        initial_coverage = analyze_speech_coverage(
-            vad_regions,
-            build_coverage_intervals(primary_words),
+        initial_coverage = _analyze_raw_speech_coverage(
+            vad_regions, primary_segments, primary_words,
             config=coverage_config,
         )
         rescue_spans = list(initial_coverage.get("rescue_spans", []))
         coverage_metrics = initial_coverage.get("metrics", {})
         primary_speech_coverage_ratio = float(
-            coverage_metrics.get("speech_coverage_ratio", 0.0)
+            coverage_metrics.get("independent_vad_speech_coverage_ratio",
+                                 coverage_metrics.get("speech_coverage_ratio", 0.0))
         )
-        rescue_span_limit = effective_rescue_span_limit(
-            settings,
-            vad_region_count=len(vad_regions),
-            speech_coverage_ratio=primary_speech_coverage_ratio,
-        )
-        if len(rescue_spans) > rescue_span_limit:
+        try:
+            rescue_spans, rescue_budget_audit = _plan_rescue_batches(
+                initial_coverage, vad_regions, primary_segments, primary_words, settings,
+            )
+        except TranscriptionError as exc:
             rescue_total_ms = sum(
                 int(span["end_ms"]) - int(span["start_ms"])
                 for span in rescue_spans
@@ -2923,8 +3289,7 @@ def transcribe_raw_audio_v2(
                 default=0,
             )
             raise TranscriptionError(
-                f"Speech-hole rescue requires {len(rescue_spans)} spans, above "
-                f"the safe limit {rescue_span_limit}; inspect the "
+                f"{exc}; inspect the "
                 "VAD/ASR inputs; "
                 f"primary_segments={len(primary_segments)}, "
                 f"primary_words={len(primary_words)}, "
@@ -2933,7 +3298,7 @@ def transcribe_raw_audio_v2(
                 f"{primary_speech_coverage_ratio:.4f}, "
                 f"rescue_total_seconds={rescue_total_ms / 1000.0:.3f}, "
                 f"longest_rescue_seconds={rescue_max_ms / 1000.0:.3f}"
-            )
+            ) from exc
 
         rescue_segments: list[dict[str, Any]] = []
         rescue_words: list[dict[str, Any]] = []
@@ -3017,18 +3382,18 @@ def transcribe_raw_audio_v2(
         segments, words = merge_rescue_evidence(
             primary_segments, primary_words, rescue_segments, rescue_words
         )
-        final_coverage = analyze_speech_coverage(
-            vad_regions,
-            build_coverage_intervals(words),
+        final_coverage = _analyze_raw_speech_coverage(
+            vad_regions, segments, words,
             config=coverage_config,
         )
         correction_utterances = build_correction_utterances(
-            segments,
+            [segment for segment in segments if _segment_has_complete_word_inventory(segment)],
             episode=episode,
             youtube_captions=youtube_captions,
             max_internal_word_gap_ms=(
                 settings.correction_max_internal_word_gap_ms
             ),
+            review_word_gap_ms=settings.correction_review_word_gap_ms,
         )
         speech_hole_records = build_speech_hole_records(
             final_coverage,
@@ -3066,12 +3431,16 @@ def transcribe_raw_audio_v2(
             speech_coverage=final_coverage,
             rescue_failures=rescue_failures,
             rescue_span_count=len(rescue_spans),
+            rescue_batches=rescue_spans,
+            rescue_budget_audit=rescue_budget_audit,
             youtube_captions=youtube_captions,
             speech_hole_records=speech_hole_records,
         )
         correction_utterances = include_speech_holes_for_correction(
             correction_utterances, speech_hole_records
         )
+        excluded_incomplete_segments = _excluded_incomplete_segments(segments, episode=episode)
+        excluded_uids = {item["utterance_uid"] for item in excluded_incomplete_segments}
         if independent_vad:
             correction_utterances = include_orphan_youtube_captions_for_correction(
                 correction_utterances,
@@ -3108,7 +3477,7 @@ def transcribe_raw_audio_v2(
                 audio_path=source_path,
                 audio_output_root=destination,
                 config=settings,
-                review_request_uids=requested_hallucination_reviews,
+                review_request_uids=[uid for uid in requested_hallucination_reviews if uid not in excluded_uids],
             )
         else:
             if requested_hallucination_reviews:
@@ -3151,6 +3520,8 @@ def transcribe_raw_audio_v2(
             },
             "language": str(getattr(info, "language", settings.language)),
             "segments": segments,
+            "excluded_incomplete_segments": excluded_incomplete_segments,
+            "required_acoustic_review_regions": required_acoustic_review_regions(segments, vad_regions),
             "words": words,
             "vad_regions": vad_regions,
             "vad_fallback_reason": vad_fallback_reason,
@@ -3158,6 +3529,8 @@ def transcribe_raw_audio_v2(
             "initial_speech_coverage": initial_coverage,
             "speech_coverage": final_coverage,
             "rescue_failures": rescue_failures,
+            "rescue_batches": rescue_spans,
+            "rescue_budget_audit": rescue_budget_audit,
             "youtube_captions": youtube_captions,
             "correction_utterances": correction_utterances,
             "speech_hole_records": speech_hole_records,

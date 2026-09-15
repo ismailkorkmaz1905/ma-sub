@@ -150,7 +150,7 @@ def test_encode_idle_watchdog_preserves_log_and_partial(tmp_path):
     partial = tmp_path / 'partial.mp4'
     log = tmp_path / 'encode.log'
     script = "from pathlib import Path; import time; Path('partial.mp4').write_bytes(b'partial'); time.sleep(5)"
-    with pytest.raises(RuntimeError, match='frame progress watchdog expired'):
+    with pytest.raises(TimeoutError, match='frame progress watchdog expired'):
         _run_encode([sys.executable, '-c', script], tmp_path, log, partial, 2, .2)
     assert 'frame progress watchdog expired' in log.read_text(encoding='utf-8')
     assert log.with_suffix('.failed.mp4').read_bytes() == b'partial'

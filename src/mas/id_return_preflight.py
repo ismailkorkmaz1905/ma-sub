@@ -36,6 +36,12 @@ def preflight_local_id_return(local_root, episode, config_dir):
             schema = json.loads(archive.read("schema.json"))
         if schema.get("episode") != episode or manifest.get("episode") != episode:
             raise IntegrityError("local Indonesian pack episode mismatch")
+        workspace_receipt = Path(str(returned) + ".workspace.json")
+        if "production_policy" in schema:
+            from .engine.translation_workspace import validate_id_workspace_output
+            validate_id_workspace_output(pack, returned, receipt_path=workspace_receipt)
+            before["workspace_sha256"] = file_digest(workspace_receipt)
+            report["workspace_sha256"] = before["workspace_sha256"]
         validation = load_and_validate_id_translation_zip(
             schema, returned, input_manifest=manifest)
         records = validation.ordered_records(schema)
@@ -92,6 +98,8 @@ def preflight_local_id_return(local_root, episode, config_dir):
         except Exception as exc:
             report["issues"].append(str(exc))
         after = {"return_sha256": file_digest(returned), "pack_sha256": file_digest(pack)}
+        if "workspace_sha256" in before:
+            after["workspace_sha256"] = file_digest(workspace_receipt)
         if after != before:
             raise IntegrityError("Indonesian pack or return changed during local preflight")
         if report["issues"]:

@@ -232,3 +232,19 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
 
     runner = (ROOT / "runpod" / "run-episode.sh").read_text(encoding="utf-8")
     assert 'export PATH="${MAS_BIN_DIR:-/workspace/.local/bin}:$PATH"' in runner
+
+
+def test_immutable_image_runtime_and_entrypoint_do_not_depend_on_volume_code():
+    docker = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "WORKDIR /opt/ma-sub" in docker
+    assert "MAS_VENV_DIR=/opt/venv" in docker
+    assert "openssh-server" in docker
+    assert "MAS_RUNTIME_MODE=image-build MAS_BIN_DIR=/usr/local/bin" in docker
+    assert 'ENTRYPOINT ["/opt/ma-sub/runpod/container-start.sh"]' in docker
+    script = (ROOT / "runpod/bootstrap.sh").read_text(encoding="utf-8")
+    assert script.index('immutable runtime missing:') < script.index('curl --fail')
+    assert script.index('immutable runtime ABI mismatch;') < script.index('timeout 120 uv cache clean')
+    startup = (ROOT / "runpod/container-start.sh").read_text(encoding="utf-8")
+    assert 'exec /opt/ma-sub/mas "$@"' in startup
+    assert 'exec /usr/sbin/sshd -D -e -o PasswordAuthentication=no' in startup
+    assert 'AuthenticationMethods=publickey' in startup

@@ -197,7 +197,13 @@ class CapacityLease:
     def remaining_work_seconds(self):
         if self.pod is None or self._deadline is None:
             raise IntegrityError("capacity lease is not acquired")
-        return max(0, self._deadline - self.clock() - self.plan.shutdown_seconds)
+        return max(
+            0,
+            min(
+                self._deadline - self.clock() - self.plan.shutdown_seconds,
+                self.plan.total_seconds - self.plan.shutdown_seconds,
+            ),
+        )
 
     def _left(self, cap):
         left = self._deadline - self.clock()

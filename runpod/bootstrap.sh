@@ -8,6 +8,21 @@ MAS_BIN_DIR="${MAS_BIN_DIR:-/workspace/.local/bin}"
 export UV_CACHE_DIR
 export PATH="$MAS_BIN_DIR:$PATH"
 cd "$ROOT"
+RUNTIME_MODE="${MAS_RUNTIME_MODE:-recovery}"
+case "$RUNTIME_MODE" in
+  immutable)
+    [[ "$VENV" == "/opt/venv" && -x "$VENV/bin/python" && -f "$VENV/.mas-runtime-abi.json" ]] || {
+      echo "immutable runtime missing: rebuild and qualify the image, not the paid Pod" >&2; exit 1;
+    }
+    for executable in deno ffmpeg ffprobe uv; do
+      command -v "$executable" >/dev/null 2>&1 || {
+        echo "immutable image missing executable: $executable" >&2; exit 1;
+      }
+    done
+    ;;
+  recovery|image-build) ;;
+  *) echo "invalid MAS_RUNTIME_MODE" >&2; exit 1 ;;
+esac
 
 C0E3_RELEASE="/workspace/ma-sub/releases/c0e3c8e40def2d7672a5dd201cd5d65fde086d6f"
 C0E3_REQUIREMENTS_SHA256="b93b36910aade9a06120b6d772c561637da426ec6949c6199f7abdbc85834c65"
@@ -20,6 +35,7 @@ remove_rebuild_tree() {
   esac
 }
 
+if [[ "$RUNTIME_MODE" == "recovery" ]]; then
 shopt -s nullglob
 stale_candidates=("$VENV".rebuild.*)
 shopt -u nullglob
@@ -27,6 +43,7 @@ for stale_candidate in "${stale_candidates[@]}"; do
   [[ -e "$stale_candidate" || -L "$stale_candidate" ]] || continue
   remove_rebuild_tree "$stale_candidate"
 done
+fi
 
 mkdir -p "$MAS_BIN_DIR"
 if ! command -v deno >/dev/null 2>&1; then
@@ -237,6 +254,11 @@ PY
   fi
 }
 
+if [[ "$RUNTIME_MODE" == "image-build" ]]; then
+  write_runtime_marker "$VENV/bin/python" "$RUNTIME_MARKER"
+  exit 0
+fi
+
 runtime_reusable=0
 observed_marker="$(mktemp)"
 if [[ -x "$VENV/bin/python" && -f "$RUNTIME_MARKER" ]] \
@@ -247,6 +269,10 @@ fi
 rm -f -- "$observed_marker"
 
 if [[ "$runtime_reusable" -ne 1 ]]; then
+  if [[ "$RUNTIME_MODE" == "immutable" ]]; then
+    echo "immutable runtime ABI mismatch; refusing package installation or checkpoint reuse" >&2
+    exit 1
+  fi
   timeout 120 uv cache clean
   if [[ "${MAS_ALLOW_C0E3_VENV_ADOPTION:-}" == "1" ]]; then
     if [[ "$VENV" != "/workspace/ma-sub/.venv" ]]; then
@@ -323,7 +349,9 @@ if [[ "$runtime_reusable" -ne 1 ]]; then
     [[ -z "$backup" ]] || remove_rebuild_tree "$backup"
   fi
 fi
-timeout 120 uv cache clean
+if [[ "$RUNTIME_MODE" == "recovery" ]]; then
+  timeout 120 uv cache clean
+fi
 if [[ -n "${MAS_NETWORK_VOLUME_QUOTA_BYTES:-}" && -n "${MAS_EPISODE:-}" ]]; then
   PYTHONPATH="$ROOT/src" "$VENV/bin/python" -c '
 import os

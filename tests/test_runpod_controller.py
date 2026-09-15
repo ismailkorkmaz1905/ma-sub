@@ -361,7 +361,7 @@ def test_post_run_transfers_share_retrieval_grace(monkeypatch):
     assert timeouts == [120, 50]
 
 
-def test_failed_terminal_remote_job_gets_new_attempt_identity(tmp_path):
+def test_failed_terminal_remote_job_cannot_get_new_attempt_without_authorization(tmp_path):
     request_path = tmp_path / "remote-job-request.json"
     status_path = tmp_path / "remote-job-status.json"
     base = "a" * 64
@@ -372,14 +372,8 @@ def test_failed_terminal_remote_job_gets_new_attempt_identity(tmp_path):
     )
     status_path.write_text(json.dumps({"status": "EXITED", "exit_code": 124}), encoding="utf-8")
 
-    input_sha, attempt = runpod_controller._remote_attempt_identity(
-        base, request_path, status_path
-    )
-
-    assert attempt == 1
-    assert input_sha == runpod_controller.digest(
-        {"base_input_sha256": base, "attempt": 1}
-    )
+    with pytest.raises(runpod_controller.RunPodControllerError, match="BLOCKED"):
+        runpod_controller._remote_attempt_identity(base, request_path, status_path)
 
 
 @pytest.mark.parametrize("exit_code", [0, 20, 21, runpod_controller.WAIT_MP4_SAMPLE])
@@ -886,7 +880,7 @@ def test_episode_budget_anchors_existing_logs_across_retries(monkeypatch, tmp_pa
     monkeypatch.delenv("MAS_EPISODE_BUDGET_SECONDS", raising=False)
     logs = tmp_path / "logs"
     logs.mkdir()
-    first = datetime.now(timezone.utc) - timedelta(hours=5)
+    first = datetime.now(timezone.utc) - timedelta(hours=7)
     (logs / "run-original.log").write_text(json.dumps({
         "event": "run_started", "episode": 11, "timestamp": first.isoformat()
     }) + "\n", encoding="utf-8")
@@ -896,7 +890,8 @@ def test_episode_budget_anchors_existing_logs_across_retries(monkeypatch, tmp_pa
     saved = json.loads((tmp_path / "work" / "controller_budget.json").read_text())
     assert saved["data"]["started_at"] == first.isoformat()
     monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "21600")
-    assert runpod_controller._episode_budget(tmp_path, 11).remaining() > 0
+    with pytest.raises(BudgetExceeded):
+        runpod_controller._episode_budget(tmp_path, 11)
 
 
 def test_episode_budget_checkpoint_tampering_fails(monkeypatch, tmp_path):
@@ -1239,6 +1234,9 @@ def test_local_preflight_allows_public_source_without_cookie(monkeypatch, tmp_pa
 @pytest.mark.parametrize("failure", [RuntimeError("response lost"), TimeoutError("work expired"),
                                      KeyboardInterrupt()])
 def test_session_failure_releases_owned_lease(monkeypatch, tmp_path, failure):
+    monkeypatch.setenv("MAS_RUNPOD_IMAGE", "registry/test@sha256:" + "a" * 64)
+    monkeypatch.setattr(runpod_controller, "drive_preflight", lambda *args, **kwargs: {"status": "test"})
+    monkeypatch.setattr(runpod_controller, "_local_encoder_preflight", lambda *args: None)
     key = tmp_path / "key"
     cookie = tmp_path / "cookie"
     config = tmp_path / "rclone.conf"

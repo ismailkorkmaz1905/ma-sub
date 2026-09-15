@@ -207,6 +207,8 @@ def _make_files(
     candidate_reason: str | None = None,
     candidate_context_after: str = "Geldim",
     candidate_asr_text: str = "Merhaba",
+    candidate_risk_flags: tuple[str, ...] = (),
+    candidate_duration_ms: int = 1000,
 ) -> tuple[Path, Path, Path, Path, Path]:
     candidate, candidate_evidence = _candidate(
         orphan=orphan,
@@ -214,6 +216,15 @@ def _make_files(
         context_after=candidate_context_after,
         asr_text=candidate_asr_text,
     )
+    candidate["risk_flags"].extend(candidate_risk_flags)
+    candidate_evidence["risk_flags"] = list(candidate["risk_flags"])
+    candidate_audio = _wav(candidate_duration_ms)
+    if candidate_duration_ms != 1000:
+        candidate["coarse_start_ms"] = candidate_evidence["start_ms"] = 0
+        candidate["coarse_end_ms"] = candidate_evidence["end_ms"] = candidate_duration_ms
+        candidate_evidence["clip_end_ms"] = candidate_duration_ms
+        candidate_evidence["audio_sha256"] = hashlib.sha256(candidate_audio).hexdigest()
+        candidate_evidence["audio_size_bytes"] = len(candidate_audio)
     utterances = [candidate]
     holes: list[dict] = []
     if include_hole:
@@ -222,7 +233,7 @@ def _make_files(
         holes.append(hole_evidence)
     candidate_path = root / candidate_evidence["audio_member"]
     candidate_path.parent.mkdir(parents=True, exist_ok=True)
-    candidate_path.write_bytes(_wav())
+    candidate_path.write_bytes(candidate_audio)
     for hole_evidence in holes:
         hole_path = root / hole_evidence["audio_member"]
         hole_path.parent.mkdir(parents=True, exist_ok=True)
@@ -338,6 +349,47 @@ def _make_overlapping_rescue_files(
 
 
 class AudioReviewV2Tests(unittest.TestCase):
+    def test_provisional_scene_gap_cannot_confirm_from_context_without_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory), candidate_reason="provisional_word_gap_requires_audio_review",
+                candidate_risk_flags=("provisional_word_gap_requires_audio_review",),
+            )
+            decoder = FakeDecoder([_decoded(), _decoded(), _decoded()])
+            with self.assertRaisesRegex(AudioReviewV2Error, "pending_count=1"):
+                resolve_tr_audio_reviews_v2(*paths, decoder=decoder, progress=None)
+            report = json.loads(paths[3].read_text(encoding="utf-8"))
+            self.assertEqual(report["pending_utterance_uids"], ["candidate-1"])
+            self.assertEqual(decoder.call_count, 3)
+            self.assertFalse(paths[2].exists())
+
+    def test_provisional_scene_gap_can_confirm_corroborating_acoustic_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory), candidate_reason="provisional_word_gap_requires_audio_review",
+                candidate_risk_flags=("provisional_word_gap_requires_audio_review",),
+            )
+            decoder = FakeDecoder([_decoded("Merhaba")])
+            report = resolve_tr_audio_reviews_v2(*paths, decoder=decoder, progress=None)
+            self.assertEqual(report["outcomes"][0]["decision"], "confirmed_dialogue")
+            self.assertEqual(decoder.call_count, 1)
+            validate_audio_review_v2_report(*paths[:4])
+
+    def test_incomplete_inventory_never_confirms_a_coarse_dialogue_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory), candidate_reason="incomplete_provisional_word_timing",
+                candidate_risk_flags=("incomplete_provisional_word_timing",),
+                candidate_duration_ms=184000,
+            )
+            decoder = FakeDecoder([_decoded("Merhaba")] * 3)
+            with self.assertRaisesRegex(AudioReviewV2Error, "before acoustic review"):
+                resolve_tr_audio_reviews_v2(
+                    *paths, decoder=decoder, progress=None,
+                )
+            self.assertEqual(decoder.call_count, 0)
+            self.assertFalse(paths[2].exists())
+
     def test_runtime_decoder_keeps_zero_duration_word_without_aborting(self) -> None:
         class RuntimeModel:
             def transcribe(self, *_args: Any, **_kwargs: Any) -> tuple[Any, None]:
@@ -1192,6 +1244,45 @@ class AudioReviewV2Tests(unittest.TestCase):
 
             self.assertEqual(paths[2].read_bytes(), final_before)
             self.assertEqual(paths[3].read_bytes(), report_before)
+
+    def test_scoped_alignment_resume_requires_completed_review_without_decoding(self):
+        for force in (False, True):
+            with self.subTest(force=force), tempfile.TemporaryDirectory() as directory:
+                paths = _make_files(Path(directory))
+                decoder = FakeDecoder([])
+                with patch("mas.engine.audio_review._FasterWhisperReviewDecoder") as runtime_decoder:
+                    with self.assertRaisesRegex(AudioReviewV2Error, "Scoped alignment retry"):
+                        resolve_tr_audio_reviews_v2(
+                            *paths, decoder=decoder, require_resume=True,
+                            force=force, progress=None,
+                        )
+                self.assertEqual(decoder.call_count, 0)
+                runtime_decoder.assert_not_called()
+                self.assertFalse(paths[2].exists())
+
+    def test_scoped_alignment_resume_replays_completed_review_without_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory))
+            cold = resolve_tr_audio_reviews_v2(
+                *paths, decoder=FakeDecoder([_decoded()]), progress=None,
+            )
+            retained = {path: path.read_bytes() for path in paths if path.is_file()}
+            decoder = FakeDecoder([])
+            with patch("mas.engine.audio_review._FasterWhisperReviewDecoder") as runtime_decoder:
+                resumed = resolve_tr_audio_reviews_v2(
+                    *paths, decoder=decoder, require_resume=True, progress=None,
+                )
+            self.assertEqual(resumed, cold)
+            self.assertEqual(decoder.call_count, 0)
+            runtime_decoder.assert_not_called()
+            self.assertEqual({path: path.read_bytes() for path in retained}, retained)
+
+            with self.assertRaisesRegex(AudioReviewV2Error, "Scoped alignment retry"):
+                resolve_tr_audio_reviews_v2(
+                    *paths, decoder=decoder, require_resume=True, force=True, progress=None,
+                )
+            self.assertEqual(decoder.call_count, 0)
+            self.assertEqual({path: path.read_bytes() for path in retained}, retained)
 
     def test_completed_review_rejects_missing_bound_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

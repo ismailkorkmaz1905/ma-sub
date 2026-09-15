@@ -21,6 +21,7 @@ from statistics import fmean
 from typing import Any, Mapping, Sequence
 
 from .speaker import overlap_is_unsafe, speaker_id
+from .srt import SRTError, wrap_text
 
 from .download import (
     atomic_write_json,
@@ -383,6 +384,7 @@ def _candidate_cost(
     config: SegmentationConfig,
     *,
     following_start_ms: int | None = None,
+    end_boundary_ms: int | None = None,
 ) -> float | None:
     candidate = words[start:end]
     if not candidate:
@@ -395,9 +397,12 @@ def _candidate_cost(
     speech_duration_ms = int(candidate[-1]["end_ms"]) - int(candidate[0]["start_ms"])
     if speech_duration_ms > config.maximum_duration_ms:
         return None
-    # 42 characters per line is a target, not a destructive hard truncation.
-    # Permit a modest overflow so one long Turkish word is never altered.
-    if word_count > 1 and character_count > config.preferred_total_chars + 18:
+    if character_count > config.preferred_total_chars:
+        return None
+    try:
+        wrap_text(text, target=config.target_chars_per_line,
+                  max_lines=config.maximum_lines, hard_limit=config.target_chars_per_line)
+    except SRTError:
         return None
 
     cue_start_ms = int(candidate[0]["start_ms"])
@@ -411,6 +416,8 @@ def _candidate_cost(
         cue_start_ms + _required_cue_duration_ms(text, config),
     )
     latest_end_ms = cue_start_ms + config.maximum_duration_ms
+    if end_boundary_ms is not None:
+        latest_end_ms = min(latest_end_ms, end_boundary_ms)
     if next_start_ms is not None:
         # End trimming is allowed; moving the following cue after its first
         # aligned word is not.  Touching/overlapping word intervals therefore
@@ -463,6 +470,7 @@ def _dynamic_groups(
     config: SegmentationConfig,
     *,
     following_start_ms: int | None = None,
+    end_boundary_ms: int | None = None,
 ) -> list[list[dict[str, Any]]]:
     count = len(words)
     costs = [math.inf] * (count + 1)
@@ -479,6 +487,7 @@ def _dynamic_groups(
                 end,
                 config,
                 following_start_ms=(following_start_ms if end == count else None),
+                end_boundary_ms=end_boundary_ms,
             )
             if candidate_cost is None:
                 continue
@@ -489,10 +498,15 @@ def _dynamic_groups(
     if previous[count] < 0:
         first = words[0]
         last = words[-1]
+        boundary_evidence = (
+            f"; end_boundary_ms={end_boundary_ms}, utterance_uids="
+            f"{sorted({str(word['utterance_uid']) for word in words if word.get('utterance_uid')})}"
+            if end_boundary_ms is not None else ""
+        )
         raise SegmentationError(
             "No safe segmentation satisfies canonical timing, minimum duration, "
             f"and <= {config.maximum_source_cps:g} source CPS for word span "
-            f"{first['source_offset']}-{last['source_offset']}"
+            f"{first['source_offset']}-{last['source_offset']}{boundary_evidence}"
         )
     groups: list[list[dict[str, Any]]] = []
     cursor = count
@@ -511,6 +525,8 @@ def _group_words(
     words: Sequence[Mapping[str, Any]],
     config: SegmentationConfig,
     vad_regions: Sequence[Mapping[str, Any]] = (),
+    *,
+    end_boundary_ms: int | None = None,
 ) -> tuple[list[list[dict[str, Any]]], dict[int, _Boundary]]:
     boundaries = _hard_boundaries(words, config, vad_regions)
     boundary_map = {
@@ -535,6 +551,7 @@ def _group_words(
                     chunk,
                     config,
                     following_start_ms=following_start_ms,
+                    end_boundary_ms=end_boundary_ms,
                 )
             )
     return groups, boundary_map
@@ -806,7 +823,8 @@ def _boundary_risk_for_group(
 
 
 def _assign_timings(
-    raw_blocks: list[dict[str, Any]], config: SegmentationConfig
+    raw_blocks: list[dict[str, Any]], config: SegmentationConfig,
+    *, end_boundary_ms: int | None = None,
 ) -> None:
     for index, block in enumerate(raw_blocks):
         first_word_start = int(block["_first_word_start_ms"])
@@ -830,10 +848,13 @@ def _assign_timings(
             else:
                 desired_end = min(desired_end, next_start - 1)
         desired_end = min(desired_end, start + config.maximum_duration_ms)
+        if end_boundary_ms is not None:
+            desired_end = min(desired_end, end_boundary_ms)
         if desired_end < last_word_end or desired_end < required_end:
             raise SegmentationError(
                 "Safe cue timing became infeasible after grouping for block "
-                f"{index + 1}: {start}-{last_word_end}, required_end={required_end}"
+                f"{index + 1}: {start}-{last_word_end}, required_end={required_end}, "
+                f"end_boundary_ms={end_boundary_ms}"
             )
         block["start_ms"] = start
         block["end_ms"] = desired_end
@@ -855,6 +876,7 @@ def build_blocks(
     *,
     config: SegmentationConfig | None = None,
     youtube_captions: Sequence[Mapping[str, Any]] | None = None,
+    end_boundary_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     """Build the complete immutable-field block records, with UID left blank.
 
@@ -863,6 +885,8 @@ def build_blocks(
     """
 
     settings = config or SegmentationConfig()
+    if end_boundary_ms is not None and (type(end_boundary_ms) is not int or end_boundary_ms <= 0):
+        raise ValueError("end_boundary_ms must be a positive integer")
     if not isinstance(episode, int) or isinstance(episode, bool) or episode <= 0:
         raise ValueError("episode must be a positive integer")
     words = _prepare_words(transcription.get("words") or [])
@@ -877,7 +901,9 @@ def build_blocks(
             lane_words = [
                 word for word in words if word.get("speaker_id") == current_speaker
             ]
-            lane_groups, lane_boundaries = _group_words(lane_words, settings, vad_regions)
+            lane_groups, lane_boundaries = _group_words(
+                lane_words, settings, vad_regions, end_boundary_ms=end_boundary_ms
+            )
             groups.extend(lane_groups)
             boundary_map.update(lane_boundaries)
         groups.sort(
@@ -887,7 +913,9 @@ def build_blocks(
             )
         )
     else:
-        groups, boundary_map = _group_words(words, settings, vad_regions)
+        groups, boundary_map = _group_words(
+            words, settings, vad_regions, end_boundary_ms=end_boundary_ms
+        )
     captions = list(
         youtube_captions
         if youtube_captions is not None
@@ -957,9 +985,10 @@ def build_blocks(
             _assign_timings(
                 [block for block in raw_blocks if block["speaker_id"] == current_speaker],
                 settings,
+                end_boundary_ms=end_boundary_ms,
             )
     else:
-        _assign_timings(raw_blocks, settings)
+        _assign_timings(raw_blocks, settings, end_boundary_ms=end_boundary_ms)
     for index, block in enumerate(raw_blocks):
         block["context_before"] = _context_text(
             raw_blocks, index, settings.context_blocks, before=True
@@ -998,7 +1027,9 @@ def validate_segmentation(
     mixed_speaker_count = 0
     empty_text_count = 0
     nonsequential_count = 0
+    source_text_mismatch_count = 0
     active_blocks: list[tuple[int, str | None]] = []
+    block_speakers = set()
     for expected_index, block in enumerate(blocks, start=1):
         prefix = f"block {expected_index}"
         try:
@@ -1027,6 +1058,7 @@ def validate_segmentation(
         except ValueError as exc:
             errors.append(str(exc))
             current_speaker_id = None
+        block_speakers.add(current_speaker_id)
         active_blocks = [item for item in active_blocks if item[0] >= start]
         if any(
             overlap_is_unsafe(prior_speaker, current_speaker_id)
@@ -1040,6 +1072,19 @@ def validate_segmentation(
         if not text or not timing_text:
             empty_text_count += 1
             errors.append(f"{prefix}: empty primary/timing text")
+        else:
+            if _normalise_compare(text) != _normalise_compare(timing_text):
+                source_text_mismatch_count = 1
+                errors.append(f"{prefix}: primary_text differs from its acoustic timing_text")
+            try:
+                wrap_text(text, target=settings.target_chars_per_line,
+                          max_lines=settings.maximum_lines,
+                          hard_limit=settings.target_chars_per_line)
+            except SRTError:
+                errors.append(
+                    f"{prefix}: text cannot fit {settings.maximum_lines} lines "
+                    f"of {settings.target_chars_per_line} characters"
+                )
         if int(block.get("episode", 0)) <= 0:
             errors.append(f"{prefix}: invalid episode")
         vad_info = block.get("vad_info") or {}
@@ -1054,7 +1099,8 @@ def validate_segmentation(
             mixed_speaker_count += 1
             errors.append(f"{prefix}: contains multiple explicit dialogue turns")
         if end - start > settings.maximum_duration_ms:
-            warnings.append(f"{prefix}: duration {end - start} ms exceeds preferred maximum")
+            invalid_timing_count += 1
+            errors.append(f"{prefix}: duration {end - start} ms exceeds hard maximum")
         if duration_ms > 0:
             source_cps = len(text) / (duration_ms / 1000.0)
             if source_cps > settings.maximum_source_cps + 1e-9:
@@ -1068,23 +1114,25 @@ def validate_segmentation(
                 f"{prefix}: source length {len(text)} exceeds {settings.preferred_total_chars} characters"
             )
 
-    source_text_mismatch_count = 0
     if source_words is not None:
         try:
             prepared = _prepare_words(source_words)
             speaker_values = {word.get("speaker_id") for word in prepared}
-            lanes = speaker_values
+            lanes = speaker_values | block_speakers
             for lane in lanes:
+                lane_words = [
+                    word for word in prepared if word.get("speaker_id") == lane
+                ]
+                lane_blocks = [
+                    block for block in blocks if block.get("speaker_id") == lane
+                ]
                 expected_text = _normalise_compare(
-                    _join_words(
-                        [word for word in prepared if word.get("speaker_id") == lane]
-                    )
+                    _join_words(lane_words)
                 )
                 actual_text = _normalise_compare(
                     " ".join(
                         str(block.get("timing_text", ""))
-                        for block in blocks
-                        if block.get("speaker_id") == lane
+                        for block in lane_blocks
                     )
                 )
                 if expected_text != actual_text:
@@ -1093,6 +1141,43 @@ def validate_segmentation(
                         "segmented timing_text does not preserve the complete ordered "
                         f"word text for speaker {lane!r}"
                     )
+                    continue
+                # Whole-episode text equality cannot detect a word moved to
+                # the previous scene. Bind each lexical token to its acoustic
+                # word interval before accepting an individual cue.
+                token_words = [
+                    word
+                    for word in lane_words
+                    for _ in _normalise_compare(_word_text(word)).split()
+                ]
+                cursor = 0
+                for block in lane_blocks:
+                    token_count = len(
+                        _normalise_compare(str(block.get("timing_text", ""))).split()
+                    )
+                    owned_words = token_words[cursor : cursor + token_count]
+                    cursor += token_count
+                    try:
+                        start = int(block["start_ms"])
+                        end = int(block["end_ms"])
+                    except (KeyError, TypeError, ValueError):
+                        continue  # The timing check above already failed.
+                    if owned_words and start < int(owned_words[0]["start_ms"]):
+                        invalid_timing_count += 1
+                        errors.append(
+                            f"block {block.get('block_index')}: cue starts before "
+                            f"its first acoustic word ({start} < "
+                            f"{owned_words[0]['start_ms']} ms)"
+                        )
+                    if any(
+                        int(word["start_ms"]) < start or int(word["end_ms"]) > end
+                        for word in owned_words
+                    ):
+                        invalid_timing_count += 1
+                        errors.append(
+                            f"block {block.get('block_index')}: timing_text contains "
+                            "a word outside its acoustic interval"
+                        )
         except SegmentationError as exc:
             source_text_mismatch_count = 1
             errors.append(f"source word validation failed: {exc}")

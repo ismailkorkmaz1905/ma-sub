@@ -12,6 +12,7 @@ import time
 from .download import atomic_write_json, sha256_file
 from .srt import format_timestamp, parse_srt
 from ..progress import mark_work_progress
+from ..reliability import atomic_json, digest
 
 SUBTITLE_STYLE = 'FontName=Arial,FontSize=14,Outline=0.7,Shadow=0,MarginV=14,MarginL=26,MarginR=26'
 ENCODERS = {
@@ -67,7 +68,8 @@ def plan_encoding_settings(source_video, *, encoder='h264_nvenc', target_size_gb
 
 def create_encoding_samples(source_video, id_srt, output_dir, *, encoder='h264_nvenc',
                             target_size_gb=3.0, encoder_options=None, timeout_seconds=180,
-                            idle_timeout_seconds=30):
+                            idle_timeout_seconds=30, resume_identity=None):
+    started_all = time.monotonic()
     if not 0 < timeout_seconds <= 180 or not 0 < idle_timeout_seconds <= timeout_seconds:
         raise ValueError('Sample encoding requires bounded idle and total timeouts')
     source, subtitles, output_dir = Path(source_video), Path(id_srt), Path(output_dir)
@@ -93,15 +95,58 @@ def create_encoding_samples(source_video, id_srt, output_dir, *, encoder='h264_n
         starts.append(start)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / 'encoding-samples.json'
+    journal_path = output_dir / 'sample-checkpoint.json'
+    identity = {'settings': settings, 'subtitle_sha256': sha256_file(subtitles),
+                'style': SUBTITLE_STYLE, 'code_sha256': sha256_file(Path(__file__)),
+                'qualification': resume_identity}
+    if journal_path.is_file():
+        wrapped = json.loads(journal_path.read_text(encoding='utf-8'))
+        journal = wrapped.get('data')
+        if (not isinstance(journal, dict) or wrapped.get('sha256') != digest(journal)
+                or journal.get('identity') != identity):
+            raise ValueError('Encoding sample checkpoint identity changed; preserve it')
+    else:
+        allowed = {'qualification-request.json', 'technical-encoder-test.srt'} if resume_identity else set()
+        if any(path.name not in allowed for path in output_dir.iterdir()):
+            raise ValueError('Unbound encoding sample artifacts exist; preserve them')
+        journal = {'format': 'mas-encoding-sample-checkpoint-1', 'identity': identity,
+                   'samples': [], 'attempts': {}, 'status': 'READY'}
+        atomic_json(journal_path, {'data': journal, 'sha256': digest(journal)})
+    if journal.get('status') == 'BLOCKED':
+        raise ValueError('BLOCKED: unchanged deterministic encoding sample failure')
+    completed = journal['samples']
+    if (len(completed) > 3
+            or [item.get('ordinal') for item in completed] != list(range(1, len(completed) + 1))):
+        raise ValueError('Encoding sample checkpoint order changed')
+    for item in completed:
+        for key, suffix in (('output', '.mp4'), ('subtitle', '.srt')):
+            expected = f"sample-{item['ordinal']}{suffix}"
+            path = output_dir / expected
+            if (item[key + '_file'] != expected or path.is_symlink() or not path.is_file()
+                    or path.stat().st_size != item[key + '_bytes']
+                    or sha256_file(path) != item[key + '_sha256']):
+                raise ValueError('Completed encoding sample bytes changed; preserve them')
     if manifest_path.exists():
-        raise ValueError('Encoding sample manifest already exists; preserve it')
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        if (len(completed) != 3 or manifest.get('samples') != completed
+                or manifest.get('encoding_settings') != settings
+                or manifest.get('style') != SUBTITLE_STYLE
+                or manifest.get('inputs') != {'source_sha256': settings['source_sha256'],
+                                               'id_srt_sha256': identity['subtitle_sha256']}
+                or manifest.get('status') != 'REVIEW_REQUIRED'
+                or manifest.get('perceptual_acceptance') != 'NOT_ASSERTED'):
+            raise ValueError('Encoding sample manifest checkpoint binding changed')
+        if time.monotonic() - started_all >= timeout_seconds:
+            raise TimeoutError('Shared sample encoding time bound expired during resume')
+        return manifest_path
     decoder = []
     if encoder == 'h264_nvenc' and video['codec_name'] == 'av1' and video.get('pix_fmt') == 'yuv420p':
         decoder = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-c:v', 'av1_cuvid']
-    samples = []
-    started_all = time.monotonic()
-    encode_elapsed = 0.0
+    samples = list(completed)
+    encode_elapsed = sum(item['elapsed_seconds'] for item in samples)
     for ordinal, start in enumerate(starts, 1):
+        if ordinal <= len(completed):
+            continue
         start_ms, end_ms = round(start * 1000), round((start + sample_duration) * 1000)
         intersecting = [entry for entry in entries if entry.end_ms > start_ms and entry.start_ms < end_ms]
         lines = []
@@ -112,11 +157,31 @@ def create_encoding_samples(source_video, id_srt, output_dir, *, encoder='h264_n
                 lines.extend([str(index), f'{format_timestamp(local_start)} --> {format_timestamp(local_end)}',
                               entry.text, ''])
         sample_srt = output_dir / f'sample-{ordinal}.srt'
-        sample_srt.write_text('\n'.join(lines), encoding='utf-8')
         if not lines:
             raise ValueError('Fixed sample interval contains no subtitle cues')
+        subtitle_bytes = '\n'.join(lines).encode('utf-8')
+        if sample_srt.exists() and sample_srt.read_bytes() != subtitle_bytes:
+            raise ValueError('Interrupted sample subtitle changed; preserve it')
         output = output_dir / f'sample-{ordinal}.mp4'
         log = output_dir / f'sample-{ordinal}.encode.log'
+        attempts = journal['attempts'].get(str(ordinal), 0)
+        if type(attempts) is not int or not 0 <= attempts < 3:
+            raise ValueError('Encoding sample interruption retry budget exhausted')
+        remaining = timeout_seconds - (time.monotonic() - started_all)
+        if remaining <= 0:
+            raise TimeoutError('Shared sample encoding time bound expired')
+        for path in (output, log, log.with_suffix('.failed.mp4')):
+            if path.exists():
+                if not attempts:
+                    raise ValueError('Unbound encoding sample output exists; preserve it')
+                retained = output_dir / 'interrupted' / f'{path.name}.attempt-{attempts}'
+                if (path.is_symlink() or not path.resolve().is_relative_to(output_dir.resolve())
+                        or retained.exists() or not retained.resolve().is_relative_to(output_dir.resolve())):
+                    raise ValueError('Interrupted sample preservation path is unsafe or occupied')
+                retained.parent.mkdir(exist_ok=True)
+                path.rename(retained)
+        if not sample_srt.exists():
+            sample_srt.write_bytes(subtitle_bytes)
         video_filter = f"subtitles=sample-{ordinal}.srt:force_style='" + SUBTITLE_STYLE + "'"
         if decoder:
             video_filter = 'hwdownload,format=nv12,' + video_filter
@@ -131,18 +196,31 @@ def create_encoding_samples(source_video, id_srt, output_dir, *, encoder='h264_n
         remaining = timeout_seconds - (time.monotonic() - started_all)
         if remaining <= 0:
             raise TimeoutError('Shared sample encoding time bound expired')
-        _run_encode(command, output_dir, log, output, remaining, min(idle_timeout_seconds, remaining))
-        elapsed = time.monotonic() - started
+        journal.update(status='RUNNING', active_ordinal=ordinal)
+        journal['attempts'][str(ordinal)] = attempts + 1
+        atomic_json(journal_path, {'data': journal, 'sha256': digest(journal)})
+        try:
+            _run_encode(command, output_dir, log, output, remaining, min(idle_timeout_seconds, remaining))
+            elapsed = time.monotonic() - started
+            encoded_probe = _probe(output)
+            streams = encoded_probe['streams']
+            encoded_video = next(stream for stream in streams if stream['codec_type'] == 'video')
+            encoded_audio = next(stream for stream in streams if stream['codec_type'] == 'audio')
+            if (len(streams) != 2 or encoded_video['codec_name'] != 'h264'
+                    or encoded_audio['codec_name'] != 'aac'
+                    or (encoded_video['width'], encoded_video['height']) != (video['width'], video['height'])
+                    or abs(float(encoded_probe['format']['duration']) - sample_duration) > .1):
+                raise ValueError('Encoded sample stream, dimensions or duration verification failed')
+            if (sha256_file(source) != settings['source_sha256']
+                    or sha256_file(subtitles) != identity['subtitle_sha256']):
+                raise ValueError('Source or subtitle changed during sample encoding')
+        except BaseException as exc:
+            journal.update(status=('INTERRUPTED' if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired,
+                                                                     KeyboardInterrupt)) else 'BLOCKED'),
+                           failure_type=type(exc).__name__)
+            atomic_json(journal_path, {'data': journal, 'sha256': digest(journal)})
+            raise
         encode_elapsed += elapsed
-        encoded_probe = _probe(output)
-        streams = encoded_probe['streams']
-        encoded_video = next(stream for stream in streams if stream['codec_type'] == 'video')
-        encoded_audio = next(stream for stream in streams if stream['codec_type'] == 'audio')
-        if (len(streams) != 2 or encoded_video['codec_name'] != 'h264'
-                or encoded_audio['codec_name'] != 'aac'
-                or (encoded_video['width'], encoded_video['height']) != (video['width'], video['height'])
-                or abs(float(encoded_probe['format']['duration']) - sample_duration) > .1):
-            raise ValueError('Encoded sample stream, dimensions or duration verification failed')
         samples.append({'ordinal': ordinal, 'source_start_seconds': start,
                         'source_end_seconds': start + sample_duration,
                         'planned_anchor_seconds': anchors[ordinal - 1],
@@ -151,6 +229,8 @@ def create_encoding_samples(source_video, id_srt, output_dir, *, encoder='h264_n
                         'output_sha256': sha256_file(output), 'output_bytes': output.stat().st_size,
                         'encoded_duration_seconds': float(encoded_probe['format']['duration']),
                         'elapsed_seconds': elapsed})
+        journal.update(status='READY', active_ordinal=None, samples=list(samples))
+        atomic_json(journal_path, {'data': journal, 'sha256': digest(journal)})
     elapsed_all = time.monotonic() - started_all
     manifest = {'format': 'mas-encoding-samples-1', 'status': 'REVIEW_REQUIRED',
                 'perceptual_acceptance': 'NOT_ASSERTED',
@@ -163,6 +243,8 @@ def create_encoding_samples(source_video, id_srt, output_dir, *, encoder='h264_n
                 'projected_full_encode_seconds': encode_elapsed * duration / (3 * sample_duration)}
     if sha256_file(source) != settings['source_sha256'] or sha256_file(subtitles) != manifest['inputs']['id_srt_sha256']:
         raise ValueError('Source or subtitle changed while encoding samples')
+    if time.monotonic() - started_all >= timeout_seconds:
+        raise TimeoutError('Shared sample encoding time bound expired during validation')
     atomic_write_json(manifest_path, manifest)
     return manifest_path
 
@@ -178,11 +260,51 @@ def _encoding_hardware():
     return {'ffmpeg_version': ffmpeg, 'gpu': gpu[0]}
 
 
+def _qsv_hardware(*, timeout_seconds=55):
+    deadline = time.monotonic() + timeout_seconds
+
+    def remaining(limit):
+        value = min(limit, deadline - time.monotonic())
+        if value <= 0:
+            raise TimeoutError('QSV hardware probe budget exhausted')
+        return value
+
+    if os.name != 'nt':
+        raise ValueError('The local QSV execution plan requires a qualified Windows Intel host')
+    ffmpeg = subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, timeout=remaining(10),
+                            text=True, encoding='utf-8', errors='replace').stdout.splitlines()[0]
+    result = subprocess.run([
+        'powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+        'Get-CimInstance Win32_VideoController | Where-Object { $_.Name -match "Intel" } | '
+        'Select-Object Name,DriverVersion,PNPDeviceID | ConvertTo-Json -Compress'],
+        capture_output=True, check=True, timeout=remaining(15), text=True, encoding='utf-8')
+    hardware = json.loads(result.stdout)
+    devices = hardware if isinstance(hardware, list) else [hardware]
+    if not devices or any(not item.get('DriverVersion') or not item.get('PNPDeviceID') for item in devices):
+        raise ValueError('Intel QSV driver identity is unavailable')
+    subprocess.run(['ffmpeg', '-hide_banner', '-nostdin', '-v', 'error',
+                    '-init_hw_device', 'qsv=masqsv:hw', '-filter_hw_device', 'masqsv',
+                    '-f', 'lavfi', '-i', 'color=size=64x64:rate=1', '-frames:v', '1',
+                    '-vf', 'format=nv12', '-c:v', 'h264_qsv', '-f', 'null', '-'],
+                   capture_output=True, check=True, timeout=remaining(30))
+    return {'ffmpeg_version': ffmpeg, 'devices': devices, 'qsv_hardware_probe': 'PASS'}
+
+
 def qualify_encoding(source_video, output_dir, *, encoder='h264_nvenc', target_size_gb=3.0,
-                     encoder_options=None):
+                     encoder_options=None, timeout_seconds=240):
+    if not 0 < timeout_seconds <= 240:
+        raise ValueError('Technical encoder qualification requires a bounded timeout')
+    deadline = time.monotonic() + timeout_seconds
+
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise TimeoutError('Technical encoder qualification budget exhausted')
+        return value
+
     source, output_dir = Path(source_video), Path(output_dir)
-    if encoder != 'h264_nvenc':
-        raise ValueError('Technical GPU encoder qualification requires h264_nvenc')
+    if encoder not in {'h264_nvenc', 'h264_qsv'}:
+        raise ValueError('Technical encoder qualification requires explicit NVENC or QSV')
     settings, probe = plan_encoding_settings(source, encoder=encoder, target_size_gb=target_size_gb,
                                              encoder_options=encoder_options)
     duration = settings['source_duration_seconds']
@@ -197,7 +319,26 @@ def qualify_encoding(source_video, output_dir, *, encoder='h264_nvenc', target_s
         lines.extend([str(index), f'{format_timestamp(start)} --> {format_timestamp(end)}',
                       'TECHNICAL ENCODER TEST - SYNTHETIC SUBTITLE', ''])
     technical_bytes = '\n'.join(lines).encode('utf-8')
-    hardware = _encoding_hardware()
+    hardware = (_qsv_hardware(timeout_seconds=min(55, remaining()))
+                if encoder == 'h264_qsv' else _encoding_hardware())
+    remaining()
+    request = {'settings_identity_sha256': settings['identity_sha256'],
+               'source_sha256': settings['source_sha256'], 'hardware': hardware,
+               'technical_subtitle_sha256': hashlib.sha256(technical_bytes).hexdigest(),
+               'code_sha256': sha256_file(Path(__file__))}
+    request_path = output_dir / 'qualification-request.json'
+    if request_path.is_file():
+        wrapped = json.loads(request_path.read_text(encoding='utf-8'))
+        if wrapped.get('data') != request or wrapped.get('sha256') != digest(request):
+            raise ValueError('Existing technical encoder qualification identity changed; preserve it')
+    else:
+        if any(output_dir.iterdir()):
+            raise ValueError('Technical encoder qualification directory is nonempty; preserve it')
+        atomic_json(request_path, {'data': request, 'sha256': digest(request)})
+    if technical_srt.is_file() and technical_srt.read_bytes() != technical_bytes:
+        raise ValueError('Technical encoder subtitle changed; preserve it')
+    if not technical_srt.exists():
+        technical_srt.write_bytes(technical_bytes)
     receipt_path = output_dir / 'technical-qualification.json'
     if receipt_path.is_file():
         receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
@@ -210,24 +351,30 @@ def qualify_encoding(source_video, output_dir, *, encoder='h264_nvenc', target_s
                             and sha256_file(output_dir / item['subtitle_file']) == item['subtitle_sha256']
                             and (output_dir / item['subtitle_file']).stat().st_size == item['subtitle_bytes']
                             for item in receipt.get('samples', []))
-        if (receipt.get('settings_identity_sha256') != settings['identity_sha256']
+        if (receipt.get('format') != 'mas-technical-encoder-qualification-1'
+                or receipt.get('status') != 'TECHNICALLY_VERIFIED'
+                or receipt.get('request_sha256') != digest(request)
+                or receipt.get('settings_identity_sha256') != settings['identity_sha256']
                 or receipt.get('source_sha256') != settings['source_sha256']
                 or receipt.get('hardware') != hardware or receipt.get('sample_manifest_sha256') != manifest_sha
                 or not technical_srt.is_file()
                 or receipt.get('technical_subtitle_sha256') != sha256_file(technical_srt)
                 or not samples_valid or len(receipt.get('samples', [])) != 3):
             raise ValueError('Existing technical encoder qualification identity changed; preserve it')
+        remaining()
         return receipt_path
-    if any(output_dir.iterdir()):
-        raise ValueError('Technical encoder qualification directory is nonempty; preserve it')
-    technical_srt.write_bytes(technical_bytes)
     manifest_path = create_encoding_samples(source, technical_srt, output_dir, encoder=encoder,
                                             target_size_gb=target_size_gb,
-                                            encoder_options=encoder_options)
+                                            encoder_options=encoder_options,
+                                            timeout_seconds=min(180, remaining()),
+                                            idle_timeout_seconds=min(30, remaining()),
+                                            resume_identity=request)
+    remaining()
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     receipt = {'format': 'mas-technical-encoder-qualification-1', 'status': 'TECHNICALLY_VERIFIED',
                'scope': 'ENCODER_ONLY', 'subtitle_kind': 'SYNTHETIC_TECHNICAL_TEST',
                'perceptual_acceptance': 'NOT_ASSERTED', 'translation_acceptance': 'NOT_ASSERTED',
+               'request_sha256': digest(request),
                'source_sha256': settings['source_sha256'],
                'settings_identity_sha256': settings['identity_sha256'], 'hardware': hardware,
                'technical_subtitle_sha256': sha256_file(technical_srt),
@@ -235,6 +382,10 @@ def qualify_encoding(source_video, output_dir, *, encoder='h264_nvenc', target_s
                'measured_encode_seconds': manifest['measured_encode_seconds'],
                'projected_full_encode_seconds': manifest['projected_full_encode_seconds'],
                'samples': manifest['samples']}
+    if (sha256_file(source) != request['source_sha256']
+            or sha256_file(Path(__file__)) != request['code_sha256']):
+        raise ValueError('Technical qualification source or code changed')
+    remaining()
     atomic_write_json(receipt_path, receipt)
     return receipt_path
 
@@ -358,7 +509,9 @@ def _run_encode(command, cwd, log_path, partial, total_timeout, idle_timeout):
             thread.join(timeout=1)
     if failure or returncode:
         _preserve_failed_partial(partial, log_path)
-        raise RuntimeError(f'MP4 encoding failed ({failure or f"ffmpeg exit code {returncode}"}); retained log: {log_path}')
+        if failure:
+            raise TimeoutError(f'MP4 encoding failed ({failure}); retained log: {log_path}')
+        raise RuntimeError(f'MP4 encoding failed (ffmpeg exit code {returncode}); retained log: {log_path}')
 
 
 def _preserve_failed_partial(partial, log_path):
@@ -394,6 +547,7 @@ def burn_indonesian_mp4(source_video, id_srt, output_path, *, encoder='h264_nven
                         sample_approval_path=None, idle_timeout_seconds=900, scratch_dir=None,
                         network_volume_root=None, network_volume_quota_bytes=None,
                         require_sample_approval=False):
+    started_all = time.monotonic()
     source, subtitles, output = map(Path, (source_video, id_srt, output_path))
     if not 0 < timeout_seconds <= 14400:
         raise ValueError('Unsupported MP4 encoder or unbounded timeout')
@@ -501,7 +655,10 @@ def burn_indonesian_mp4(source_video, id_srt, output_path, *, encoder='h264_nven
                    '-movflags', '+faststart', '-progress', 'pipe:1', '-stats_period', '1', str(partial.resolve())]
         log_path = output.with_suffix('.encode.log')
         encode_started = time.monotonic()
-        _run_encode(command, work, log_path, partial, timeout_seconds, idle_timeout_seconds)
+        remaining = timeout_seconds - (encode_started - started_all)
+        if remaining <= 0:
+            raise TimeoutError('MP4 encoding budget exhausted before encoding')
+        _run_encode(command, work, log_path, partial, remaining, min(idle_timeout_seconds, remaining))
         encode_elapsed = time.monotonic() - encode_started
         after = _probe(partial)
         streams = after['streams']
@@ -516,6 +673,8 @@ def burn_indonesian_mp4(source_video, id_srt, output_path, *, encoder='h264_nven
         if approval and (sha256_file(approval['path']) != approval['sha256']
                          or Path(approval['path']).stat().st_size != approval['bytes']):
             raise ValueError('Sample approval record changed while encoding')
+        if time.monotonic() - started_all >= timeout_seconds:
+            raise TimeoutError('MP4 encoding budget exhausted during validation')
         receipt = {'format': 'mas-burned-id-mp4-2', 'status': 'VERIFIED_ENCODING', 'inputs': inputs,
                    'encoder': encoder, 'encoding_settings': settings, 'sample_approval': approval,
                    'style': SUBTITLE_STYLE,

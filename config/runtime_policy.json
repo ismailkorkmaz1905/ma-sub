@@ -1,6 +1,8 @@
 {
-  "policy_version": "ep12-1",
+  "policy_version": "four-hour-2",
   "target_wall_seconds": 14400,
+  "max_wall_seconds": 21600,
+  "max_changed_evidence_retries": 2,
   "include_chatgpt_handoff_wait": true,
   "planned_stage_minutes": {
     "preflight_source_audio": 15,

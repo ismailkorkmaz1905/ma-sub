@@ -49,7 +49,7 @@ AUDIO_REVIEW_V2_VERSION = "1.0"
 AUDIO_REVIEW_V2_RECOVERY_FORMAT = "audio-review-v2-recovery-1"
 MACHINE_NOTE_PREFIX = "machine_audio_review_v2:"
 MANUAL_NOTE_PREFIX = "manual_audio_review_v2:"
-CONTEXTUAL_BOUNDARY_POLICY = "contextual-boundary-policy-2"
+CONTEXTUAL_BOUNDARY_POLICY = "contextual-boundary-policy-3"
 ACOUSTIC_DUPLICATE_POLICY = "acoustic-duplicate-policy-2"
 
 
@@ -668,7 +668,7 @@ def _machine_decision(
         "source": "secondary_asr",
         "known_short_clip_hallucination": known_short_clip_hallucination,
     }
-    if "overlapping_rescue_word_evidence" in set(
+    if {"overlapping_rescue_word_evidence", "incomplete_provisional_word_timing"}.intersection(
         evidence.get("risk_flags", [])
     ):
         return {
@@ -676,7 +676,7 @@ def _machine_decision(
             "decision": "pending_audio_review",
             "tr_corrected": str(provisional_record["tr_corrected"]).strip(),
             "reason": (
-                "overlapping rescue requires persisted acoustic duplicate "
+                "incomplete or overlapping source requires bounded replacement "
                 "evidence or manual review"
             ),
         }
@@ -860,6 +860,8 @@ def _contextual_boundary_decision(
             "forced_alignment_required": True,
             "contextual_boundary_audit": audit,
         }
+    if "incomplete_provisional_word_timing" in set(evidence.get("risk_flags", [])):
+        return copy.deepcopy(dict(pending_decision))
     if kind == "asr_caption_candidate" and known_source_hallucination:
         if usable_decodes:
             selected = usable_decodes[-1]
@@ -892,6 +894,8 @@ def _contextual_boundary_decision(
         and corrected
         and str(evidence.get("asr_text", "")).strip()
     ):
+        if "provisional_word_gap_requires_audio_review" in set(evidence.get("risk_flags", [])):
+            return copy.deepcopy(dict(pending_decision))
         return {
             **copy.deepcopy(dict(pending_decision)),
             "decision": "confirmed_dialogue",
@@ -1564,6 +1568,9 @@ def _validate_contextual_boundary_outcome(
     final_record: Mapping[str, Any],
     outcome: Mapping[str, Any],
 ) -> None:
+    if (outcome.get("decision") == "confirmed_dialogue"
+            and "incomplete_provisional_word_timing" in set(evidence.get("risk_flags", []))):
+        raise AudioReviewV2Error("incomplete provisional inventory cannot confirm one coarse dialogue record")
     if outcome.get("forced_alignment_required") is not True:
         raise AudioReviewV2Error(
             "contextual boundary outcome must require final forced alignment"
@@ -1735,6 +1742,7 @@ def _validate_contextual_boundary_outcome(
             return
         if (
             is_orphan
+            or "provisional_word_gap_requires_audio_review" in set(evidence.get("risk_flags", []))
             or not corrected
             or not str(evidence.get("asr_text", "")).strip()
             or outcome.get("decision") != "confirmed_dialogue"
@@ -1985,6 +1993,7 @@ def resolve_tr_audio_reviews_v2(
     force: bool = False,
     decoder: ReviewDecoder | None = None,
     progress: Callable[[str], None] | None = print,
+    require_resume: bool = False,
 ) -> dict[str, Any]:
     """Resolve only immutable review WAVs and create the strict final TR ZIP.
 
@@ -2003,6 +2012,12 @@ def resolve_tr_audio_reviews_v2(
         input_pack_path, provisional_output_path
     )
     inventory = _review_inventory(pack)
+    incomplete = [uid for uid, _kind, evidence in inventory
+                  if "incomplete_provisional_word_timing" in evidence.get("risk_flags", [])]
+    if incomplete:
+        raise AudioReviewV2Error(
+            f"Incomplete ASR hypotheses require raw coverage recovery before acoustic review: {incomplete}"
+        )
     review_uids = {uid for uid, _kind, _evidence in inventory}
     unknown_overrides = sorted(set(overrides).difference(review_uids))
     if unknown_overrides:
@@ -2164,6 +2179,8 @@ def resolve_tr_audio_reviews_v2(
                     "Completed audio-review output belongs to different manual overrides; preserve it"
                 )
             return completed
+    if require_resume:
+        raise AudioReviewV2Error("Scoped alignment retry requires a validated completed audio-review checkpoint")
     cached: dict[str, dict[str, Any]] = (
         legacy_migration["machine_decisions"] if legacy_migration else {}
     )

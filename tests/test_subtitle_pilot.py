@@ -184,7 +184,7 @@ def test_cli_replay_never_starts_runpod_or_sends_error_mail(tmp_path, monkeypatc
     from mas.subtitle import pilot_command
     monkeypatch.setattr(pilot_command, "episode_dir", lambda _: tmp_path)
     monkeypatch.setattr(cli, "run_remote_episode", lambda *a: pytest.fail("paid run"))
-    monkeypatch.setattr(cli, "notify", lambda *a: pytest.fail("unsolicited email"))
+    monkeypatch.setattr(cli, "enqueue_notification", lambda *a, **k: pytest.fail("unsolicited email"))
     source = tmp_path / "evidence.json"
     source.write_text(json.dumps(evidence()), encoding="utf-8")
     assert cli.main(["subtitle-pilot", "11", "--evidence", str(source)]) == 0

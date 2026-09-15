@@ -103,9 +103,10 @@ def test_transfer_only_verified_local_delivery_never_acquires_gpu(tmp_path, monk
     atomic_json(audit / 'capacity-shutdown.json',
                 {'data': shutdown, 'sha256': runpod_controller.digest(shutdown)})
     runpod_controller._write_delivery_release(episode_root, 13, 'owned', audit)
-    def publish(root, episode, remote):
+    def publish(root, episode, remote, **kwargs):
         delivery.validate_delivery(root, episode)
         assert remote == 'drive:delivery'
+        assert 0 < kwargs['total_timeout'] <= 21600
         return 0
     monkeypatch.setattr(runpod_controller, 'publish_local_delivery', publish)
     monkeypatch.setattr(runpod_controller, '_required_environment',
@@ -270,12 +271,34 @@ def test_local_publication_forwards_scratch_lifetime_timeout(tmp_path, monkeypat
                 'remote': remote}
     monkeypatch.setattr(delivery, 'upload_verified', upload)
     assert delivery.publish_local_delivery(tmp_path, 13, 'drive:delivery', total_timeout=37) == 0
-    assert observed['kwargs']['total_timeout'] == 37
+    assert 0 < observed['kwargs']['total_timeout'] <= 37
     assert observed['kwargs']['preservation_receipt'] == tmp_path / 'final' / 'drive-preservation.json'
+    assert observed['kwargs']['require_drive_preflight'] is True
     receipt = json.loads((tmp_path / 'final' / 'drive_readback_receipt.json').read_text(encoding='utf-8'))
     assert receipt['status'] == 'PASS'
     assert receipt['delivery_sha256'] == hashlib.sha256(
         (tmp_path / 'final' / 'burned_mp4_delivery.json').read_bytes()).hexdigest()
+
+
+def test_publication_local_validation_consumes_same_wall_budget(tmp_path, monkeypatch):
+    _strict_delivery(tmp_path)
+    (tmp_path / 'source' / 'source.url').write_text('https://example.test/13', encoding='utf-8')
+    atomic_json(tmp_path / 'source' / 'official-source.json', {
+        'episode': 13, 'url': 'https://example.test/13', 'channel_url': 'channel',
+        'title': 'Muhtemel Ask 13. Bolum'})
+    monkeypatch.setattr(delivery, 'CHANNEL_VIDEOS_URL', 'channel')
+    monkeypatch.setattr(delivery, 'is_exact_episode_title', lambda *args: True)
+    clock = [100.0]
+    monkeypatch.setattr(delivery.time, 'monotonic', lambda: clock[0])
+    validate = delivery.validate_delivery
+    def slow_validate(*args):
+        clock[0] += 11
+        return validate(*args)
+    monkeypatch.setattr(delivery, 'validate_delivery', slow_validate)
+    monkeypatch.setattr(delivery, 'upload_verified', lambda *args, **kwargs: pytest.fail('upload started'))
+    with pytest.raises(TimeoutError, match='wall-time budget'):
+        delivery.publish_local_delivery(tmp_path, 13, 'drive:delivery', total_timeout=10)
+    assert not (tmp_path / 'final' / 'drive_readback_receipt.json').exists()
 
 
 def test_mutated_approved_sample_blocks_local_delivery(tmp_path):

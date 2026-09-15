@@ -1,5 +1,14 @@
 # Episode 13 runtime audit
 
+## Superseded preliminary report
+
+Use [the deduplicated timeline audit](EP13_TIMELINE_AUDIT_2026-09-12.md)
+for measured durations and [the quality-preserving implementation plan](FOUR_HOUR_PIPELINE_PLAN_2026-09-12.md)
+for decisions. The historical figures below contain replayed log events and
+unproven time attribution. In particular, making acoustic alignment optional
+without a validated replacement is NOT an approved quality-preserving change.
+These preliminary recommendations are retained only as audit history.
+
 ## Finding
 
 The visible subtitle quality is not the main runtime bottleneck. The largest
@@ -100,4 +109,3 @@ The delivery must still require natural conversational Indonesian, correct
 formal and informal register, canonical names, preserved numbers and religious
 expressions, no missing UIDs, no display overlap, at most 20 characters per
 second, visual burned-subtitle sampling, and exact Drive byte/SHA-256 readback.
-

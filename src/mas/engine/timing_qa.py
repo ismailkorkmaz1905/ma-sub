@@ -24,6 +24,7 @@ class TimingQAV2Error(RuntimeError):
 @dataclass(frozen=True)
 class TimingQAV2Config:
     minimum_duration_ms: int = 700
+    maximum_duration_ms: int = 7000
     maximum_cps: float = 20.0
     duplicate_short_threshold_ms: int = 1200
     alignment_timing_source: str = "whisperx_ctc_forced_alignment"
@@ -31,6 +32,8 @@ class TimingQAV2Config:
     def __post_init__(self) -> None:
         if self.minimum_duration_ms < 1:
             raise ValueError("minimum_duration_ms must be positive")
+        if self.maximum_duration_ms < self.minimum_duration_ms:
+            raise ValueError("maximum_duration_ms cannot be below minimum_duration_ms")
         if self.maximum_cps <= 0:
             raise ValueError("maximum_cps must be positive")
         if self.duplicate_short_threshold_ms < self.minimum_duration_ms:
@@ -101,6 +104,82 @@ def _alignment_report_parts(
     ):
         raise TimingQAV2Error("alignment_report has no valid alignment_sha256")
     return counters, alignment_sha
+
+
+def _acoustic_timing_issues(blocks, source_words):
+    if not isinstance(source_words, list) or any(
+        not isinstance(word, Mapping) for word in source_words
+    ):
+        raise TimingQAV2Error("alignment_report.words must be a list of acoustic words")
+    lanes = {}
+    for word in source_words:
+        try:
+            lane = speaker_id(word, "alignment word")
+            start, end = word["start_ms"], word["end_ms"]
+            if (
+                isinstance(start, bool) or not isinstance(start, int)
+                or isinstance(end, bool) or not isinstance(end, int)
+                or start < 0 or end <= start
+            ):
+                raise ValueError("invalid acoustic word interval")
+            tokens = _normalise_text(word.get("text", word.get("word", ""))).split()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TimingQAV2Error(f"invalid alignment word: {exc}") from exc
+        lanes.setdefault(lane, {"tokens": [], "blocks": []})["tokens"].extend(
+            (token, word) for token in tokens
+        )
+    for block in blocks:
+        try:
+            lane = speaker_id(block, "block")
+        except ValueError:
+            continue  # The main loop reports malformed speaker identity.
+        lanes.setdefault(lane, {"tokens": [], "blocks": []})["blocks"].append(block)
+    issues = []
+    for lane in lanes.values():
+        expected_tokens = [token for token, _ in lane["tokens"]]
+        actual_tokens = [
+            token
+            for block in lane["blocks"]
+            for token in _normalise_text(
+                block.get("primary_text", block.get("tr_text", ""))
+            ).split()
+        ]
+        if actual_tokens != expected_tokens:
+            issues.append({
+                "code": "acoustic_text_mismatch",
+                "block_uids": [str(block.get("block_uid", "")) for block in lane["blocks"]],
+                "message": "cue text does not preserve complete ordered acoustic words",
+            })
+            continue
+        cursor = 0
+        for block in lane["blocks"]:
+            count = len(_normalise_text(
+                block.get("primary_text", block.get("tr_text", ""))
+            ).split())
+            owned_words = [word for _, word in lane["tokens"][cursor:cursor + count]]
+            cursor += count
+            try:
+                start, end = int(block["start_ms"]), int(block["end_ms"])
+            except (KeyError, TypeError, ValueError):
+                continue  # The main loop reports malformed cue timing.
+            if not owned_words:
+                continue
+            first_start = min(word["start_ms"] for word in owned_words)
+            last_end = max(word["end_ms"] for word in owned_words)
+            if start != first_start or end < last_end:
+                issues.append({
+                    "code": "cue_acoustic_boundary_mismatch",
+                    "block_index": block.get("block_index"),
+                    "block_uid": str(block.get("block_uid", "")),
+                    "actual_start_ms": start,
+                    "actual_end_ms": end,
+                    "first_word_start_ms": first_start,
+                    "last_word_end_ms": last_end,
+                    "utterance_uids": list(dict.fromkeys(
+                        word["utterance_uid"] for word in owned_words if word.get("utterance_uid")
+                    )),
+                })
+    return issues
 
 
 def run_timing_qa_v2(
@@ -229,6 +308,17 @@ def run_timing_qa_v2(
         active_blocks.append((end_ms, current_speaker_id))
 
         duration_ms = end_ms - start_ms
+        if duration_ms > settings.maximum_duration_ms:
+            invalid_timing_count += 1
+            issues.append(
+                {
+                    "code": "overlong_cue",
+                    "block_index": expected_index,
+                    "block_uid": uid,
+                    "actual": duration_ms,
+                    "expected": f"<= {settings.maximum_duration_ms} ms",
+                }
+            )
         if duration_ms < settings.minimum_duration_ms:
             short_cue_count += 1
             issues.append(
@@ -345,6 +435,12 @@ def run_timing_qa_v2(
                 )
         previous = block
 
+    word_ownership_checked = "words" in alignment_report or "report" in alignment_report
+    if word_ownership_checked:
+        acoustic_issues = _acoustic_timing_issues(blocks, alignment_report.get("words"))
+        invalid_timing_count += len(acoustic_issues)
+        issues.extend(acoustic_issues)
+
     counts = {
         "unresolved_speech_region_count": unresolved_speech_region_count,
         "unaligned_word_count": unaligned_word_count,
@@ -371,6 +467,7 @@ def run_timing_qa_v2(
         "passed": passed,
         "block_count": len(blocks),
         "alignment_sha256": alignment_sha256,
+        "word_ownership_checked": word_ownership_checked,
         "config": asdict(settings),
         # This is an explicit pilot-review warning.  Scores below the hard
         # 0.30 floor are rejected upstream; scores in [0.30, 0.55) are kept

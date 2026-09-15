@@ -147,6 +147,9 @@ def test_terminal_poll_drains_bounded_log_before_return(monkeypatch, tmp_path, c
 
 
 def _patch_local_preflight(monkeypatch, tmp_path):
+    monkeypatch.setenv("MAS_RUNPOD_IMAGE", "registry/test@sha256:" + "a" * 64)
+    monkeypatch.setattr(controller, "drive_preflight", lambda *args, **kwargs: {"status": "test"})
+    monkeypatch.setattr(controller, "_local_encoder_preflight", lambda *args: None)
     episode_root = tmp_path / "episode"
     episode_root.mkdir()
     key = tmp_path / "id_ed25519"
@@ -182,6 +185,38 @@ def test_missing_storage_quote_fails_before_provider_construction(monkeypatch, t
     monkeypatch.setattr(controller, "CapacityProvider",
                         lambda *args: (_ for _ in ()).throw(AssertionError("provider constructed")))
     with pytest.raises(controller.RunPodControllerError, match="MAS_RUNPOD_STORAGE_QUOTE"):
+        controller.run_remote_episode(13)
+
+
+def test_drive_readiness_failure_occurs_before_paid_acquisition(monkeypatch, tmp_path):
+    _patch_local_preflight(monkeypatch, tmp_path)
+    monkeypatch.setattr(controller, "_prepare_official_source", lambda *_: "https://example.invalid/episode")
+    monkeypatch.setattr(controller, "_episode_budget", lambda *_: Budget())
+    monkeypatch.setenv("MAS_RUNPOD_STORAGE_QUOTE", str(tmp_path / "storage.json"))
+    monkeypatch.setattr(controller, "load_storage_quote", lambda _: {})
+    calls = []
+    def preflight(remote, **kwargs):
+        calls.append(kwargs)
+        raise controller.RemoteVerificationError("private OAuth unavailable")
+    monkeypatch.setattr(controller, "drive_preflight", preflight)
+    monkeypatch.setattr(controller, "CapacityProvider", lambda *_: pytest.fail("provider acquired before Drive readiness"))
+    with pytest.raises(controller.RemoteVerificationError, match="OAuth"):
+        controller.run_remote_episode(13)
+    assert calls == [{"required_bytes": 0, "config_path": tmp_path / "rclone", "total_timeout": 60}]
+
+
+def test_local_qsv_failure_occurs_before_provider_or_drive(monkeypatch, tmp_path):
+    _patch_local_preflight(monkeypatch, tmp_path)
+    monkeypatch.setattr(controller, "_prepare_official_source", lambda *_: "https://example.invalid/episode")
+    monkeypatch.setattr(controller, "_episode_budget", lambda *_: Budget())
+    monkeypatch.setenv("MAS_RUNPOD_STORAGE_QUOTE", str(tmp_path / "storage.json"))
+    monkeypatch.setattr(controller, "load_storage_quote", lambda _: {})
+    def fail(*args):
+        raise ValueError("QSV encoder unavailable")
+    monkeypatch.setattr(controller, "_local_encoder_preflight", fail)
+    monkeypatch.setattr(controller, "drive_preflight", lambda *a, **k: pytest.fail("Drive queried"))
+    monkeypatch.setattr(controller, "CapacityProvider", lambda *_: pytest.fail("provider acquired"))
+    with pytest.raises(ValueError, match="QSV encoder unavailable"):
         controller.run_remote_episode(13)
 
 
@@ -245,7 +280,7 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
                         lambda *args, **kwargs: READY_FOR_DELIVERY)
     monkeypatch.setattr(controller, "validate_delivery", lambda *args: events.append("validate"))
     monkeypatch.setattr(controller, "sha256_file", lambda path: "b" * 64)
-    def publish(*args):
+    def publish(*args, **kwargs):
         events.append("publish" if "publish" not in events else "publish-retry")
         if events[-1] == "publish":
             raise RuntimeError("Drive unavailable")

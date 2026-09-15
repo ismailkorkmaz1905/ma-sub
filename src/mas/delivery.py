@@ -9,11 +9,15 @@ from .reliability import atomic_json
 from .remote import upload_verified
 from .source_discovery import CHANNEL_VIDEOS_URL, is_exact_episode_title
 from .state import load, set_stage
-from .notify import notify
+from .notify import enqueue_notification as notify
 
 
 READY_FOR_DELIVERY = 22
 WAIT_MP4_SAMPLE = 23
+READY_FOR_LOCAL_ENCODE = 24
+WAIT_PART_RETURN = 25
+READY_FOR_PARTIAL_ENCODE = 26
+NEXT_PART = 27
 
 
 def safe_relative(root, value):
@@ -104,6 +108,10 @@ def validate_delivery(root, episode):
     id_srt = verified_record(root, report["outputs"]["id_srt"])
     if receipt["inputs"] != {"source_sha256": sha256_file(source), "id_srt_sha256": sha256_file(id_srt)}:
         raise ValueError("MP4 source/subtitle binding changed")
+    if ("execution_plan_sha256" in delivery or "qualification" in delivery
+            or (receipt.get("encoder") == "h264_qsv" and not receipt.get("sample_approval"))):
+        from .local_encode import validate_local_encoding_evidence
+        validate_local_encoding_evidence(root, episode, delivery, receipt)
     _sample_records(root, receipt)
     return delivery, mp4
 
@@ -141,6 +149,15 @@ def write_delivery_export(root, episode):
 
 
 def publish_local_delivery(root, episode, remote_root, *, total_timeout=3600):
+    started = time.monotonic()
+    deadline = started + total_timeout
+
+    def remaining():
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise TimeoutError("Drive publication wall-time budget exhausted")
+        return value
+
     root = Path(root)
     delivery, mp4 = validate_delivery(root, episode)
     metadata = json.loads((root / "source" / "official-source.json").read_text(encoding="utf-8"))
@@ -154,17 +171,18 @@ def publish_local_delivery(root, episode, remote_root, *, total_timeout=3600):
     state_path = root / "work" / "state.json"
     state = load(state_path, episode)
     set_stage(state_path, state, "drive_readback", "running")
-    started = time.monotonic()
     evidence = {"started_at": datetime.now(timezone.utc).isoformat(), "status": "RUNNING"}
     evidence["start_notification"] = notify(episode, "Drive aktarimi basladi", "MP4 byte/SHA-256 readback yapiliyor.")
     event_path = root / "work" / "drive-publication.json"
     atomic_json(event_path, evidence)
     try:
         receipt = upload_verified(mp4, f"{remote_root.rstrip('/')}/{title}.mp4",
-                                  total_timeout=total_timeout,
-                                  preservation_receipt=root / "final" / "drive-preservation.json")
+                                  total_timeout=remaining(),
+                                  preservation_receipt=root / "final" / "drive-preservation.json",
+                                  require_drive_preflight=True)
         # Local inputs must remain unchanged across the complete network transaction.
         validate_delivery(root, episode)
+        remaining()
         receipt_path = root / "final" / "drive_readback_receipt.json"
         atomic_json(receipt_path, {"status": "PASS", "mode": "strict", "files": [receipt],
                                   "delivery_sha256": sha256_file(root / "final" / "burned_mp4_delivery.json"),
@@ -172,11 +190,13 @@ def publish_local_delivery(root, episode, remote_root, *, total_timeout=3600):
         set_stage(state_path, state, "drive_readback", "pass", receipt=str(receipt_path),
                   sha256=sha256_file(receipt_path))
         evidence["status"] = "PASS"
-        evidence["result_notification"] = notify(episode, "Drive aktarimi tamamlandi", str(receipt_path))
+        evidence["result_notification"] = notify(episode, "Drive aktarimi tamamlandi", str(receipt_path),
+                                                 root=root, kind="terminal")
     except Exception as exc:
         set_stage(state_path, state, "drive_readback", "failed", error=str(exc))
         evidence.update(status="FAILED", error_type=type(exc).__name__)
-        evidence["result_notification"] = notify(episode, "Drive aktarimi basarisiz", type(exc).__name__)
+        evidence["result_notification"] = notify(episode, "Drive aktarimi basarisiz", type(exc).__name__,
+                                                 root=root, kind="terminal")
         raise
     finally:
         evidence.update(ended_at=datetime.now(timezone.utc).isoformat(),

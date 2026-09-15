@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import copy
+
+import pytest
 
 from mas.engine.timing_qa import TimingQAV2Error, assert_timing_qa_v2, run_timing_qa_v2
 
@@ -51,7 +54,7 @@ def full_alignment_output(**counter_overrides: int) -> dict:
         "alignment_sha256": ALIGNMENT_SHA,
         "timing_source": "whisperx_ctc_forced_alignment",
         "segments": [],
-        "words": [],
+        "words": [{"text": "Merhaba.", "start_ms": 1000, "end_ms": 1780}],
         "report": report,
     }
 
@@ -77,6 +80,7 @@ class TimingQAV2Tests(unittest.TestCase):
 
         self.assertTrue(report["passed"])
         self.assertEqual(report["alignment_sha256"], ALIGNMENT_SHA)
+        self.assertTrue(report["word_ownership_checked"])
 
     def test_full_output_reads_nested_failures_and_rejects_conflicts(self) -> None:
         report = run_timing_qa_v2(
@@ -189,6 +193,99 @@ class TimingQAV2Tests(unittest.TestCase):
             alignment_report=alignment(),
         )
         self.assertEqual(report["adjacent_short_duplicate_count"], 1)
+
+
+@pytest.mark.parametrize("words", [
+    ("Zeytin", "Gökyüzü"),
+    ("Bekledik", "Döneceğiz"),
+    ("Tamam", "Tamam"),
+])
+@pytest.mark.parametrize("boundary", ["early_start", "late_start", "early_end"])
+def test_timing_qa_binds_each_scene_to_actual_words_not_mutable_metadata(words, boundary):
+    values = [block(1, 1000, 2000, words[0]), block(2, 32_000, 33_000, words[1])]
+    report_source = full_alignment_output()
+    report_source["words"] = [
+        {"text": words[0], "start_ms": 1000, "end_ms": 1780, "utterance_uid": "source-a"},
+        {"text": words[1], "start_ms": 32_000, "end_ms": 32_900,
+         "utterance_uid": "source-b"},
+    ]
+    if boundary == "early_start":
+        values[1]["start_ms"] = 28_000
+    elif boundary == "late_start":
+        values[1]["start_ms"] = 32_050
+    else:
+        values[1]["end_ms"] = 32_850
+    values[1]["vad_info"].update(
+        first_word_start_ms=values[1]["start_ms"], last_word_end_ms=values[1]["end_ms"]
+    )
+    original = copy.deepcopy(values)
+    report = run_timing_qa_v2(
+        values, speech_coverage_report=coverage(), alignment_report=report_source
+    )
+    assert not report["passed"]
+    assert report["invalid_timing_count"] == 1
+    boundary_issues = [issue for issue in report["issues"]
+                       if issue["code"] == "cue_acoustic_boundary_mismatch"]
+    assert boundary_issues == [{
+        "code": "cue_acoustic_boundary_mismatch", "block_index": 2, "block_uid": "uid-2",
+        "actual_start_ms": values[1]["start_ms"], "actual_end_ms": values[1]["end_ms"],
+        "first_word_start_ms": 32_000, "last_word_end_ms": 32_900,
+        "utterance_uids": ["source-b"],
+    }]
+    assert all(issue["block_uid"] == "uid-2" for issue in report["issues"])
+    assert values == original
+
+
+def test_timing_qa_early_start_one_ms_is_not_hidden_by_legacy_padding():
+    report = run_timing_qa_v2(
+        [block(1, 999, 2000, "Merhaba.")],
+        speech_coverage_report=coverage(), alignment_report=full_alignment_output(),
+    )
+    assert not report["passed"]
+    assert report["issues"][0]["first_word_start_ms"] == 1000
+
+
+def test_full_alignment_without_acoustic_words_cannot_prove_cue_ownership():
+    value = full_alignment_output()
+    value["words"] = []
+    report = run_timing_qa_v2(
+        [block(1, 1000, 2000, "Merhaba.")],
+        speech_coverage_report=coverage(), alignment_report=value,
+    )
+    assert not report["passed"]
+    assert report["issues"][0]["code"] == "acoustic_text_mismatch"
+
+
+def test_timing_qa_rejects_generic_word_moved_to_previous_scene_with_total_text_preserved():
+    values = [block(1, 1000, 2500, "Geldik. Yarın"), block(2, 32_300, 33_300, "döneriz.")]
+    source = full_alignment_output()
+    source["words"] = [
+        {"text": "Geldik.", "start_ms": 1000, "end_ms": 2000},
+        {"text": "Yarın", "start_ms": 32_000, "end_ms": 32_280},
+        {"text": "döneriz.", "start_ms": 32_300, "end_ms": 32_900},
+    ]
+    report = run_timing_qa_v2(
+        values, speech_coverage_report=coverage(), alignment_report=source,
+    )
+    assert not report["passed"]
+    assert report["invalid_timing_count"] == 1
+    assert report["issues"][0]["block_uid"] == "uid-1"
+    assert report["issues"][0]["last_word_end_ms"] == 32_280
+
+
+def test_timing_qa_keeps_different_known_speaker_ownership_with_overlap():
+    values = [block(1, 1000, 2200, "Zeytin."), block(2, 1500, 2600, "Gökyüzü.")]
+    source = full_alignment_output()
+    source["words"] = [
+        {"text": "Zeytin.", "start_ms": 1000, "end_ms": 2000, "speaker_id": "A"},
+        {"text": "Gökyüzü.", "start_ms": 1500, "end_ms": 2300, "speaker_id": "B"},
+    ]
+    for value, speaker in zip(values, ("A", "B"), strict=True):
+        value["speaker_id"] = speaker
+    report = run_timing_qa_v2(
+        values, speech_coverage_report=coverage(), alignment_report=source,
+    )
+    assert report["passed"]
 
 
 if __name__ == "__main__":

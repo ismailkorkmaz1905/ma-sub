@@ -1,13 +1,18 @@
+import configparser
 import hashlib
 import json
 import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+
+from .reliability import atomic_json, digest, read_json
 
 
 class RemoteVerificationError(RuntimeError):
@@ -98,22 +103,108 @@ def _file_signature(path, *, deadline=None):
 
 
 def _remote_signature(command, *, idle_timeout, total_timeout):
-    digest = hashlib.sha256()
-    size = 0
+    deadline = time.monotonic() + total_timeout
+    for attempt in range(3):
+        checksum = hashlib.sha256()
+        size = 0
 
-    def consume(chunk):
-        nonlocal size
-        digest.update(chunk)
-        size += len(chunk)
+        def consume(chunk):
+            nonlocal size
+            checksum.update(chunk)
+            size += len(chunk)
 
-    _run_watchdog(
-        command,
-        idle_timeout=idle_timeout,
-        total_timeout=total_timeout,
-        stdout_handler=consume,
-        progress_observer=lambda name, chunk: name == "stdout" and bool(chunk),
-    )
-    return size, digest.hexdigest()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RemoteVerificationError("remote readback deadline expired")
+        try:
+            _run_watchdog(
+                command,
+                idle_timeout=idle_timeout,
+                total_timeout=remaining,
+                stdout_handler=consume,
+                progress_observer=lambda name, chunk: name == "stdout" and bool(chunk),
+            )
+        except RemoteVerificationError:
+            if attempt == 2:
+                raise
+        else:
+            return size, checksum.hexdigest()
+
+
+def _rclone_config_flags():
+    configured = os.getenv("MAS_RCLONE_CONFIG") or os.getenv("RCLONE_CONFIG")
+    return ["--config", configured] if configured else []
+
+
+def _drive_credentials(remote, *, config_path=None, total_timeout=60):
+    remote_name = remote.split(":", 1)[0]
+    if (":" not in remote or not remote_name or any(char in remote_name for char in "/\\,")):
+        raise RemoteVerificationError("Drive preflight requires a named rclone remote")
+    if not shutil.which("rclone"):
+        raise RemoteVerificationError("rclone is required for Drive preflight")
+    configured = config_path or os.getenv("MAS_RCLONE_CONFIG") or os.getenv("RCLONE_CONFIG")
+    if configured is None:
+        response = _run_watchdog(["rclone", "config", "file"],
+                                 idle_timeout=min(15, total_timeout), total_timeout=total_timeout)
+        configured = response.decode("utf-8").strip().splitlines()[-1]
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        with Path(configured).open(encoding="utf-8-sig") as handle:
+            config.read_file(handle)
+    except (OSError, UnicodeError, configparser.Error):
+        raise RemoteVerificationError("Drive OAuth configuration cannot be inspected safely") from None
+    section = dict(config[remote_name]) if remote_name in config else {}
+
+    def option(name):
+        return os.getenv(f"RCLONE_CONFIG_{remote_name.upper()}_{name.upper()}",
+                         os.getenv(f"RCLONE_DRIVE_{name.upper()}", section.get(name, ""))).strip()
+
+    if option("type") != "drive":
+        raise RemoteVerificationError("Drive preflight requires a direct Drive remote")
+    if not option("client_id") or not option("client_secret"):
+        raise RemoteVerificationError("private Drive OAuth client is required; shared client is blocked")
+    if option("service_account_file") or option("service_account_credentials"):
+        raise RemoteVerificationError("Drive preflight requires the configured private OAuth identity")
+    if option("scope") not in ("", "drive", "https://www.googleapis.com/auth/drive"):
+        raise RemoteVerificationError("Drive OAuth scope cannot preserve existing delivery objects")
+    try:
+        token = json.loads(option("token"))
+        refresh_token = token.get("refresh_token")
+    except (ValueError, AttributeError):
+        refresh_token = None
+    if not isinstance(refresh_token, str) or not refresh_token:
+        raise RemoteVerificationError("Drive OAuth refresh identity is missing")
+    if option("token_url") or option("auth_url") or option("client_credentials").lower() == "true":
+        raise RemoteVerificationError("custom Drive OAuth endpoints or flows are not supported")
+    identity = {"client_id": option("client_id"), "refresh_token": refresh_token,
+                "root_folder_id": option("root_folder_id"), "team_drive": option("team_drive")}
+    return {**identity, "client_secret": option("client_secret"), "remote_name": remote_name,
+            "config_path": str(configured), "credential_identity_sha256": digest(identity)}
+
+
+def drive_preflight(remote, *, required_bytes, config_path=None, total_timeout=60):
+    if type(required_bytes) is not int or required_bytes < 0:
+        raise RemoteVerificationError("Drive required byte count is invalid")
+    started = time.monotonic()
+    credentials = _drive_credentials(remote, config_path=config_path, total_timeout=total_timeout)
+    remote_name = credentials["remote_name"]
+    remaining = total_timeout - (time.monotonic() - started)
+    if remaining <= 0:
+        raise RemoteVerificationError("Drive preflight deadline expired")
+    quota = json.loads(_run_watchdog(
+        ["rclone", "about", remote_name + ":", "--json", "--config", credentials["config_path"],
+         "--contimeout", "15s", "--timeout", "30s", "--retries", "1", "--low-level-retries", "2"],
+        idle_timeout=min(30, remaining), total_timeout=remaining))
+    free = quota.get("free") if isinstance(quota, dict) else None
+    if type(free) is not int or free < 0:
+        raise RemoteVerificationError("Drive available space is UNKNOWN")
+    if free < required_bytes:
+        raise RemoteVerificationError("insufficient Drive space; retained objects will not be deleted")
+    return {"status": "PASS", "checked_at": datetime.now(timezone.utc).isoformat(),
+            "remote_name": remote_name, "required_bytes": required_bytes, "free_bytes": free,
+            "client_id_sha256": digest(credentials["client_id"]),
+            "credential_identity_sha256": credentials["credential_identity_sha256"],
+            "write_access": "NOT_PROBED"}
 
 
 class _RcloneProgress:
@@ -148,8 +239,74 @@ class _RcloneProgress:
         return advanced
 
 
+class _UploadProgress:
+    def __init__(self):
+        self.pending = b""
+        self.watermarks = {}
+
+    def __call__(self, name, chunk):
+        if name != "stderr":
+            return False
+        self.pending += chunk
+        lines = self.pending.split(b"\n")
+        self.pending = lines.pop()[-65536:]
+        advanced = False
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or event.get("phase") not in ("hash", "upload"):
+                continue
+            count = event.get("bytes")
+            phase = event["phase"]
+            if type(count) is int and count > self.watermarks.get(phase, 0):
+                self.watermarks[phase] = count
+                advanced = True
+        return advanced
+
+
+def _upload_resumable(source, remote, partial, expected_size, expected_sha, preflight,
+                      *, idle_timeout, total_timeout, allow_session_create):
+    deadline = time.monotonic() + total_timeout
+    credentials = _drive_credentials(remote, total_timeout=min(60, total_timeout))
+    if credentials["credential_identity_sha256"] != preflight["credential_identity_sha256"]:
+        raise RemoteVerificationError("Drive OAuth identity changed after preflight")
+    parent = remote.rsplit("/", 1)[0]
+    folder = json.loads(_run_watchdog(
+        ["rclone", "lsjson", parent, "--stat", "--config", credentials["config_path"],
+         "--contimeout", "15s", "--timeout", "30s", "--retries", "1", "--low-level-retries", "2"],
+        idle_timeout=min(30, idle_timeout), total_timeout=max(0.01, deadline - time.monotonic())))
+    if (not isinstance(folder, dict) or folder.get("IsDir") is not True
+            or not isinstance(folder.get("ID"), str) or not folder["ID"]):
+        raise RemoteVerificationError("Drive destination folder identity is unavailable")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RemoteVerificationError("Drive session upload deadline expired")
+    result = json.loads(_run_watchdog(
+        [sys.executable, "-m", "mas.drive_resumable", "--source", str(Path(source).resolve()),
+         "--remote", remote, "--partial", partial, "--parent-id", folder["ID"],
+         "--size", str(expected_size), "--sha256", expected_sha,
+         "--identity", credentials["credential_identity_sha256"],
+         "--config", credentials["config_path"], "--total-timeout", str(remaining),
+         "--idle-timeout", str(idle_timeout), *(["--allow-session-create"] if allow_session_create else [])],
+        idle_timeout=idle_timeout, total_timeout=remaining, progress_observer=_UploadProgress()))
+    binding = {"source": str(Path(source).resolve()), "remote": remote, "partial": partial,
+               "parent_id": folder["ID"], "bytes": expected_size, "sha256": expected_sha,
+               "credential_identity_sha256": credentials["credential_identity_sha256"]}
+    if (not isinstance(result, dict)
+            or set(result) != {"status", "bytes", "sha256", "object_id", "session_binding_sha256"}
+            or result.get("status") != "UPLOAD_COMPLETE"
+            or type(result.get("bytes")) is not int or result["bytes"] != expected_size
+            or result.get("sha256") != expected_sha
+            or not isinstance(result.get("object_id"), str) or not result["object_id"]
+            or result.get("session_binding_sha256") != digest(binding)):
+        raise RemoteVerificationError("Drive session completion evidence is invalid")
+    return result
+
+
 def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600,
-                    preservation_receipt=None):
+                    preservation_receipt=None, require_drive_preflight=False):
     deadline = time.monotonic() + total_timeout
 
     def remaining():
@@ -163,73 +320,192 @@ def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600,
         raise RemoteVerificationError(f"unsafe upload source: {path}")
     if not remote or "emergency" in remote.casefold():
         raise RemoteVerificationError("MAS_DRIVE_STRICT_REMOTE must name a strict destination")
+    if require_drive_preflight and preservation_receipt is None:
+        raise RemoteVerificationError("production Drive upload requires persistent preservation evidence")
     if not shutil.which("rclone"):
         raise RemoteVerificationError("rclone is required for Drive upload verification")
     expected_size, expected_sha = _file_signature(path, deadline=deadline)
+    preflight = (drive_preflight(remote, required_bytes=0, total_timeout=min(60, remaining()))
+                 if require_drive_preflight else None)
+
+    def receipt():
+        result = {"bytes": expected_size, "sha256": expected_sha, "remote": remote}
+        if preflight is not None:
+            result["preflight"] = preflight
+        return result
+
     partial = remote + f".partial-{uuid.uuid4().hex}"
-    common = ["--contimeout", "30s", "--timeout", "2m", "--retries", "3",
+    common = ["--contimeout", "30s", "--timeout", "2m", "--retries", "1",
               "--low-level-retries", "3", "--stats", "10s", "--use-json-log",
-              "--stats-log-level", "NOTICE"]
-    if preservation_receipt is not None:
-        from .reliability import atomic_json
-        parent, filename = remote.rsplit("/", 1)
-        _run_watchdog(["rclone", "mkdir", parent, *common],
-                      idle_timeout=idle_timeout, total_timeout=remaining())
-        listing = json.loads(_run_watchdog(
+              "--stats-log-level", "NOTICE", *_rclone_config_flags()]
+    transaction = None
+    transaction_path = None
+    listing = []
+
+    def save_transaction():
+        if transaction_path is not None:
+            atomic_json(transaction_path, {"payload": transaction, "sha256": digest(transaction)})
+
+    def inventory(parent):
+        result = json.loads(_run_watchdog(
             ["rclone", "lsjson", parent, "--files-only", "--max-depth", "1", *common],
             idle_timeout=idle_timeout, total_timeout=remaining()))
-        matches = [item for item in listing if item.get("Name") == filename]
+        if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+            raise RemoteVerificationError("invalid Drive inventory")
+        return result
+
+    def unique_object(items, filename):
+        matches = [item for item in items if item.get("Name") == filename]
         if len(matches) > 1:
             raise RemoteVerificationError("ambiguous duplicate Drive filename; preserve all objects")
+        return matches[0] if matches else None
+
+    def signature(target):
+        return _remote_signature(["rclone", "cat", target, *common],
+                                 idle_timeout=idle_timeout, total_timeout=remaining())
+
+    if preservation_receipt is not None:
+        parent, filename = remote.rsplit("/", 1)
+        binding = {"remote": remote, "bytes": expected_size, "sha256": expected_sha}
+        evidence_path = Path(preservation_receipt)
+        transaction_path = evidence_path.with_name(
+            evidence_path.stem + "-upload-" + digest(binding) + ".json")
+        if transaction_path.exists():
+            envelope = read_json(transaction_path)
+            transaction = envelope.get("payload")
+            if (not isinstance(transaction, dict) or envelope.get("sha256") != digest(transaction)
+                    or transaction.get("binding") != binding):
+                raise RemoteVerificationError("Drive upload checkpoint binding changed")
+            partial = transaction.get("partial", "")
+            suffix = partial.removeprefix(remote + ".partial-")
+            if (not partial.startswith(remote + ".partial-") or len(suffix) != 32
+                    or any(char not in "0123456789abcdef" for char in suffix)):
+                raise RemoteVerificationError("unsafe Drive upload checkpoint path")
+            if type(transaction.get("upload_attempts")) is not int or transaction["upload_attempts"] < 0:
+                raise RemoteVerificationError("invalid Drive upload checkpoint attempt count")
+        else:
+            transaction = {"binding": binding, "partial": partial, "upload_attempts": 0,
+                           "status": "INVENTORY_PENDING"}
+            save_transaction()
+        if preflight is not None:
+            transaction["preflight"] = preflight
+            save_transaction()
+        _run_watchdog(["rclone", "mkdir", parent, *common],
+                      idle_timeout=idle_timeout, total_timeout=remaining())
+        listing = inventory(parent)
+        existing = unique_object(listing, filename)
         prior = None
-        if matches:
-            old_size, old_sha = _remote_signature(
-                ["rclone", "cat", remote, *common], idle_timeout=idle_timeout,
-                total_timeout=remaining())
+        if existing:
+            old_size, old_sha = signature(remote)
             prior = {"remote": remote, "bytes": old_size, "sha256": old_sha,
-                     "object_id": matches[0].get("ID")}
+                     "object_id": existing.get("ID")}
+        retained_pending = transaction.get("retained_pending")
+        if retained_pending:
+            retained = retained_pending["retained_remote"]
+            retained_prefix = parent + "/.retained/" + retained_pending["prior"]["sha256"] + "-"
+            retained_suffix = retained.removeprefix(retained_prefix).removesuffix("/" + filename)
+            if (not retained.startswith(retained_prefix) or not retained.endswith("/" + filename)
+                    or len(retained_suffix) != 32
+                    or any(char not in "0123456789abcdef" for char in retained_suffix)):
+                raise RemoteVerificationError("unsafe retained Drive checkpoint path")
+            saved_attempt = Path(retained_pending["attempt_path"])
+            attempt_suffix = saved_attempt.stem.removeprefix(evidence_path.stem + "-")
+            if (saved_attempt.parent.resolve() != evidence_path.parent.resolve()
+                    or saved_attempt.suffix != ".json" or len(attempt_suffix) != 32
+                    or any(char not in "0123456789abcdef" for char in attempt_suffix)):
+                raise RemoteVerificationError("unsafe Drive preservation receipt checkpoint path")
+            preserved = signature(retained)
+            if preserved != (retained_pending["prior"]["bytes"], retained_pending["prior"]["sha256"]):
+                raise RemoteVerificationError("retained Drive byte/SHA-256 readback mismatch")
+            retained_pending["status"] = "PRESERVED"
+            atomic_json(retained_pending["attempt_path"], retained_pending["evidence"] | {"status": "PRESERVED"})
+            atomic_json(evidence_path, retained_pending["evidence"] | {"status": "PRESERVED"})
+            transaction.pop("retained_pending")
+            save_transaction()
         evidence = {"destination": remote, "prior": prior, "status": "INVENTORIED"}
         # Each attempt keeps its own inventory, including failures after a remote move.
-        evidence_path = Path(preservation_receipt)
         attempt_path = evidence_path.with_name(evidence_path.stem + "-" + uuid.uuid4().hex + ".json")
         atomic_json(attempt_path, evidence)
         atomic_json(evidence_path, evidence)
         if prior and (old_size, old_sha) == (expected_size, expected_sha):
-            return {"bytes": expected_size, "sha256": expected_sha, "remote": remote}
+            transaction["status"] = "VERIFIED_FINAL"
+            save_transaction()
+            return receipt()
+        partial_object = unique_object(listing, partial.rsplit("/", 1)[-1])
+        if preflight is not None and partial_object is None:
+            if preflight["free_bytes"] < expected_size:
+                raise RemoteVerificationError("insufficient Drive space; retained objects will not be deleted")
+            preflight["required_bytes"] = expected_size
+            save_transaction()
         if prior:
             retained = f"{parent}/.retained/{old_sha}-{uuid.uuid4().hex}/{filename}"
             evidence.update(status="PRESERVATION_PLANNED", retained_remote=retained)
             atomic_json(attempt_path, evidence)
             atomic_json(evidence_path, evidence)
+            transaction["retained_pending"] = {"retained_remote": retained, "prior": prior,
+                "attempt_path": str(attempt_path), "evidence": evidence}
+            save_transaction()
             _run_watchdog(["rclone", "moveto", remote, retained, "--immutable", *common],
                           idle_timeout=idle_timeout, total_timeout=remaining())
-            preserved = _remote_signature(["rclone", "cat", retained, *common],
-                                          idle_timeout=idle_timeout, total_timeout=remaining())
+            preserved = signature(retained)
             if preserved != (old_size, old_sha):
                 raise RemoteVerificationError("retained Drive byte/SHA-256 readback mismatch")
             evidence["status"] = "PRESERVED"
             atomic_json(attempt_path, evidence)
             atomic_json(evidence_path, evidence)
-    _run_watchdog(["rclone", "copyto", str(path), partial, *common],
-                  idle_timeout=idle_timeout, total_timeout=remaining(),
-                  progress_observer=_RcloneProgress())
-    partial_size, partial_sha = _remote_signature(
-        ["rclone", "cat", partial, "--contimeout", "30s",
-         "--timeout", "2m", "--retries", "3", "--low-level-retries", "3"],
-        idle_timeout=idle_timeout,
-        total_timeout=remaining(),
-    )
+            transaction.pop("retained_pending")
+            save_transaction()
+    partial_object = unique_object(listing, partial.rsplit("/", 1)[-1])
+    if partial_object is not None and transaction is not None:
+        object_id = partial_object.get("ID")
+        expected_object_id = transaction.get("partial_object_id",
+                            transaction.get("resumable", {}).get("object_id", object_id))
+        if not object_id or expected_object_id != object_id:
+            raise RemoteVerificationError("Drive partial object identity changed")
+        transaction["partial_object_id"] = object_id
+        save_transaction()
+    else:
+        if transaction is not None and transaction["upload_attempts"] >= 2 and not require_drive_preflight:
+            raise RemoteVerificationError("Drive upload retry allowance exhausted; evidence preserved")
+        if preflight is not None and preflight["free_bytes"] < expected_size:
+            raise RemoteVerificationError("insufficient Drive space; retained objects will not be deleted")
+        if transaction is not None:
+            if not require_drive_preflight or transaction["upload_attempts"] == 0:
+                transaction["upload_attempts"] += 1
+            transaction["status"] = "UPLOAD_STARTED"
+            save_transaction()
+        if require_drive_preflight:
+            allow_session_create = not transaction.get("native_session_started", False)
+            transaction["native_session_started"] = True
+            save_transaction()
+            completion = _upload_resumable(path, remote, partial, expected_size, expected_sha, preflight,
+                                          idle_timeout=idle_timeout, total_timeout=remaining(),
+                                          allow_session_create=allow_session_create)
+            transaction["resumable"] = completion
+            save_transaction()
+        else:
+            _run_watchdog(["rclone", "copyto", str(path), partial, "--immutable", *common],
+                          idle_timeout=idle_timeout, total_timeout=remaining(),
+                          progress_observer=_RcloneProgress())
+        if transaction is not None:
+            partial_object = unique_object(inventory(parent), partial.rsplit("/", 1)[-1])
+            if partial_object is None or not partial_object.get("ID"):
+                raise RemoteVerificationError("uploaded Drive partial object identity is missing")
+            if require_drive_preflight and partial_object["ID"] != completion["object_id"]:
+                raise RemoteVerificationError("Drive session and partial object identities differ")
+            transaction["partial_object_id"] = partial_object["ID"]
+            transaction["status"] = "READBACK_PENDING"
+            save_transaction()
+    partial_size, partial_sha = signature(partial)
     if partial_size != expected_size or partial_sha != expected_sha:
         raise RemoteVerificationError("partial Drive byte/SHA-256 readback mismatch")
     _run_watchdog(["rclone", "moveto", partial, remote, "--immutable", *common],
                   idle_timeout=idle_timeout, total_timeout=remaining(),
                   progress_observer=_RcloneProgress())
-    final_size, final_sha = _remote_signature(
-        ["rclone", "cat", remote, "--contimeout", "30s",
-         "--timeout", "2m", "--retries", "3", "--low-level-retries", "3"],
-        idle_timeout=idle_timeout,
-        total_timeout=remaining(),
-    )
+    final_size, final_sha = signature(remote)
     if final_size != expected_size or final_sha != expected_sha:
         raise RemoteVerificationError("final Drive byte/SHA-256 readback mismatch")
-    return {"bytes": expected_size, "sha256": expected_sha, "remote": remote}
+    if transaction is not None:
+        transaction["status"] = "VERIFIED_FINAL"
+        save_transaction()
+    return receipt()

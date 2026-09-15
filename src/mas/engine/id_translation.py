@@ -433,6 +433,65 @@ def load_default_id_translation_glossary() -> dict[str, Any]:
     )
 
 
+def build_production_translation_policy(series, names, religious):
+    from dataclasses import asdict
+    from .segmentation import SegmentationConfig
+    from .timing_qa import TimingQAV2Config
+
+    series, names, religious = (_json_clone(dict(value)) for value in (series, names, religious))
+    subtitle = series.get("subtitle")
+    if not isinstance(subtitle, dict):
+        raise IDTranslationError("production subtitle policy is missing")
+    for name in ("target_chars_per_line", "qa_max_chars_per_line", "maximum_lines",
+                 "minimum_duration_ms", "maximum_duration_ms"):
+        _require_int(subtitle.get(name), "subtitle." + name, minimum=1)
+    for name in ("start_lead_ms", "end_padding_ms", "next_speech_guard_ms", "internal_gap_review_ms"):
+        _require_int(subtitle.get(name), "subtitle." + name, minimum=0)
+    cps = subtitle.get("preferred_max_cps")
+    if (type(cps) not in (int, float) or not 0 < cps <= 20
+            or not 20 <= subtitle["target_chars_per_line"] <= subtitle["qa_max_chars_per_line"] <= 42
+            or subtitle["maximum_lines"] != 2
+            or not 700 <= subtitle["minimum_duration_ms"] <= subtitle["maximum_duration_ms"] <= 7000):
+        raise IDTranslationError("production subtitle policy would weaken strict quality limits")
+    segmentation = SegmentationConfig(
+        target_chars_per_line=subtitle["target_chars_per_line"], maximum_lines=2,
+        preferred_cps=min(17.0, float(cps)), maximum_source_cps=float(cps),
+        minimum_duration_ms=subtitle["minimum_duration_ms"], maximum_duration_ms=subtitle["maximum_duration_ms"],
+        start_lead_ms=subtitle["start_lead_ms"], end_padding_ms=subtitle["end_padding_ms"],
+        next_speech_guard_ms=subtitle["next_speech_guard_ms"],
+        internal_gap_review_ms=subtitle["internal_gap_review_ms"],
+        context_blocks=_require_int(series.get("batch_context_blocks", 2), "batch_context_blocks", minimum=0),
+    )
+    timing = TimingQAV2Config(minimum_duration_ms=subtitle["minimum_duration_ms"],
+                              maximum_duration_ms=subtitle["maximum_duration_ms"], maximum_cps=float(cps))
+    glossary = validate_id_translation_glossary({
+        "canonical_names": names.get("canonical_names", []),
+        "forbidden_name_variants": names.get("forbidden_variants", {}),
+        "source_name_variants": names.get("source_variants", {}),
+        "religious_terms": religious.get("terms", []),
+        "allah_only_semoga_is_invalid": religious.get("allah_only_semoga_is_invalid", True),
+    })
+    policy = {"format": "mas-production-translation-policy-1", "series": series,
+              "names": names, "religious": religious, "segmentation": asdict(segmentation),
+              "timing_qa": asdict(timing), "glossary": glossary,
+              "instructions_sha256": _sha256_bytes(ID_TRANSLATION_INSTRUCTIONS.encode("utf-8")),
+              "parallel_workers": 3}
+    policy["policy_sha256"] = _sha256_bytes(_canonical_json_bytes(policy))
+    return policy
+
+
+def validate_production_translation_policy(policy):
+    if not isinstance(policy, Mapping):
+        raise IDTranslationError("production translation policy must be an object")
+    try:
+        expected = build_production_translation_policy(policy["series"], policy["names"], policy["religious"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise IDTranslationError("production translation policy is invalid") from exc
+    if not _json_equal(policy, expected):
+        raise IDTranslationError("production translation policy binding changed")
+    return expected
+
+
 def validate_aligned_turkish_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and canonicalize a final Turkish forced-aligned V2 schema.
 
@@ -444,6 +503,8 @@ def validate_aligned_turkish_schema(schema: Mapping[str, Any]) -> dict[str, Any]
     if not isinstance(schema, Mapping):
         raise IDTranslationError("Aligned Turkish schema must be a JSON object")
     trusted = _json_clone(dict(schema))
+    if "production_policy" in trusted:
+        trusted["production_policy"] = validate_production_translation_policy(trusted["production_policy"])
 
     schema_version = _require_nonempty_string(
         trusted.get("schema_version"), "schema_version"
@@ -652,6 +713,8 @@ def create_id_translation_pack(
         if glossary is None
         else validate_id_translation_glossary(glossary)
     )
+    if "production_policy" in trusted and trusted_glossary != trusted["production_policy"]["glossary"]:
+        raise IDTranslationError("ID glossary differs from the frozen production policy")
     records = build_id_translation_records(trusted)
     batches = _batch_records(records, batch_size)
     payloads: dict[str, bytes] = {
@@ -814,6 +877,9 @@ def validate_id_translation_pack(
             archive.read("glossary.json"), member="glossary.json"
         )
         packed_glossary = validate_id_translation_glossary(packed_glossary_raw)
+        if ("production_policy" in packed_schema
+                and packed_glossary != packed_schema["production_policy"]["glossary"]):
+            raise IDTranslationError("Packed glossary differs from the frozen production policy")
         if archive.read("glossary.json") != _pretty_json_bytes(packed_glossary):
             raise IDTranslationError(
                 "glossary.json is not deterministic canonical JSON"
@@ -1198,6 +1264,7 @@ __all__ = [
     "IDTranslationValidationResult",
     "REQUIRED_ALIGNED_BLOCK_FIELDS",
     "build_id_translation_records",
+    "build_production_translation_policy",
     "create_id_only_translation_pack",
     "create_id_translation_output_zip",
     "create_id_translation_pack",
@@ -1208,4 +1275,5 @@ __all__ = [
     "validate_id_translation_glossary",
     "validate_id_translation_pack",
     "validate_id_translation_records",
+    "validate_production_translation_policy",
 ]

@@ -33,10 +33,16 @@ from .id_translation import (
     DEFAULT_ID_BATCH_SIZE,
     create_id_translation_pack,
     validate_aligned_turkish_schema,
+    validate_production_translation_policy,
 )
 from .aligned_schema import build_aligned_turkish_schema
 from .segmentation import SegmentationConfig, build_blocks
-from .raw_asr import RawASRV2Config
+from .raw_asr import (
+    RawASRV2Config,
+    required_acoustic_review_regions,
+    required_speech_coverage_regions,
+    validate_raw_rescue_plan,
+)
 from .speech_coverage import (
     SpeechCoverageConfig,
     analyze_speech_coverage,
@@ -274,6 +280,19 @@ def correction_records_to_alignment_inputs(
             f"review_required_count={len(pending_review_uids)}, "
             f"utterance_uids={pending_review_uids}"
         )
+    incomplete_dialogue_uids = [
+        str(record["utterance_uid"])
+        for record in trusted_corrections
+        if record["non_dialogue"] is False
+        and "incomplete_provisional_word_timing"
+        in inputs_by_uid[str(record["utterance_uid"])]["risk_flags"]
+    ]
+    if incomplete_dialogue_uids:
+        raise V2PipelineError(
+            "Forced alignment blocked by incomplete provisional word timing: "
+            f"dialogue_count={len(incomplete_dialogue_uids)}, "
+            f"utterance_uids={incomplete_dialogue_uids}"
+        )
     alignment_inputs: list[dict[str, Any]] = []
     reviewed_non_dialogue: list[dict[str, Any]] = []
     reviewed_dialogue: list[dict[str, Any]] = []
@@ -357,6 +376,21 @@ def correction_records_to_alignment_inputs(
                 reviewed_dialogue.append(
                     {
                         "review_id": f"asr-hallucination:{candidate['candidate_uid']}",
+                        "start_ms": coarse_start,
+                        "end_ms": coarse_end,
+                        "classification": "dialogue",
+                        "review_status": "reviewed",
+                        "reason": str(record["note"]).strip(),
+                    }
+                )
+            elif (
+                uid in holes_by_uid
+                and record["audio_reviewed"] is True
+                and record["review_disposition"] == "confirmed_dialogue"
+            ):
+                reviewed_dialogue.append(
+                    {
+                        "review_id": f"tr-correction:{uid}",
                         "start_ms": coarse_start,
                         "end_ms": coarse_end,
                         "classification": "dialogue",
@@ -518,6 +552,33 @@ def _validate_raw_vad_inventory(
             raise V2PipelineError(
                 f"vad_regions[{position}] is not independent Silero VAD evidence"
             )
+    segments = trusted.get("segments")
+    supplied_required_regions = trusted.get("required_acoustic_review_regions")
+    if not isinstance(segments, list):
+        raise V2PipelineError("raw_asr_data segments must be a list")
+    if not isinstance(supplied_required_regions, list):
+        raise V2PipelineError(
+            "raw_asr_data required_acoustic_review_regions must be a list"
+        )
+    try:
+        expected_required_regions = required_acoustic_review_regions(
+            segments, vad_regions
+        )
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise V2PipelineError(
+            f"raw_asr_data required acoustic review evidence is invalid: {exc}"
+        ) from exc
+    if supplied_required_regions != expected_required_regions:
+        raise V2PipelineError(
+            "raw_asr_data required_acoustic_review_regions does not match "
+            "the immutable segment inventory"
+        )
+    try:
+        validate_raw_rescue_plan(trusted)
+    except RuntimeError as exc:
+        raise V2PipelineError(
+            f"raw_asr_data rescue execution proof is invalid: {exc}"
+        ) from exc
     return trusted
 
 
@@ -862,6 +923,30 @@ def _strict_word_vad_gate(
         for outcome in audio_review_report["outcomes"]
         if outcome["review_disposition"] == "confirmed_dialogue"
     }
+    required_outside_regions = sorted(
+        (
+            int(region["start_ms"]),
+            int(region["end_ms"]),
+        )
+        for region in trusted_raw.get("required_acoustic_review_regions", [])
+    )
+    frozen_hole_bounds = {
+        (int(hole["start_ms"]), int(hole["end_ms"]))
+        for hole in trusted_raw.get("speech_hole_records", [])
+    }
+
+    def required_outside_contains(start_ms: int, end_ms: int) -> bool:
+        cursor = start_ms
+        for region_start, region_end in required_outside_regions:
+            if region_end <= cursor:
+                continue
+            if region_start > cursor:
+                break
+            cursor = max(cursor, region_end)
+            if cursor >= end_ms:
+                return True
+        return False
+
     confirmed_dialogue_coverage: list[dict[str, Any]] = []
     for uid, review in confirmed_by_uid.items():
         target_start = int(review["start_ms"])
@@ -873,11 +958,33 @@ def _strict_word_vad_gate(
             and int(word["start_ms"]) < target_end
             and target_start < int(word["end_ms"])
         ]
+        fully_contained_target_words = [
+            word
+            for word in target_words
+            if target_start <= int(word["start_ms"])
+            and int(word["end_ms"]) <= target_end
+        ]
         required_report = analyze_speech_coverage(
             [{"start_ms": target_start, "end_ms": target_end}],
             target_words,
             config=coverage_config,
         )
+        is_required_outside_target = (
+            review["evidence_kind"] == "speech_hole"
+            and (target_start, target_end) in frozen_hole_bounds
+            and required_outside_contains(target_start, target_end)
+        )
+        coverage_status = required_report["status"]
+        unresolved_speech_region_count = required_report[
+            "unresolved_speech_region_count"
+        ]
+        if is_required_outside_target:
+            coverage_status = (
+                "PASS" if fully_contained_target_words else "FAIL"
+            )
+            unresolved_speech_region_count = (
+                0 if fully_contained_target_words else 1
+            )
         confirmed_dialogue_coverage.append(
             {
                 "utterance_uid": uid,
@@ -886,10 +993,13 @@ def _strict_word_vad_gate(
                 "start_ms": target_start,
                 "end_ms": target_end,
                 "aligned_word_count": len(target_words),
-                "status": required_report["status"],
-                "unresolved_speech_region_count": required_report[
-                    "unresolved_speech_region_count"
-                ],
+                "coverage_mode": (
+                    "exact_frozen_required_outside_target"
+                    if is_required_outside_target
+                    else "complete_review_target"
+                ),
+                "status": coverage_status,
+                "unresolved_speech_region_count": unresolved_speech_region_count,
                 "speech_coverage_ratio": required_report[
                     "speech_coverage_ratio"
                 ],
@@ -1070,6 +1180,11 @@ def recompute_final_speech_coverage(
         config=effective_config,
         reviewed_non_dialogue=reviews,
         reviewed_dialogue=dialogue_reviews,
+        required_uncovered_intervals=required_speech_coverage_regions(
+            trusted_raw.get("segments", []), trusted_raw["vad_regions"]
+        ),
+        include_required_outside_vad=True,
+        required_review_targets=trusted_raw.get("speech_hole_records", []),
     )
     return copy.deepcopy(report)
 
@@ -1097,6 +1212,53 @@ def _validated_episode_and_inputs(
     return resolved_episode, trusted_raw, trusted_inputs
 
 
+def _parent_part_vad_gate(raw, aligned, preparation, parent_vad_regions, part_lineage, config):
+    lineage = _strict_json_copy(part_lineage, "part_lineage")
+    regions = _strict_json_copy(parent_vad_regions, "parent_vad_regions")
+    if (not isinstance(lineage, dict) or not isinstance(regions, list) or not regions
+            or lineage.get("episode") != raw["episode"]
+            or re.fullmatch(r"part-[0-9]{3}", str(lineage.get("part_id", ""))) is None
+            or not isinstance(lineage.get("audio"), dict) or lineage["audio"].get("sha256") != raw["audio_sha256"]
+            or lineage.get("sample_rate_hz") != 16000):
+        raise V2PipelineError("Partial audio lineage does not match child raw ASR")
+    for field in ("plan_sha256", "parent_source_sha256", "parent_audio_sha256", "parent_vad_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(lineage.get(field, ""))) is None:
+            raise V2PipelineError("Partial lineage lacks exact parent evidence hashes")
+    if lineage["parent_vad_sha256"] != _canonical_sha256(regions, "projected parent VAD"):
+        raise V2PipelineError("Projected parent VAD identity changed")
+    counts = [lineage.get(name) for name in ("start_sample", "end_sample", "sample_count")]
+    if (any(type(value) is not int or value < 0 for value in counts)
+            or counts[2] <= 0 or counts[1] - counts[0] != counts[2]):
+        raise V2PipelineError("Partial lineage sample range is invalid")
+    exact_end = counts[2] * 1000
+    vad_end = ((exact_end + 15999) // 16000) * 16000
+    for records, end_limit in ((regions, vad_end), (raw["vad_regions"], vad_end),
+                               (aligned["words"], exact_end), (preparation.reviewed_dialogue, exact_end),
+                               (preparation.reviewed_non_dialogue, exact_end)):
+        for item in records:
+            if (type(item.get("start_ms")) is not int or type(item.get("end_ms")) is not int
+                    or not 0 <= item["start_ms"] < item["end_ms"]
+                    or item["end_ms"] * 16000 > end_limit):
+                raise V2PipelineError("Partial timing escapes the exact child sample range")
+    if any(region.get("source") != "silero_vad" for region in regions):
+        raise V2PipelineError("Parent speech inventory is not independent Silero VAD")
+    report = analyze_speech_coverage(
+        regions, aligned["words"], config=config,
+        reviewed_non_dialogue=preparation.reviewed_non_dialogue,
+        reviewed_dialogue=preparation.reviewed_dialogue,
+    )
+    if report["status"] != "PASS" or report["unresolved_speech_region_count"] != 0:
+        raise V2PipelineError("Child alignment does not cover the complete projected parent VAD")
+    evidence = {"format": "mas-parent-part-vad-1", "status": "PASS", "part_id": lineage["part_id"],
+                "plan_sha256": lineage["plan_sha256"],
+                "lineage_sha256": _canonical_sha256(lineage, "part_lineage"),
+                "parent_vad_sha256": lineage["parent_vad_sha256"],
+                "audio_sha256": raw["audio_sha256"], "alignment_sha256": aligned["alignment_sha256"],
+                "coverage": report}
+    evidence["parent_part_vad_sha256"] = _canonical_sha256(evidence, "parent part VAD evidence")
+    return evidence
+
+
 def build_strict_v2_artifacts(
     raw_asr_data: Mapping[str, Any],
     correction_records: Sequence[Mapping[str, Any]],
@@ -1109,6 +1271,9 @@ def build_strict_v2_artifacts(
     timing_qa_config: TimingQAV2Config | None = None,
     acoustic_audio_review: Mapping[str, Any] | None = None,
     speaker_evidence: Mapping[str, Any] | None = None,
+    production_policy: Mapping[str, Any] | None = None,
+    parent_vad_regions: Sequence[Mapping[str, Any]] | None = None,
+    part_lineage: Mapping[str, Any] | None = None,
 ) -> V2PipelineArtifacts:
     """Build the strict aligned blocks/schema after external forced alignment."""
 
@@ -1174,6 +1339,10 @@ def build_strict_v2_artifacts(
         audio_review_report,
         raw_coverage_config,
     )
+    if parent_vad_regions is not None or part_lineage is not None:
+        coverage_report["parent_part_vad_v1"] = _parent_part_vad_gate(
+            trusted_raw, trusted_alignment, preparation, parent_vad_regions, part_lineage, raw_coverage_config,
+        )
     # Both audits are included before schema construction, so their complete
     # contents are transitively bound by schema.speech_coverage_sha256.
     coverage_report["audio_review_v2"] = copy.deepcopy(audio_review_report)
@@ -1201,6 +1370,16 @@ def build_strict_v2_artifacts(
             f"{strict_word_vad_report.get('confirmed_dialogue_coverage_fail_count')!r}"
         )
 
+    policy = None
+    if production_policy is not None:
+        policy = validate_production_translation_policy(production_policy)
+        policy_segmentation = SegmentationConfig(**policy["segmentation"])
+        policy_timing = TimingQAV2Config(**policy["timing_qa"])
+        if segmentation_config is not None and segmentation_config != policy_segmentation:
+            raise V2PipelineError("segmentation_config differs from frozen production policy")
+        if timing_qa_config is not None and timing_qa_config != policy_timing:
+            raise V2PipelineError("timing_qa_config differs from frozen production policy")
+        segmentation_config, timing_qa_config = policy_segmentation, policy_timing
     settings = segmentation_config or SegmentationConfig(schema_version="2.0")
     if not isinstance(settings, SegmentationConfig):
         raise V2PipelineError("segmentation_config must be SegmentationConfig")
@@ -1243,6 +1422,7 @@ def build_strict_v2_artifacts(
         segmentation_input,
         resolved_episode,
         config=settings,
+        **({"end_boundary_ms": part_lineage["sample_count"] // 16} if part_lineage is not None else {}),
     )
     forced_provenance = copy.deepcopy(trusted_alignment["provenance"])
     for position, block in enumerate(segmented_blocks, start=1):
@@ -1272,6 +1452,10 @@ def build_strict_v2_artifacts(
         speech_coverage_report=coverage_report,
         schema_version=settings.schema_version,
     )
+    if policy is not None:
+        schema = dict(schema)
+        schema.pop("schema_sha256", None)
+        schema["production_policy"] = policy
     trusted_schema = validate_aligned_turkish_schema(schema)
     timing_report = run_timing_qa_v2(
         trusted_schema["blocks"],
@@ -1309,6 +1493,9 @@ def create_v2_id_translation_pack(
     schema = validate_aligned_turkish_schema(artifacts.schema)
     if schema["episode"] != artifacts.episode:
         raise V2PipelineError("V2 artifact episode/schema mismatch")
+    if ("production_policy" in schema
+            and artifacts.timing_qa_report.get("config") != schema["production_policy"]["timing_qa"]):
+        raise V2PipelineError("Pre-ID timing QA differs from the frozen production policy")
     return create_id_translation_pack(
         schema,
         out_zip,

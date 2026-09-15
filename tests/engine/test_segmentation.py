@@ -22,6 +22,62 @@ from mas.engine.translation_validation import (
 
 
 class SegmentationDriftRegressionTests(unittest.TestCase):
+    def test_part_boundary_shortens_only_optional_display_padding(self):
+        words = [{"word_index": 1, "start_ms": 1000, "end_ms": 1700,
+                  "text": "Geldik.", "utterance_uid": "generic-final"}]
+        original = copy.deepcopy(words)
+        whole = build_blocks({"words": words}, 14)
+        scoped = build_blocks({"words": words}, 14, end_boundary_ms=1800)
+        self.assertEqual(whole[0]["end_ms"], 1920)
+        self.assertEqual(scoped[0]["end_ms"], 1800)
+        self.assertEqual(scoped[0]["start_ms"], 1000)
+        self.assertEqual(scoped[0]["timing_text"], "Geldik.")
+        self.assertEqual(words, original)
+        self.assertTrue(validate_segmentation(scoped, words).valid)
+
+    def test_part_boundary_never_truncates_word_or_reduces_minimum_or_cps(self):
+        for text, word_end, boundary in [("Geldik.", 1701, 1700),
+                                         ("Evet.", 1200, 1699),
+                                         ("Gerçekten geleceksiniz.", 1400, 1800)]:
+            with self.subTest(text=text):
+                words = [{"word_index": 1, "start_ms": 1000, "end_ms": word_end,
+                          "text": text, "utterance_uid": "unresolved-specific"}]
+                with self.assertRaisesRegex(
+                    SegmentationError, "end_boundary_ms=.*unresolved-specific"
+                ):
+                    build_blocks({"words": words}, 14, end_boundary_ms=boundary)
+
+    def test_part_boundary_applies_to_each_known_speaker_without_merging(self):
+        words = [
+            {"word_index": 1, "start_ms": 1000, "end_ms": 1800,
+             "text": "Elbette.", "utterance_uid": "speaker-a", "speaker_id": "A"},
+            {"word_index": 2, "start_ms": 1100, "end_ms": 1850,
+             "text": "Peki.", "utterance_uid": "speaker-b", "speaker_id": "B"},
+        ]
+        blocks = build_blocks({"words": words}, 14, end_boundary_ms=1900)
+        self.assertEqual([block["speaker_id"] for block in blocks], ["A", "B"])
+        self.assertEqual([block["timing_text"] for block in blocks], ["Elbette.", "Peki."])
+        self.assertTrue(all(block["end_ms"] == 1900 for block in blocks))
+        self.assertTrue(validate_segmentation(blocks, words).valid)
+
+    def test_part_boundary_participates_in_dp_before_group_is_frozen(self):
+        words = [{"word_index": index + 1, "start_ms": 1000 + index * 680,
+                  "end_ms": 1500 + index * 680, "text": "geleceksiniz",
+                  "utterance_uid": "scene-final"} for index in range(5)]
+        whole = build_blocks({"words": words}, 14)
+        scoped = build_blocks({"words": words}, 14, end_boundary_ms=4220)
+        self.assertEqual(len(whole), 2)
+        self.assertEqual(len(scoped), 1)
+        self.assertEqual(scoped[0]["start_ms"], 1000)
+        self.assertEqual(scoped[0]["end_ms"], words[-1]["end_ms"])
+        self.assertEqual(scoped[0]["timing_text"], " ".join(word["text"] for word in words))
+        self.assertTrue(validate_segmentation(scoped, words).valid)
+
+    def test_part_boundary_rejects_invalid_integer_contract(self):
+        for value in (True, 0, -1, 1700.5):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "end_boundary_ms"):
+                build_blocks({"words": []}, 14, end_boundary_ms=value)
+
     def test_segmentation_preserves_all_words_and_hard_silence_boundaries(self) -> None:
         transcription = synthetic_transcription(3)
         blocks = build_blocks(transcription, episode=12)

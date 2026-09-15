@@ -20,7 +20,7 @@ def _handoff(path):
     path.write_bytes(b"verified handoff")
 
 
-def test_verified_handoff_wait_does_not_consume_active_budget(tmp_path, monkeypatch):
+def test_verified_handoff_wait_consumes_the_same_wall_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "400")
     started = datetime(2026, 9, 7, tzinfo=timezone.utc)
     handoff = tmp_path / "translation_input/return.zip"
@@ -39,12 +39,12 @@ def test_verified_handoff_wait_does_not_consume_active_budget(tmp_path, monkeypa
     saved["sha256"] = digest(saved["data"])
     saved_path.write_text(json.dumps(saved), encoding="utf-8")
 
-    resumed = runpod_controller._episode_budget(
-        tmp_path, 13, now=started + timedelta(days=1))
-    assert resumed.remaining(started + timedelta(days=1, seconds=50)) == pytest.approx(250)
+    with pytest.raises(BudgetExceeded):
+        runpod_controller._episode_budget(tmp_path, 13, now=started + timedelta(days=1))
     ledger = json.loads(saved_path.read_text(encoding="utf-8"))["data"]
     assert ledger["started_at"] == started.isoformat()
-    assert ledger["excluded_wait_seconds"] == pytest.approx(24 * 60 * 60 - 100)
+    assert ledger["excluded_wait_seconds"] == 0
+    assert ledger["clock_policy"] == "all-wall-time-v2"
 
 
 def test_unclosed_active_window_charges_crash_and_offline_time(tmp_path, monkeypatch):
@@ -118,3 +118,15 @@ def test_budget_ledger_tampering_is_rejected(tmp_path):
 
     with pytest.raises(runpod_controller.RunPodControllerError, match="integrity"):
         runpod_controller._episode_budget(tmp_path, 13, now=started + timedelta(seconds=1))
+
+
+def test_resume_cannot_increase_original_lower_episode_allowance(tmp_path, monkeypatch):
+    started = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    monkeypatch.setenv('MAS_EPISODE_BUDGET_SECONDS', '400')
+    runpod_controller._episode_budget(tmp_path, 14, now=started)
+    monkeypatch.setenv('MAS_EPISODE_BUDGET_SECONDS', '21600')
+    with pytest.raises(BudgetExceeded):
+        runpod_controller._episode_budget(tmp_path, 14, now=started + timedelta(seconds=401))
+    saved = json.loads((tmp_path / 'work/controller_budget.json').read_text())['data']
+    assert saved['limit_seconds'] == 400
+    assert saved['started_at'] == started.isoformat()

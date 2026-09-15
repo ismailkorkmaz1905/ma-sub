@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import itertools
 import json
 import math
+import random
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -362,6 +364,439 @@ class ForcedAlignmentTests(unittest.TestCase):
         path = Path(directory, "audio.flac")
         path.write_bytes(b"synthetic-audio-placeholder")
         return path
+
+    def _two_pair_coarse(self):
+        return [
+            {
+                "start_ms": start,
+                "end_ms": end,
+                "text": text,
+                "asr_text": text,
+                "deletion_audio_reviewed": False,
+                "utterance_uid": f"utt-{text.lower()}",
+                "speaker_id": "speaker-a",
+            }
+            for start, end, text in (
+                (1000, 2500, "Alpha"),
+                (1200, 2800, "Bravo"),
+                (10000, 11500, "Charlie"),
+                (10200, 11800, "Delta"),
+            )
+        ]
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_component_checkpoint_reuses_postprocess_with_identical_output(self, _model):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            cold = align_corrected_segments(
+                audio, self._two_pair_coarse(),
+                whisperx_module=_TwoPairOverlapWhisperX(), checkpoint_dir=checkpoint,
+            )
+            reused = _TwoPairOverlapWhisperX()
+            with patch.object(
+                forced_align, "_normalize_aligned_words",
+                wraps=forced_align._normalize_aligned_words,
+            ) as normalize:
+                warm = align_corrected_segments(
+                    audio, self._two_pair_coarse(), whisperx_module=reused,
+                    checkpoint_dir=checkpoint,
+                )
+
+        self.assertEqual(reused.align_calls, [])
+        self.assertEqual(normalize.call_count, 4)
+        self.assertEqual(cold, warm)
+        self.assertEqual(json.dumps(cold, sort_keys=True), json.dumps(warm, sort_keys=True))
+        validate_forced_alignment_data(warm)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_component_checkpoint_changed_cue_invalidates_only_its_component(self, _model):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            coarse = self._two_pair_coarse()
+            align_corrected_segments(
+                audio, coarse, whisperx_module=_TwoPairOverlapWhisperX(),
+                checkpoint_dir=checkpoint,
+            )
+            coarse[0]["end_ms"] = 2400
+            changed = _TwoPairOverlapWhisperX()
+            with patch.object(
+                forced_align, "_normalize_aligned_words",
+                wraps=forced_align._normalize_aligned_words,
+            ) as normalize:
+                data = align_corrected_segments(
+                    audio, coarse, whisperx_module=changed, checkpoint_dir=checkpoint,
+                )
+            fresh = align_corrected_segments(
+                audio, coarse, whisperx_module=_TwoPairOverlapWhisperX(),
+                checkpoint_dir=Path(directory) / "cold-units",
+            )
+
+        self.assertEqual(changed.align_calls, [{"text": "Alpha"}])
+        self.assertEqual(normalize.call_count, 6)
+        self.assertEqual(data, fresh)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_component_checkpoint_binds_joint_raw_result(self, _model):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            cold = align_corrected_segments(
+                audio, self._two_pair_coarse(),
+                whisperx_module=_TwoPairOverlapWhisperX(), checkpoint_dir=checkpoint,
+            )
+            for path in checkpoint.glob("*/*.json"):
+                record = json.loads(path.read_text(encoding="utf-8"))
+                raw = record["data"]["result"]["word_segments"]
+                if [word["word"] for word in raw] != ["Alpha", "Bravo"]:
+                    continue
+                raw[0]["score"] = 0.85
+                record["sha256"] = forced_align.digest(record["data"])
+                path.write_text(json.dumps(record), encoding="utf-8")
+                break
+            else:
+                self.fail("missing joint raw checkpoint")
+            reused = _TwoPairOverlapWhisperX()
+            with patch.object(
+                forced_align, "_normalize_aligned_words",
+                wraps=forced_align._normalize_aligned_words,
+            ) as normalize:
+                data = align_corrected_segments(
+                    audio, self._two_pair_coarse(), whisperx_module=reused,
+                    checkpoint_dir=checkpoint,
+                )
+
+        self.assertEqual(reused.align_calls, [])
+        self.assertEqual(normalize.call_count, 6)
+        self.assertNotEqual(data["alignment_sha256"], cold["alignment_sha256"])
+        self.assertEqual(data["segments"][0]["words"][0]["score"], 0.85)
+        validate_forced_alignment_data(data)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_component_checkpoint_local_vad_change_and_global_policy_invalidation(self, _model):
+        regions = [
+            {"start_ms": 1000, "end_ms": 2800, "vad_region_index": 1,
+             "source": "silero_vad"},
+            {"start_ms": 10000, "end_ms": 11800, "vad_region_index": 2,
+             "source": "silero_vad"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            align_corrected_segments(
+                audio, self._two_pair_coarse(), vad_regions=regions,
+                whisperx_module=_TwoPairOverlapWhisperX(), checkpoint_dir=checkpoint,
+            )
+            regions[0]["end_ms"] = 2700
+            with patch.object(
+                forced_align, "_normalize_aligned_words",
+                wraps=forced_align._normalize_aligned_words,
+            ) as normalize:
+                data = align_corrected_segments(
+                    audio, self._two_pair_coarse(), vad_regions=regions,
+                    whisperx_module=_TwoPairOverlapWhisperX(), checkpoint_dir=checkpoint,
+                )
+                self.assertEqual(normalize.call_count, 6)
+                normalize.reset_mock()
+                data = align_corrected_segments(
+                    audio, self._two_pair_coarse(), vad_regions=regions,
+                    min_word_score=0.35,
+                    whisperx_module=_TwoPairOverlapWhisperX(), checkpoint_dir=checkpoint,
+                )
+                self.assertEqual(normalize.call_count, 8)
+
+        validate_forced_alignment_data(data)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_malformed_component_payload_recomputes_from_raw_evidence(self, _model):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            cold = align_corrected_segments(
+                audio, self._two_pair_coarse(),
+                whisperx_module=_TwoPairOverlapWhisperX(), checkpoint_dir=checkpoint,
+            )
+            for path in (checkpoint / "components").glob("*/*.json"):
+                original = json.loads(path.read_text(encoding="utf-8"))
+                if "utt-alpha" in original["data"]["result"]["selected"]:
+                    break
+            else:
+                self.fail("missing component checkpoint")
+            for field, value in (
+                ("selected", None), ("diagnostics", {}), ("joint_calls", [1]),
+                ("options", None),
+            ):
+                with self.subTest(field=field):
+                    record = copy.deepcopy(original)
+                    if field == "options":
+                        del record["data"]["result"][field]
+                    else:
+                        record["data"]["result"][field] = value
+                    record["sha256"] = forced_align.digest(record["data"])
+                    path.write_text(json.dumps(record), encoding="utf-8")
+                    fake = _TwoPairOverlapWhisperX()
+                    with patch.object(
+                        forced_align, "_normalize_aligned_words",
+                        wraps=forced_align._normalize_aligned_words,
+                    ) as normalize:
+                        data = align_corrected_segments(
+                            audio, self._two_pair_coarse(), whisperx_module=fake,
+                            checkpoint_dir=checkpoint,
+                        )
+                    self.assertEqual(fake.align_calls, [])
+                    self.assertEqual(normalize.call_count, 6)
+                    self.assertEqual(data, cold)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_component_checkpoint_cannot_bypass_final_acoustic_score_gate(self, _model):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            align_corrected_segments(
+                audio, self._two_pair_coarse(),
+                whisperx_module=_TwoPairOverlapWhisperX(), checkpoint_dir=checkpoint,
+            )
+            for path in (checkpoint / "components").glob("*/*.json"):
+                record = json.loads(path.read_text(encoding="utf-8"))
+                selected = record["data"]["result"]["selected"]
+                if "utt-alpha" not in selected:
+                    continue
+                selected["utt-alpha"][0]["score"] = 0.1
+                selected["utt-alpha"][0]["probability"] = 0.1
+                record["sha256"] = forced_align.digest(record["data"])
+                path.write_text(json.dumps(record), encoding="utf-8")
+                break
+            else:
+                self.fail("missing component checkpoint")
+            with self.assertRaisesRegex(ForcedAlignmentError, "score is below"):
+                align_corrected_segments(
+                    audio, self._two_pair_coarse(),
+                    whisperx_module=_TwoPairOverlapWhisperX(), checkpoint_dir=checkpoint,
+                )
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_residual_normalization_replays_without_reprocessing_or_model_calls(self, _model):
+        coarse = [
+            {"start_ms": start, "end_ms": end, "text": text, "asr_text": text,
+             "deletion_audio_reviewed": False, "utterance_uid": f"utt-{text}",
+             "speaker_id": "speaker-a"}
+            for start, end, text in (
+                (400, 900, "Context"), (1000, 2500, "Alpha"), (1200, 2800, "Bravo"),
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            cold = align_corrected_segments(
+                audio, coarse, whisperx_module=_ResidualEarlyStopWhisperX(),
+                checkpoint_dir=checkpoint,
+            )
+            fake = _ResidualEarlyStopWhisperX()
+            with patch.object(forced_align, "_normalize_aligned_words_uncached",
+                              side_effect=AssertionError("unchanged candidate normalized again")):
+                warm = align_corrected_segments(
+                    audio, coarse, whisperx_module=fake, checkpoint_dir=checkpoint,
+                )
+        self.assertEqual(fake.align_calls, [])
+        self.assertEqual(cold, warm)
+        validate_forced_alignment_data(warm)
+
+    def test_residual_selection_checkpoint_binds_options_and_live_neighbors(self):
+        def word(uid, start, end):
+            return {"utterance_uid": uid, "text": uid, "start_ms": start, "end_ms": end}
+
+        options = {
+            "a": [("independent", [word("a", 1000, 2000)]),
+                  ("pair-edge-right", [word("a", 1000, 1400)])],
+            "b": [("independent", [word("b", 1500, 2200)])],
+        }
+        selected = {"a": options["a"][0][1], "b": options["b"][0][1],
+                    "c": [word("c", 32000, 33000)]}
+        with tempfile.TemporaryDirectory() as directory:
+            journal = forced_align.UnitJournal(Path(directory), {"policy": "fixture"})
+            cold = forced_align._strict_existing_option_selection(
+                ["a", "b"], options, selected, {"a": 0, "b": 1, "c": 2},
+                checkpoint_journal=journal,
+            )
+            with patch.object(forced_align, "_strict_existing_option_selection_uncached",
+                              wraps=forced_align._strict_existing_option_selection_uncached) as search:
+                warm = forced_align._strict_existing_option_selection(
+                    ["a", "b"], options, selected, {"a": 0, "b": 1, "c": 2},
+                    checkpoint_journal=journal,
+                )
+                self.assertEqual(search.call_count, 0)
+                self.assertEqual(cold, warm)
+                selected["c"] = [word("c", 1600, 1700)]
+                self.assertIsNone(forced_align._strict_existing_option_selection(
+                    ["a", "b"], options, selected, {"a": 0, "b": 1, "c": 2},
+                    checkpoint_journal=journal,
+                ))
+                self.assertEqual(search.call_count, 1)
+                self.assertIsNone(forced_align._strict_existing_option_selection(
+                    ["a", "b"], options, selected, {"a": 0, "b": 1, "c": 2},
+                    checkpoint_journal=journal,
+                ))
+                self.assertEqual(search.call_count, 1)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_conflict_call_budget_persists_exact_uids_and_blocks_unchanged_retry(self, _model):
+        class CountingOverlap(_OverlapWhisperX):
+            def align(self, transcript, *args, **kwargs):
+                self.align_calls.append(transcript)
+                return super().align(transcript, *args, **kwargs)
+
+        coarse = self._two_pair_coarse()[:2]
+        for item, text in zip(coarse, ("Merhaba.", "Selam.")):
+            item["text"] = item["asr_text"] = text
+            item.pop("speaker_id")
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            fake = CountingOverlap(joint_resolves=False)
+            with patch.object(forced_align, "MAX_CONFLICT_ALIGNMENT_CALLS", 2):
+                with self.assertRaises(forced_align.AlignmentConflictBlocked) as failed:
+                    align_corrected_segments(audio, coarse, whisperx_module=fake,
+                                             checkpoint_dir=checkpoint)
+                self.assertEqual(len(fake.align_calls), 4)
+                details = failed.exception.details
+                self.assertEqual(details["component_uids"], ["utt-alpha", "utt-bravo"])
+                self.assertEqual(details["work"]["alignment_calls"], 2)
+                self.assertEqual(details["reason"], "conflict_alignment_budget")
+                receipt = json.loads((checkpoint / "components" / "latest-conflict-failure.json")
+                                     .read_text(encoding="utf-8"))
+                self.assertEqual(receipt["sha256"], forced_align.digest(receipt["data"]))
+                resumed = CountingOverlap(joint_resolves=False)
+                with self.assertRaises(forced_align.AlignmentConflictBlocked) as repeated:
+                    align_corrected_segments(audio, coarse, whisperx_module=resumed,
+                                             checkpoint_dir=checkpoint)
+                self.assertEqual(resumed.align_calls, [])
+                self.assertEqual(repeated.exception.details["failure_invariant"],
+                                 details["failure_invariant"])
+
+    def test_conflict_time_budget_stops_before_first_fresh_recovery_call(self):
+        source = [{"utterance_uid": uid, "text": uid, "start_ms": 0, "end_ms": 3000,
+                   "coarse_start_ms": 1000, "coarse_end_ms": 2500} for uid in ("a", "b")]
+        independent = {uid: [{"utterance_uid": uid, "text": uid,
+                              "start_ms": 1000, "end_ms": 2000}] for uid in ("a", "b")}
+        with patch.object(forced_align.time, "monotonic", side_effect=[0.0, 121.0, 121.0]):
+            with self.assertRaises(forced_align.AlignmentConflictBlocked) as failed:
+                forced_align._resolve_alignment_overlaps(
+                    source, independent, align=lambda *args, **kwargs: self.fail("fresh call"),
+                    align_model=object(), align_metadata={}, audio=object(), device="cuda",
+                    call_kwargs={}, min_word_score=0.3, max_word_duration_ms=2500,
+                    max_outward_drift_ms=500, vad_regions=[],
+                )
+        self.assertEqual(failed.exception.details["reason"], "conflict_time_budget")
+        self.assertEqual(failed.exception.details["work"]["alignment_calls"], 0)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_independent_context_timeout_is_persisted_and_not_retried(self, _model):
+        clock = {"now": 0.0}
+
+        class SlowContext(_FakeWhisperX):
+            def align(self, transcript, *args, **kwargs):
+                text = transcript[0]["text"]
+                self.align_calls.append(text)
+                if text == "Alpha Bravo":
+                    clock["now"] += 121.0
+                    return _result([{"word": "Alpha", "start": 1.1, "end": 1.5},
+                                    {"word": "Bravo", "start": 2.1, "end": 2.5}])
+                return _result([{"word": text, "start": 1.1 if text == "Alpha" else 2.1,
+                                 "end": 1.5 if text == "Alpha" else 2.5,
+                                 "score": 0.9 if text == "Alpha" else 0.218}])
+
+        coarse = [{"utterance_uid": uid, "text": text, "asr_text": text,
+                   "start_ms": start, "end_ms": end, "deletion_audio_reviewed": False}
+                  for uid, text, start, end in (("a", "Alpha", 1000, 2000),
+                                               ("b", "Bravo", 2000, 3000))]
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            with patch.object(forced_align.time, "monotonic", side_effect=lambda: clock["now"]):
+                fake = SlowContext([])
+                with self.assertRaises(forced_align.AlignmentConflictBlocked) as failed:
+                    align_corrected_segments(audio, coarse, whisperx_module=fake,
+                                             checkpoint_dir=checkpoint)
+                self.assertEqual(fake.align_calls, ["Alpha", "Bravo", "Alpha Bravo"])
+                self.assertEqual(failed.exception.details["phase"], "independent-context")
+                self.assertEqual(failed.exception.details["component_uids"], ["b"])
+                resumed = SlowContext([])
+                with self.assertRaises(forced_align.AlignmentConflictBlocked):
+                    align_corrected_segments(audio, coarse, whisperx_module=resumed,
+                                             checkpoint_dir=checkpoint)
+                self.assertEqual(resumed.align_calls, [])
+
+    def test_conflict_search_budget_is_shared_across_candidate_attempts(self):
+        coarse = self._two_pair_coarse()[:2]
+        for item, text in zip(coarse, ("Merhaba.", "Selam.")):
+            item["text"] = item["asr_text"] = text
+            item.pop("speaker_id")
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(forced_align, "MAX_CONFLICT_SEARCH_CHECKS", 1):
+                with self.assertRaises(forced_align.AlignmentConflictBlocked) as failed:
+                    align_corrected_segments(self._audio(directory), coarse,
+                                             whisperx_module=_OverlapWhisperX(joint_resolves=True))
+        self.assertEqual(failed.exception.details["reason"], "conflict_search_budget")
+        self.assertEqual(failed.exception.details["work"]["search_checks"], 1)
+
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_resume_scope_allows_cached_neighbors_but_blocks_uncached_outside_target(self, _model):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            coarse = self._two_pair_coarse()
+            cold = align_corrected_segments(audio, coarse, whisperx_module=_TwoPairOverlapWhisperX(),
+                                            checkpoint_dir=checkpoint)
+            identity = json.loads((checkpoint / "resume-identity.json").read_text(encoding="utf-8"))
+            self.assertEqual(identity["sha256"], forced_align.digest(identity["data"]))
+            scope = {key: identity["data"][key] for key in (
+                "stage", "audio_sha256", "model_state_sha256", "raw_alignment_binding", "source_sha256",
+            )}
+            scope.update(target_uids=["utt-alpha"], context_uids=["utt-alpha", "utt-bravo"])
+            for missing_text, allowed in (("Alpha", True), ("Charlie", False)):
+                for path in checkpoint.glob("*/*.json"):
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                    words = record["data"]["result"].get("word_segments")
+                    if words and [word["word"] for word in words] == [missing_text]:
+                        path.unlink()
+                        break
+                else:
+                    self.fail(f"missing raw fixture {missing_text}")
+                fake = _TwoPairOverlapWhisperX()
+                if allowed:
+                    warm = align_corrected_segments(audio, coarse, whisperx_module=fake,
+                                                    checkpoint_dir=checkpoint, resume_scope=scope)
+                    self.assertEqual(warm, cold)
+                    self.assertEqual(fake.align_calls, [{"text": "Alpha"}])
+                else:
+                    with self.assertRaisesRegex(forced_align.AlignmentConflictBlocked, "outside authorized"):
+                        align_corrected_segments(audio, coarse, whisperx_module=fake,
+                                                 checkpoint_dir=checkpoint, resume_scope=scope)
+                    self.assertEqual(fake.align_calls, [])
+
+    def test_generic_resume_context_never_joins_words_across_thirty_second_silence(self):
+        for words in (("Zeytin", "Gökyüzü"), ("Buralarda", "Dönüyoruz")):
+            source = forced_align.validate_coarse_segments([
+                {"utterance_uid": uid, "start_ms": start, "end_ms": end,
+                 "text": word, "asr_text": word, "deletion_audio_reviewed": False}
+                for uid, word, start, end in (("a", words[0], 1000, 2000),
+                                             ("b", words[1], 32000, 33000))
+            ])
+            identity = {key: "a" * 64 for key in (
+                "audio_sha256", "model_state_sha256", "raw_alignment_binding", "source_sha256",
+            )}
+            groups = forced_align._alignment_resume_groups(
+                {"stage": "forced_alignment", "target_uids": ["a", "b"],
+                 "context_uids": ["a", "b"], **identity}, source, identity,
+            )
+            self.assertEqual([group["text"] for group in groups],
+                             [forced_align._alignment_model_text(word) for word in words])
+            with self.assertRaisesRegex(ForcedAlignmentError, "unrelated scene"):
+                forced_align._alignment_resume_groups(
+                    {"stage": "forced_alignment", "target_uids": ["a"],
+                     "context_uids": ["a", "b"], **identity}, source, identity,
+                )
 
     @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
     def test_interrupted_alignment_reuses_only_hash_bound_model_calls(self, model_hash):
@@ -1075,8 +1510,10 @@ class ForcedAlignmentTests(unittest.TestCase):
             "utt-left": (500, 5000, 4800, 4950),
             "utt-right": (5000, 5900, 5050, 5300),
         }
+        calls = []
 
         def candidate(item, *, window_start_ms, window_end_ms, **kwargs):
+            calls.append((item["utterance_uid"], window_start_ms, window_end_ms))
             expected_start, expected_end, word_start, word_end = edge_windows[
                 item["utterance_uid"]
             ]
@@ -1110,6 +1547,10 @@ class ForcedAlignmentTests(unittest.TestCase):
             )
 
         self.assertEqual(resolution["final_overlap_count"], 0)
+        self.assertEqual(len(calls), 12)
+        self.assertEqual(calls[-2:], [
+            ("utt-left", 500, 5000), ("utt-right", 5000, 5900),
+        ])
         self.assertEqual(
             [(word["start_ms"], word["end_ms"]) for word in selected["utt-left"]],
             [(4800, 4950)],
@@ -1305,11 +1746,59 @@ class ForcedAlignmentTests(unittest.TestCase):
             )
 
         self.assertIn(("utt-middle", 3000, 4800), calls)
+        self.assertEqual(calls[-3:], [
+            ("utt-left", 0, 2800), ("utt-middle", 3000, 4800),
+            ("utt-right", 5000, 7000),
+        ])
         self.assertEqual(resolution["final_overlap_count"], 0)
         self.assertEqual(
             [(word["start_ms"], word["end_ms"]) for word in selected["utt-middle"]],
             [(3300, 4500)],
         )
+
+    def test_pair_edge_recomputes_residual_before_next_pair(self):
+        source = [
+            {"utterance_uid": uid, "text": text, "start_ms": start,
+             "end_ms": end, "coarse_start_ms": coarse_start,
+             "coarse_end_ms": coarse_end}
+            for uid, text, start, end, coarse_start, coarse_end in (
+                ("utt-a", "Alpha", 0, 4600, 1000, 4100),
+                ("utt-b", "Bravo", 2800, 4500, 3000, 4000),
+                ("utt-c", "Charlie", 3500, 5000, 4000, 4500),
+            )
+        ]
+        independent = {
+            uid: [{"utterance_uid": uid, "word": text,
+                   "start_ms": start, "end_ms": end}]
+            for uid, text, start, end in (
+                ("utt-a", "Alpha", 2500, 4500),
+                ("utt-b", "Bravo", 3100, 3200),
+                ("utt-c", "Charlie", 4100, 4200),
+            )
+        }
+        calls = []
+
+        def candidate(item, *, window_start_ms, window_end_ms, **kwargs):
+            call = (item["utterance_uid"], window_start_ms, window_end_ms)
+            calls.append(call)
+            if call != ("utt-a", 0, 3000):
+                raise ForcedAlignmentError("synthetic non-edge candidate rejected")
+            return [{"utterance_uid": "utt-a", "word": "Alpha",
+                     "start_ms": 2500, "end_ms": 2700}]
+
+        with patch.object(forced_align, "_alignment_candidate", side_effect=candidate):
+            selected, _, resolution = forced_align._resolve_alignment_overlaps(
+                source, independent, align=lambda *args, **kwargs: _result([
+                    {"word": "Alpha", "start": 2.5, "end": 4.5},
+                ]), align_model=object(), align_metadata={}, audio=object(),
+                device="cuda", call_kwargs={}, min_word_score=DEFAULT_MIN_WORD_SCORE,
+                max_word_duration_ms=DEFAULT_MAX_WORD_DURATION_MS,
+                max_outward_drift_ms=DEFAULT_MAX_OUTWARD_DRIFT_MS, vad_regions=[],
+            )
+
+        self.assertEqual(resolution["final_overlap_count"], 0)
+        self.assertEqual(calls[-2:], [("utt-a", 0, 3000), ("utt-b", 4100, 4500)])
+        self.assertEqual(selected["utt-c"], independent["utt-c"])
 
     def test_bounded_overlap_search_forward_checks_late_conflict(self) -> None:
         component_uids = [f"utt-{index}" for index in range(8)]
@@ -2741,6 +3230,107 @@ class ForcedAlignmentTests(unittest.TestCase):
             ForcedAlignmentError, "edited_token_min_word_score must equal"
         ):
             validate_forced_alignment_data(bad_edited_threshold)
+
+
+def _reference_component_selection(component_uids, options, selected, objective):
+    best = best_score = None
+    outside = [word for uid, words in selected.items() if uid not in component_uids for word in words]
+    for combination in itertools.product(*(options[uid] for uid in component_uids)):
+        trial = outside + [word for _, words in combination for word in words]
+        if any(left["utterance_uid"] in component_uids or right["utterance_uid"] in component_uids
+               for left, right in forced_align._unsafe_word_overlaps(trial)):
+            continue
+        score = (sum(mode == "joint" for mode, _ in combination),)
+        if objective == "preferred":
+            score += (sum(mode == "independent" for mode, _ in combination),
+                      sum(mode.startswith("padding-") for mode, _ in combination))
+        if best_score is None or score > best_score:
+            best, best_score = dict(zip(component_uids, combination)), score
+    return best
+
+
+def test_exact_selector_matches_original_exhaustive_winners_and_ties():
+    rng = random.Random(20260914)
+    for case in range(200):
+        uids = [f"uid-{index}" for index in range(rng.randint(1, 4))]
+        options = {}
+        for uid in uids:
+            options[uid] = []
+            for index in range(rng.randint(1, 4)):
+                start = rng.randrange(16) * 100
+                speaker = rng.choice([None, "speaker-a", "speaker-b"])
+                words = [{"utterance_uid": uid, "start_ms": start, "end_ms": start + rng.randint(1, 5) * 100}]
+                if speaker is not None:
+                    words[0]["speaker_id"] = speaker
+                if rng.random() < .25:
+                    words.append({**words[0], "start_ms": start + 50, "end_ms": start + 200})
+                options[uid].append((rng.choice(["joint", "independent", "padding-200", "edge"]), words))
+        selected = {uid: options[uid][0][1] for uid in uids}
+        selected["outside-a"] = [{"utterance_uid": "outside-a", "start_ms": 500, "end_ms": 600}]
+        selected["outside-b"] = [{"utterance_uid": "outside-b", "start_ms": 550, "end_ms": 650}]
+        for objective in ("joint", "preferred"):
+            expected = _reference_component_selection(uids, options, selected, objective)
+            actual = forced_align._strict_existing_option_selection_uncached(
+                uids, options, selected, dict(zip(uids, range(len(uids)))), objective=objective,
+            )
+            assert actual == expected, (case, objective)
+
+
+def test_exact_selector_prunes_only_provably_dominated_combinations_and_reuses_conflicts():
+    uids = [f"uid-{index}" for index in range(5)]
+    options = {uid: [("joint", [{"utterance_uid": uid, "start_ms": index * 1000 + candidate,
+                               "end_ms": index * 1000 + 100 + candidate}])
+                     for candidate in range(6)] for index, uid in enumerate(uids)}
+    selected = {uid: items[0][1] for uid, items in options.items()}
+    expected = _reference_component_selection(uids, options, selected, "preferred")
+    work = []
+    with patch.object(forced_align, "_timings_conflict", wraps=forced_align._timings_conflict) as conflicts:
+        with patch.object(forced_align, "_unsafe_word_overlaps", wraps=forced_align._unsafe_word_overlaps) as whole_trial:
+            actual = forced_align._strict_existing_option_selection_uncached(
+                uids, options, selected, dict(zip(uids, range(5))),
+                work_check=lambda **counts: work.append(counts),
+            )
+    assert actual == expected
+    assert whole_trial.call_count == 0
+    assert conflicts.call_count <= 120
+    assert len(work) < 200
+    assert 6 ** 5 == 7776  # Original exhaustive selector rebuilt this many complete trials.
+
+
+def test_selector_keeps_non_neighbor_and_known_speaker_constraints():
+    def words(uid, start, end, speaker):
+        return [{"utterance_uid": uid, "start_ms": start, "end_ms": end, "speaker_id": speaker}]
+    options = {
+        "a": [("joint", words("a", 0, 100, "speaker-a"))],
+        "b": [("joint", words("b", 40, 150, "speaker-b"))],
+        "c": [("joint", words("c", 50, 120, "speaker-a")),
+              ("padding-200", words("c", 100, 180, "speaker-a"))],
+    }
+    chosen = forced_align._strict_existing_option_selection_uncached(
+        list(options), options, {uid: items[0][1] for uid, items in options.items()},
+        {"a": 0, "b": 1, "c": 2},
+    )
+    assert chosen["c"][0] == "padding-200"
+    assert chosen["a"][1][0]["end_ms"] > chosen["b"][1][0]["start_ms"]
+
+
+def test_component_selection_cache_binds_objective_and_preserves_first_tie(tmp_path):
+    word = {"utterance_uid": "a", "start_ms": 100, "end_ms": 200}
+    options = {"a": [("edge", [word]), ("independent", [dict(word)])]}
+    journal = forced_align.UnitJournal(tmp_path, {"fixture": "objective"})
+    first = forced_align._strict_existing_option_selection(
+        ["a"], options, {"a": [word]}, {"a": 0}, checkpoint_journal=journal, objective="joint",
+    )
+    second = forced_align._strict_existing_option_selection(
+        ["a"], options, {"a": [word]}, {"a": 0}, checkpoint_journal=journal, objective="preferred",
+    )
+    assert first["a"][0] == "edge"
+    assert second["a"][0] == "independent"
+    with patch.object(forced_align, "_strict_existing_option_selection_uncached",
+                      side_effect=AssertionError("unchanged objective must reuse")):
+        assert forced_align._strict_existing_option_selection(
+            ["a"], options, {"a": [word]}, {"a": 0}, checkpoint_journal=journal, objective="joint",
+        ) == first
 
 
 if __name__ == "__main__":

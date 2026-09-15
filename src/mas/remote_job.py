@@ -304,7 +304,8 @@ def supervise(root, episode, commit, token):
     try:
         with paths["log"].open("ab", buffering=0) as output:
             worker = subprocess.Popen(request["command"], cwd=Path(root).resolve(), stdin=subprocess.DEVNULL,
-                                      stdout=output, stderr=subprocess.STDOUT, start_new_session=True, close_fds=True)
+                                      stdout=output, stderr=subprocess.STDOUT, start_new_session=True, close_fds=True,
+                                      env={**os.environ, 'MAS_REMOTE_JOB_TOKEN': identity['token']})
             worker_record = {"pid": worker.pid, "start_ticks": _proc_start_ticks(worker.pid)}
             _atomic_json(paths["claim"], {"identity": identity,
                         "supervisor": {"pid": os.getpid(), "start_ticks": _proc_start_ticks(os.getpid())},
@@ -330,7 +331,9 @@ def supervise(root, episode, commit, token):
     return exit_code
 
 
-def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_seconds=60):
+def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_seconds=60, *, diagnostics=False):
+    if not isinstance(deadline_seconds, (int, float)) or not 0 < deadline_seconds <= 60:
+        raise RemoteJobError("snapshot deadline must be within (0, 60] seconds")
     identity = _identity(episode, commit, input_sha256)
     paths = _paths(root, episode, identity["token"])
     prepare = paths["episode"] / "prepare"
@@ -340,8 +343,50 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
         "raw_asr_v2.recovery.json", "raw_asr_v2.json", "raw_asr_v2.done.json")]
     candidates += [episode_root / "source" / "source.url",
                    episode_root / "source" / "download.done.json",
+                   prepare / "audio.done.json", prepare / "audio_review_v2.json",
+                   episode_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_ID_TRANSLATED.zip.workspace.json",
                    episode_root / "work" / "state.json"]
     candidates += list((episode_root / "work" / "encoder-qualification").glob("*/technical-qualification.json"))
+    outbox = sorted((episode_root / "work/notification-outbox").glob("*.json"))
+    if len(outbox) > 256:
+        raise RemoteJobError("notification snapshot count exceeds the bounded manifest")
+    candidates += outbox
+    part_id = None
+    current_path = episode_root / 'work/current-part.json'
+    if current_path.is_file():
+        from .reliability import digest as evidence_digest
+        current = _read_json(current_path)
+        data = current.get('data') if isinstance(current, dict) else None
+        if (not isinstance(data, dict) or current.get('sha256') != evidence_digest(data)
+                or data.get('episode') != episode
+                or not re.fullmatch(r'part-[0-9]{3}', str(data.get('part_id', '')))):
+            raise RemoteJobError('current part snapshot identity is invalid')
+        part_id = data['part_id']
+        child = episode_root / 'parts' / part_id
+        candidates += [current_path, episode_root / 'work/part-plan.json', episode_root / 'work/part-vad.json',
+                       child / 'work/state.json', child / 'prepare/audio-part.done.json',
+                       child / 'prepare/raw_asr_v2.recovery.json', child / 'prepare/raw_asr_v2.json',
+                       child / 'prepare/raw_asr_v2.done.json', child / 'prepare/audio_review_v2.json']
+        candidates += list((child / 'prepare/primary_asr').glob('*.json'))
+    if diagnostics:
+        name = f"Muhtemel Ask {episode}.Bolum"
+        candidates = [episode_root / relative for relative in (
+            f"translation_input/{name}_TR_CORRECTION_PACK.zip",
+            "prepare/audio_review_v2.json", "prepare/audio_review_v2.recovery.json",
+            "prepare/forced_alignment_units/resume-identity.json",
+            "prepare/forced_alignment_units/components/latest-conflict-failure.json",
+            "source/download.done.json", "prepare/audio.done.json", "prepare/raw_asr_v2.done.json",
+            f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
+            f"translation_output/{name}_TR_CORRECTED.zip",
+        )]
+        if part_id is not None:
+            from .retry_authorization import retry_diagnostic_layout
+            layout = retry_diagnostic_layout(episode, part_id)
+            candidates = [episode_root / relative for relative in layout['files']]
+            candidates += [episode_root / prefix / relative for prefix in layout['prefixes'] for relative in (
+                'resume-identity.json', 'components/latest-conflict-failure.json')]
+            candidates.append(episode_root / f'parts/{part_id}/prepare/audio_review_v2.recovery.json')
+    missing = [path.relative_to(episode_root).as_posix() for path in candidates if not path.is_file()]
     files = []
     unstable = []
     snapshot_root = paths["job"] / "snapshots"
@@ -393,7 +438,7 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
                 pass
     marker = _read_json(episode_root / "source" / "download.done.json")
     video_record = (marker.get("outputs") or {}).get("video") if marker else None
-    if isinstance(video_record, dict):
+    if not diagnostics and isinstance(video_record, dict):
         try:
             video = Path(video_record["path"]).resolve()
             video.relative_to((episode_root / "source").resolve())
@@ -407,7 +452,9 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
                               "snapshot_path": str(video), "size_bytes": size,
                               "sha256": sha256, "immutable_source": True})
     files.sort(key=lambda item: item["relative_path"])
-    return {"identity": identity, "created_at": _now(), "files": files, "unstable": unstable}
+    return {"identity": identity, "created_at": _now(), "files": files, "unstable": unstable,
+            **({'part_id': part_id} if part_id is not None else {}),
+            **({"missing": missing, "kind": "diagnostics"} if diagnostics else {})}
 
 
 def read_log(root, episode, commit, offset=0, max_bytes=65536, input_sha256=None):
@@ -442,7 +489,7 @@ def poll_job(root, episode, commit, offset=0, max_bytes=65536, input_sha256=None
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m mas.remote_job")
     commands = parser.add_subparsers(dest="action", required=True)
-    for name in ("start", "status", "checkpoints", "logs", "poll", "_supervise"):
+    for name in ("start", "status", "checkpoints", "diagnostics", "logs", "poll", "_supervise"):
         command = commands.add_parser(name)
         command.add_argument("--root", required=True)
         command.add_argument("--episode", required=True, type=int)
@@ -453,6 +500,7 @@ def main(argv=None):
     commands.choices["logs"].add_argument("--offset", type=int, default=0)
     commands.choices["logs"].add_argument("--max-bytes", type=int, default=65536)
     commands.choices["checkpoints"].add_argument("--deadline-seconds", type=int, default=60)
+    commands.choices["diagnostics"].add_argument("--deadline-seconds", type=int, default=60)
     commands.choices["poll"].add_argument("--offset", type=int, default=0)
     commands.choices["poll"].add_argument("--max-bytes", type=int, default=65536)
     commands.choices["poll"].add_argument("--deadline-seconds", type=int, default=60)
@@ -466,9 +514,9 @@ def main(argv=None):
                            recover_lost=args.recover_lost)
     elif args.action == "status":
         result = status_job(args.root, args.episode, args.commit, args.input_sha256)
-    elif args.action == "checkpoints":
+    elif args.action in {"checkpoints", "diagnostics"}:
         result = checkpoint_manifest(args.root, args.episode, args.commit, args.input_sha256,
-                                     args.deadline_seconds)
+                                     args.deadline_seconds, diagnostics=args.action == "diagnostics")
     elif args.action == "logs":
         result = read_log(args.root, args.episode, args.commit, args.offset, args.max_bytes,
                           args.input_sha256)

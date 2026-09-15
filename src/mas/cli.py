@@ -10,10 +10,10 @@ from pathlib import Path
 from .audio_review_ui import run_audio_review_ui
 from .config import episode_dir
 from .engine.download import DownloadError, _validated_cookie_file
-from .notify import notify, send_email
+from .notify import enqueue_notification, send_email
 from .pipeline import run, status
 from .runlog import RunLog
-from .runpod_controller import run_remote_episode
+from .runpod_controller import drain_cli_notifications, run_remote_episode
 
 
 def _runpod_preflight(*, worker_only=False):
@@ -248,9 +248,14 @@ def main(argv=None):
             if args.command != "subtitle-pilot" and getattr(args, "episode", None) and _should_notify_run_failure(exc):
                 details = f"Sonuç: çalıştırma tamamlanamadı.\nHata: {type(exc).__name__}: {exc}"
                 if run_log:
-                    details += f"\nLog: {run_log.path}"
+                    details += f"\nSon log: {run_log.directory / 'LATEST'}"
                 details += f"\nSonraki adım: logu inceleyip ./mas run {args.episode} komutuyla güvenli devam edin."
-                notify(args.episode, "çalıştırma başarısız", details)
+                enqueue_notification(args.episode, "çalıştırma başarısız", details,
+                                     root=run_log.directory.parent if run_log else episode_dir(args.episode),
+                                     kind="terminal")
+                if (args.command == "run" and not args.fixture and not args.local
+                        and args.stop_after is None and not os.getenv("MAS_REMOTE_JOB_TOKEN")):
+                    drain_cli_notifications(args.episode)
             print(f"FAILED STAGE: {args.command.upper()}\nCAUSE: {exc}\nCHECKPOINT PRESERVED: yes", file=sys.stderr)
             if args.command == "subtitle-pilot":
                 print("PILOT ONLY: no automatic full-run retry; inspect preserved evidence", file=sys.stderr)

@@ -373,6 +373,20 @@ def _outside_runs(interval: _Interval, speech_regions: Sequence[_Interval]) -> l
     return _subtract(interval, inside)
 
 
+def _partition_required_sources(interval, required):
+    cuts = sorted({interval.start_ms, interval.end_ms} | {
+        bound for source_interval, _source in required
+        for bound in (source_interval.start_ms, source_interval.end_ms)
+        if interval.start_ms < bound < interval.end_ms
+    })
+    for start_ms, end_ms in zip(cuts, cuts[1:]):
+        sources = sorted({(source["source_id"], source["source_sha256"])
+                          for source_interval, source in required
+                          if source_interval.start_ms < end_ms and start_ms < source_interval.end_ms})
+        yield start_ms, end_ms, [{"source_id": source_id, "source_sha256": digest}
+                               for source_id, digest in sources]
+
+
 def build_rescue_spans(
     coverage_issues: Sequence[Mapping[str, Any]],
     *,
@@ -472,6 +486,9 @@ def analyze_speech_coverage(
     config: SpeechCoverageConfig | None = None,
     reviewed_non_dialogue: Sequence[Mapping[str, Any]] = (),
     reviewed_dialogue: Sequence[Mapping[str, Any]] = (),
+    required_uncovered_intervals: Sequence[Mapping[str, Any]] = (),
+    include_required_outside_vad: bool = False,
+    required_review_targets: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Compare independent VAD speech against timed-word coverage.
 
@@ -487,29 +504,59 @@ def analyze_speech_coverage(
     hash-bound upstream audio review to restore real dialogue missed by VAD.
     It never clears an independent-VAD hole by itself: the reviewed interval
     still needs aligned word coverage.
+
+    ``required_uncovered_intervals`` bind excluded source hypotheses by ID
+    and SHA-256. Their independent-VAD remainder needs real word coverage,
+    even below the generic hole threshold or inside word-display padding.
     """
 
     settings = config or SpeechCoverageConfig()
     if not isinstance(settings, SpeechCoverageConfig):
         raise SpeechCoverageError("config must be a SpeechCoverageConfig")
+    if not isinstance(include_required_outside_vad, bool):
+        raise SpeechCoverageError("include_required_outside_vad must be boolean")
 
     raw_vad = _validated_intervals(vad_regions, "vad_regions")
     raw_words = _validated_intervals(words, "words")
+    required = []
+    for record in _records_sequence(required_uncovered_intervals, "required_uncovered_intervals"):
+        interval = _validated_intervals([record], "required_uncovered_intervals")[0]
+        source_id = record.get("source_id")
+        source_sha = record.get("source_sha256")
+        if (not isinstance(source_id, str) or not source_id.strip()
+                or not isinstance(source_sha, str) or len(source_sha) != 64
+                or any(char not in "0123456789abcdef" for char in source_sha)):
+            raise SpeechCoverageError("required uncovered interval needs source ID and SHA-256")
+        for evidence_interval in ([interval] if include_required_outside_vad else _intersection(interval, raw_vad)):
+            required.append((evidence_interval, {"source_id": source_id, "source_sha256": source_sha}))
     independent_speech_regions = _merge_intervals(
         raw_vad, settings.vad_merge_gap_ms
     )
+    outside_required = _merge_intervals(sorted(
+        [part for interval, _source in required for part in _outside_runs(interval, raw_vad)],
+        key=lambda item: (item.start_ms, item.end_ms)), 0)
     dialogue_reviews, dialogue_intervals = _normalize_dialogue_reviews(
         reviewed_dialogue
     )
+    observed_speech_regions = _merge_intervals(
+        sorted(independent_speech_regions + dialogue_intervals,
+               key=lambda item: (item.start_ms, item.end_ms)),
+        settings.vad_merge_gap_ms,
+    )
     speech_regions = _merge_intervals(
         sorted(
-            independent_speech_regions + dialogue_intervals,
+            independent_speech_regions + dialogue_intervals
+            + ([interval for interval, _source in required] if include_required_outside_vad else []),
             key=lambda item: (item.start_ms, item.end_ms),
         ),
         settings.vad_merge_gap_ms,
     )
     effective_words = _effective_word_intervals(raw_words, settings)
     reviews = _normalize_reviews(reviewed_non_dialogue, speech_regions)
+    frozen_targets = {(item.start_ms, item.end_ms) for item in
+                      _validated_intervals(required_review_targets, "required_review_targets")}
+    if include_required_outside_vad and required and (reviews or dialogue_reviews) and not frozen_targets:
+        raise SpeechCoverageError("required outside review needs frozen acoustic target inventory")
     for non_dialogue_review in reviews:
         for dialogue_review in dialogue_reviews:
             if (
@@ -524,12 +571,12 @@ def analyze_speech_coverage(
         for word in raw_words
         if not any(
             word.start_ms < region.end_ms and region.start_ms < word.end_ms
-            for region in speech_regions
+            for region in observed_speech_regions
         )
     ]
     word_outside_audits: list[dict[str, Any]] = []
     for word in raw_words:
-        outside = _outside_runs(word, speech_regions)
+        outside = _outside_runs(word, observed_speech_regions)
         outside_ms = sum(item.duration_ms for item in outside)
         maximum_outside_ms = max(
             (item.duration_ms for item in outside), default=0
@@ -628,6 +675,27 @@ def analyze_speech_coverage(
                     }
                 )
 
+        for required_interval, source in required:
+            required_evidence = ([required_interval] if include_required_outside_vad
+                                 else _intersection(required_interval, raw_vad))
+            for required_speech in _intersection(region, required_evidence):
+                # Padding cannot erase a known excluded short line. Only real
+                # trusted word intervals satisfy this additional obligation.
+                for hole in _subtract(required_speech, _intersection(required_speech, raw_words)):
+                    issue_drafts.append({
+                        "speech_region_index": region_index,
+                        "start_ms": hole.start_ms, "end_ms": hole.end_ms,
+                        "duration_ms": hole.duration_ms,
+                        "issue_kind": "required_uncovered_speech",
+                        "reasons": ["excluded_incomplete_segment_requires_complete_acoustic_review"
+                                    if include_required_outside_vad
+                                    else "excluded_incomplete_segment_requires_complete_vad_recovery"],
+                        "required_source_records": [source],
+                        "region_coverage_ratio": coverage_ratio,
+                        "uncovered_duration_ms": hole.duration_ms,
+                        "largest_uncovered_span_ms": hole.duration_ms,
+                    })
+
         total_speech_ms += region.duration_ms
         total_covered_ms += covered_ms
         total_raw_covered_ms += raw_covered_ms
@@ -667,6 +735,58 @@ def analyze_speech_coverage(
             }
         )
 
+    if required:
+        merged_drafts = []
+        for draft in sorted(issue_drafts, key=lambda item: (item["speech_region_index"], item["start_ms"], item["end_ms"])):
+            item = dict(draft)
+            if (merged_drafts and merged_drafts[-1]["speech_region_index"] == item["speech_region_index"]
+                    and item["start_ms"] <= merged_drafts[-1]["end_ms"]):
+                previous = merged_drafts[-1]
+                previous["end_ms"] = max(previous["end_ms"], item["end_ms"])
+                previous["reasons"] = sorted(set(previous["reasons"] + item["reasons"]))
+                sources = previous.get("required_source_records", []) + item.get("required_source_records", [])
+                previous["required_source_records"] = [
+                    {"source_id": key, "source_sha256": digest}
+                    for key, digest in sorted({(s["source_id"], s["source_sha256"]) for s in sources})
+                ]
+                duration = previous["end_ms"] - previous["start_ms"]
+                previous.update(duration_ms=duration, uncovered_duration_ms=duration, largest_uncovered_span_ms=duration)
+                if sources:
+                    previous["issue_kind"] = "required_uncovered_speech"
+            else:
+                merged_drafts.append(item)
+        issue_drafts = merged_drafts
+    if required or include_required_outside_vad:
+        confirmed_outside = []
+        for review in dialogue_reviews:
+            target = _Interval(review["start_ms"], review["end_ms"], ())
+            if ((target.start_ms, target.end_ms) in frozen_targets
+                    and _intersection(target, raw_words)):
+                confirmed_outside.extend(_outside_runs(target, independent_speech_regions))
+        confirmed_outside = _merge_intervals(sorted(confirmed_outside, key=lambda item: (item.start_ms, item.end_ms)), 0)
+        bounded_drafts = []
+        for draft in issue_drafts:
+            target = _Interval(draft["start_ms"], draft["end_ms"], ())
+            for remaining in _subtract(target, _intersection(target, confirmed_outside)):
+                for left, right, sources in _partition_required_sources(remaining, required):
+                    item = dict(draft)
+                    if sources:
+                        item["required_source_records"] = sources
+                        item["issue_kind"] = "required_uncovered_speech"
+                    else:
+                        item.pop("required_source_records", None)
+                        item["reasons"] = [reason for reason in item["reasons"]
+                                           if not reason.startswith("excluded_incomplete_segment_requires_")]
+                        item["issue_kind"] = ("low_coverage_speech_hole"
+                                              if "region_coverage_below_threshold" in item["reasons"] else "speech_hole")
+                    max_duration = 10_000 if sources else right-left
+                    for start_ms in range(left, right, max_duration):
+                        end_ms = min(right, start_ms + max_duration)
+                        bounded_drafts.append(dict(item, start_ms=start_ms, end_ms=end_ms,
+                                                  duration_ms=end_ms-start_ms, uncovered_duration_ms=end_ms-start_ms,
+                                                  largest_uncovered_span_ms=end_ms-start_ms))
+        issue_drafts = bounded_drafts
+
     issues: list[dict[str, Any]] = []
     for index, draft in enumerate(issue_drafts, start=1):
         issue = dict(draft)
@@ -681,6 +801,12 @@ def analyze_speech_coverage(
                 review["start_ms"] == issue["start_ms"]
                 and issue["end_ms"] == review["end_ms"]
             )
+            if include_required_outside_vad and issue.get("required_source_records"):
+                exact_interval = (
+                    (review["start_ms"], review["end_ms"]) in frozen_targets
+                    and review["start_ms"] <= issue["start_ms"]
+                    and issue["end_ms"] <= review["end_ms"]
+                )
             overlap = (
                 review["start_ms"] < issue["end_ms"]
                 and issue["start_ms"] < review["end_ms"]
@@ -737,6 +863,62 @@ def analyze_speech_coverage(
         padding_ms=settings.rescue_padding_ms,
         merge_gap_ms=settings.rescue_merge_gap_ms,
     )
+    if required or include_required_outside_vad:
+        bounded_rescue = []
+        for span in rescue_spans:
+            target = _Interval(span["start_ms"], span["end_ms"], ())
+            for remainder in _subtract(target, _intersection(target, raw_words)):
+                relevant = [issue for issue in issues
+                            if issue["classification"] == "unresolved_speech"
+                            and issue["start_ms"] < remainder.end_ms
+                            and remainder.start_ms < issue["end_ms"]]
+                if not relevant:
+                    continue
+                for left, right, sources in _partition_required_sources(remainder, required):
+                    max_duration = 10_000 if sources else right-left
+                    for start_ms in range(left, right, max_duration):
+                        end_ms = min(right, start_ms + max_duration)
+                        members = [issue for issue in relevant if issue["start_ms"] < end_ms
+                                   and start_ms < issue["end_ms"]]
+                        if not members:
+                            continue
+                        bounded_rescue.append(dict(
+                            span, start_ms=start_ms, end_ms=end_ms,
+                            duration_ms=end_ms-start_ms, rescue_span_index=len(bounded_rescue)+1,
+                            issue_ids=sorted({issue["issue_id"] for issue in members}),
+                            speech_region_indices=sorted({issue["speech_region_index"] for issue in members}),
+                            reasons=sorted({reason for issue in members for reason in issue["reasons"]}),
+                        ))
+                        if sources:
+                            bounded_rescue[-1]["required_source_records"] = sources
+                            bounded_rescue[-1]["max_duration_ms"] = 10_000
+        rescue_spans = bounded_rescue
+
+    independent_duration_ms = sum(region.duration_ms for region in independent_speech_regions)
+    independent_covered_ms = 0
+    independent_raw_covered_ms = 0
+    required_vad_penalty_ms = 0
+    evidence_regions = _merge_intervals(sorted([interval for interval, _source in required],
+                                               key=lambda item: (item.start_ms, item.end_ms)), 0)
+    unresolved_required = [
+        _Interval(issue["start_ms"], issue["end_ms"], ()) for issue in issues
+        if issue.get("required_source_records") and issue["classification"] == "unresolved_speech"
+    ]
+    required_union = _merge_intervals(sorted(
+        [part for interval in unresolved_required for part in _intersection(interval, evidence_regions)],
+        key=lambda item: (item.start_ms, item.end_ms)), 0)
+    for region in independent_speech_regions:
+        region_words = [word for word in raw_words if word.start_ms < region.end_ms and region.start_ms < word.end_ms]
+        covered = _intersection(region, _effective_word_intervals(region_words, settings))
+        independent_covered_ms += sum(item.duration_ms for item in covered)
+        independent_raw_covered_ms += sum(item.duration_ms for item in _intersection(region, raw_words))
+        required_vad_penalty_ms += sum(part.duration_ms for item in covered for part in _intersection(item, required_union))
+    if include_required_outside_vad:
+        total_speech_ms = independent_duration_ms
+        total_covered_ms = independent_covered_ms
+        total_raw_covered_ms = independent_raw_covered_ms
+    if required:
+        total_covered_ms = max(0, total_covered_ms - required_vad_penalty_ms)
 
     effective_word_total_ms = sum(item.duration_ms for item in effective_words)
     effective_word_inside_speech_ms = total_covered_ms
@@ -787,6 +969,19 @@ def analyze_speech_coverage(
             not review["matched_issue_ids"] for review in reviews
         ),
     }
+    if required or include_required_outside_vad:
+        required_uncovered_ms = sum(item.duration_ms for item in required_union)
+        evidence_duration_ms = sum(item.duration_ms for item in evidence_regions)
+        outside_evidence_ms = sum(item.duration_ms for item in outside_required)
+        metrics.update(
+            independent_vad_speech_duration_ms=independent_duration_ms,
+            independent_vad_speech_coverage_ratio=_ratio(independent_covered_ms, independent_duration_ms),
+            required_evidence_region_count=len(evidence_regions), required_evidence_ms=evidence_duration_ms,
+            required_inside_vad_evidence_ms=evidence_duration_ms-outside_evidence_ms,
+            required_outside_vad_evidence_ms=outside_evidence_ms,
+            required_uncovered_issue_count=len(unresolved_required), required_uncovered_ms=required_uncovered_ms,
+            required_evidence_coverage_ratio=_ratio(max(0, evidence_duration_ms-required_uncovered_ms), evidence_duration_ms),
+        )
     return {
         "report_version": "1.0",
         "status": (

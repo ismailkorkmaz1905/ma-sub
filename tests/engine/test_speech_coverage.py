@@ -29,6 +29,159 @@ def _config(**overrides: object) -> SpeechCoverageConfig:
 
 
 class SpeechCoverageAnalysisTests(unittest.TestCase):
+    def test_nested_required_sources_do_not_label_larger_generic_hole_mandatory(self) -> None:
+        required = [{"start_ms": 4000, "end_ms": 6000, "source_id": "outer", "source_sha256": "a" * 64},
+                    {"start_ms": 5000, "end_ms": 5500, "source_id": "inner", "source_sha256": "b" * 64}]
+        for outside_enabled in (False, True):
+            with self.subTest(outside_enabled=outside_enabled):
+                report = analyze_speech_coverage([{"start_ms": 0, "end_ms": 30000}], [],
+                    required_uncovered_intervals=required, include_required_outside_vad=outside_enabled,
+                    config=_config(rescue_padding_ms=0))
+                for collection in (report["coverage_issues"], report["rescue_spans"]):
+                    self.assertEqual([(r["start_ms"], r["end_ms"],
+                                      [s["source_id"] for s in r.get("required_source_records", [])]) for r in collection],
+                        [(0, 4000, []), (4000, 5000, ["outer"]), (5000, 5500, ["inner", "outer"]),
+                         (5500, 6000, ["outer"]), (6000, 30000, [])])
+                for item in (report["coverage_issues"][0], report["coverage_issues"][-1]):
+                    self.assertNotIn("required", item["issue_kind"])
+                    self.assertFalse(any(reason.startswith("excluded_incomplete") for reason in item["reasons"]))
+
+    def test_small_required_overlap_cannot_unlock_ordinary_192_span_cap(self) -> None:
+        from mas.engine.raw_asr import _bounded_rescue_batches
+        from mas.engine.transcribe import TranscriptionError
+
+        vad = [{"start_ms": index * 10000, "end_ms": index * 10000 + 3000} for index in range(192)]
+        report = analyze_speech_coverage(vad, [], config=_config(rescue_padding_ms=0),
+            required_uncovered_intervals=[{"start_ms": 1000, "end_ms": 2000,
+                                           "source_id": "small", "source_sha256": "a" * 64}],
+            include_required_outside_vad=True)
+        spans = report["rescue_spans"]
+        self.assertEqual(sum(not span.get("required_source_records") for span in spans), 193)
+        self.assertEqual(sum(bool(span.get("required_source_records")) for span in spans), 1)
+        with self.assertRaisesRegex(TranscriptionError, "193 spans, above hard limit 192"):
+            _bounded_rescue_batches(spans, limit=173, hard_limit=192, mandatory_hard_limit=256)
+
+    def test_every_mandatory_issue_and_actual_rescue_is_bounded_inside_or_outside_vad(self) -> None:
+        required = [{"start_ms": 0, "end_ms": 184000, "source_id": "incomplete", "source_sha256": "a" * 64}]
+        words = [{"start_ms": 60000, "end_ms": 61000}]
+        for vad in ([{"start_ms": 0, "end_ms": 184000}], [{"start_ms": 60000, "end_ms": 61000}]):
+            with self.subTest(vad=vad):
+                report = analyze_speech_coverage(vad, words, required_uncovered_intervals=required,
+                    include_required_outside_vad=True)
+                for collection in (report["coverage_issues"], report["rescue_spans"]):
+                    self.assertTrue(collection)
+                    self.assertTrue(all(item["end_ms"] - item["start_ms"] <= 10000 for item in collection))
+                    self.assertFalse(any(item["start_ms"] < 61000 and 60000 < item["end_ms"] for item in collection))
+                self.assertEqual(sum(item["duration_ms"] for item in report["coverage_issues"]), 183000)
+
+    def test_outside_required_evidence_is_not_fake_vad_and_needs_exact_frozen_review(self) -> None:
+        vad = [{"start_ms": 0, "end_ms": 1000}]
+        words = [{"start_ms": 0, "end_ms": 1000}]
+        required = [{"start_ms": 7000, "end_ms": 8000, "source_id": "excluded", "source_sha256": "a" * 64}]
+        kwargs = {"required_uncovered_intervals": required, "include_required_outside_vad": True}
+        report = analyze_speech_coverage(vad, words, **kwargs)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["metrics"]["speech_duration_ms"], 1000)
+        self.assertEqual(report["metrics"]["independent_vad_speech_coverage_ratio"], 1.0)
+        self.assertEqual(report["metrics"]["required_evidence_ms"], 1000)
+        self.assertEqual(report["metrics"]["required_uncovered_ms"], 1000)
+        self.assertEqual(report["metrics"]["required_outside_vad_evidence_ms"], 1000)
+        review = {"start_ms": 7000, "end_ms": 8000, "classification": "non_dialogue",
+                  "review_status": "reviewed", "reason": "Exact bounded acoustic review: no dialogue."}
+        cleared = analyze_speech_coverage(vad, words, reviewed_non_dialogue=[review],
+                    required_review_targets=[{"start_ms": 7000, "end_ms": 8000}], **kwargs)
+        self.assertEqual(cleared["status"], "PASS")
+        self.assertEqual(cleared["metrics"]["required_uncovered_ms"], 0)
+        missing_target = analyze_speech_coverage(vad, words, reviewed_non_dialogue=[review],
+                    required_review_targets=[{"start_ms": 0, "end_ms": 1000}], **kwargs)
+        self.assertEqual(missing_target["status"], "FAIL")
+
+    def test_confirmed_short_dialogue_clears_only_outside_target_with_real_word(self) -> None:
+        required = [{"start_ms": 0, "end_ms": 1000, "source_id": "vad", "source_sha256": "a" * 64},
+                    {"start_ms": 7000, "end_ms": 8000, "source_id": "outside", "source_sha256": "b" * 64}]
+        review = {"start_ms": 7000, "end_ms": 8000, "classification": "dialogue", "review_id": "exact",
+                  "review_status": "reviewed", "reason": "An exact review heard one short word."}
+        kwargs = dict(required_uncovered_intervals=required, include_required_outside_vad=True,
+                      reviewed_dialogue=[review], required_review_targets=[{"start_ms": 7000, "end_ms": 8000}])
+        result = analyze_speech_coverage([{"start_ms": 0, "end_ms": 1000}],
+                    [{"start_ms": 7200, "end_ms": 7400}], **kwargs)
+        self.assertEqual([(i["start_ms"], i["end_ms"]) for i in result["coverage_issues"]], [(0, 1000)])
+        self.assertEqual(result["status"], "FAIL")
+        missing_word = analyze_speech_coverage([{"start_ms": 0, "end_ms": 1000}], [], **kwargs)
+        self.assertEqual(missing_word["metrics"]["required_uncovered_ms"], 2000)
+
+    def test_required_metrics_do_not_double_count_generic_hole_and_padding(self) -> None:
+        required = {"start_ms": 4500, "end_ms": 5000, "source_id": "excluded", "source_sha256": "a" * 64}
+        result = analyze_speech_coverage([{"start_ms": 0, "end_ms": 5000}],
+                    [{"start_ms": 0, "end_ms": 4500}], required_uncovered_intervals=[required, dict(required)],
+                    include_required_outside_vad=True)
+        self.assertLess(result["speech_coverage_ratio"], 1.0)
+        self.assertEqual(result["metrics"]["required_uncovered_ms"], 500)
+        self.assertEqual(result["metrics"]["required_evidence_ms"], 500)
+        self.assertEqual(result["metrics"]["required_inside_vad_evidence_ms"], 500)
+
+    def test_required_rescue_never_crosses_trusted_words_and_keeps_outside_word_boundary(self) -> None:
+        required = [{"start_ms": 0, "end_ms": 1000, "source_id": "one", "source_sha256": "a" * 64},
+                    {"start_ms": 2000, "end_ms": 3000, "source_id": "two", "source_sha256": "b" * 64}]
+        words = [{"start_ms": 1300, "end_ms": 1700}]
+        report = analyze_speech_coverage([{"start_ms": 1300, "end_ms": 1700}], words,
+                    required_uncovered_intervals=required, include_required_outside_vad=True,
+                    config=_config(rescue_padding_ms=1000, rescue_merge_gap_ms=2000))
+        self.assertEqual([(i["start_ms"], i["end_ms"]) for i in report["coverage_issues"]], [(0, 1000), (2000, 3000)])
+        for span in report["rescue_spans"]:
+            self.assertLessEqual(span["duration_ms"], 10000)
+            self.assertFalse(span["start_ms"] < 1700 and 1300 < span["end_ms"])
+            self.assertTrue(span["required_source_records"])
+
+    def test_excluded_short_line_requires_review_despite_high_generic_coverage(self) -> None:
+        vad = [{"start_ms": 0, "end_ms": 5000}]
+        for start in (4500, 4900):
+            with self.subTest(duration_ms=5000-start):
+                words = [{"start_ms": 0, "end_ms": start}]
+                generic = analyze_speech_coverage(vad, words)
+                self.assertEqual(generic["status"], "PASS")
+                required = [{"start_ms": start, "end_ms": 5000,
+                             "source_id": "excluded-Evet", "source_sha256": "a" * 64}]
+                result = analyze_speech_coverage(vad, words, required_uncovered_intervals=required)
+                self.assertEqual(result["status"], "FAIL")
+                self.assertEqual(len(result["coverage_issues"]), 1)
+                issue = result["coverage_issues"][0]
+                self.assertEqual((issue["start_ms"], issue["end_ms"]), (start, 5000))
+                self.assertEqual(issue["required_source_records"], [{"source_id": "excluded-Evet", "source_sha256": "a" * 64}])
+                self.assertEqual(len(result["rescue_spans"]), 1)
+                self.assertEqual(generic, analyze_speech_coverage(vad, words, required_uncovered_intervals=[]))
+
+    def test_required_holes_merge_with_generic_and_duplicate_source_requirements(self) -> None:
+        required = {"start_ms": 4000, "end_ms": 5000,
+                    "source_id": "excluded-1", "source_sha256": "b" * 64}
+        result = analyze_speech_coverage(
+            [{"start_ms": 0, "end_ms": 5000}], [{"start_ms": 0, "end_ms": 4000}],
+            required_uncovered_intervals=[required, dict(required)],
+        )
+        self.assertEqual(len(result["coverage_issues"]), 1)
+        issue = result["coverage_issues"][0]
+        self.assertEqual((issue["start_ms"], issue["end_ms"]), (4000, 5000))
+        self.assertIn("speech_hole_above_min_duration", issue["reasons"])
+        self.assertEqual(len(issue["required_source_records"]), 1)
+        self.assertEqual(result["metrics"]["unresolved_coverage_issue_count"], 1)
+
+    def test_required_holes_cannot_invent_speech_in_vad_merge_gap_or_ignore_real_words(self) -> None:
+        required = [{"start_ms": 1000, "end_ms": 1200,
+                     "source_id": "excluded-1", "source_sha256": "b" * 64}]
+        result = analyze_speech_coverage(
+            [{"start_ms": 0, "end_ms": 1000}, {"start_ms": 1100, "end_ms": 2000}],
+            [{"start_ms": 0, "end_ms": 1000}, {"start_ms": 1200, "end_ms": 2000}],
+            required_uncovered_intervals=required,
+        )
+        self.assertEqual([(i["start_ms"], i["end_ms"]) for i in result["coverage_issues"]], [(1100, 1200)])
+        covered = analyze_speech_coverage(
+            [{"start_ms": 0, "end_ms": 2000}], [{"start_ms": 0, "end_ms": 2000}],
+            required_uncovered_intervals=required,
+        )
+        self.assertEqual(covered["status"], "PASS")
+        with self.assertRaisesRegex(SpeechCoverageError, "SHA-256"):
+            analyze_speech_coverage([], [], required_uncovered_intervals=[dict(required[0], source_sha256="bad")])
+
     def test_fully_covered_speech_passes_with_exact_metrics(self) -> None:
         report = analyze_speech_coverage(
             [{"start_ms": 1_000, "end_ms": 5_000}],

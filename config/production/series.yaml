@@ -13,7 +13,7 @@ whisper_compute_type_cpu: "int8"
 subtitle:
   target_chars_per_line: 42
   maximum_lines: 2
-  qa_max_chars_per_line: 84
+  qa_max_chars_per_line: 42
   preferred_max_cps: 20.0
   start_lead_ms: 0
   end_padding_ms: 220

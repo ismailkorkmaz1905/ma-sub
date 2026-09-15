@@ -19,6 +19,7 @@ from mas.engine.id_translation import (
     create_id_translation_output_zip,
 )
 from mas.engine.media import AUDIO_ALIGNMENT_VERSION
+from mas.engine import raw_asr as raw_asr_module
 from mas.engine.raw_asr import RawASRV2Config
 from mas.engine.srt import parse_srt
 from mas.engine.subtitle_qa import SubtitleQAError
@@ -145,8 +146,11 @@ class FinalizeV2Tests(unittest.TestCase):
         )
         return records
 
-    def _workspace(self, temporary: str) -> tuple[Path, dict[str, Path]]:
-        project = Path(temporary) / "Muhtemel_Ask_Subtitles"
+    def _workspace(self, temporary: str, project_name="Muhtemel_Ask_Subtitles") -> tuple[Path, dict[str, Path]]:
+        project = Path(temporary) / project_name
+        checkout = patch("mas.engine.finalize.ROOT", project)
+        checkout.start()
+        self.addCleanup(checkout.stop)
         root = project / "EPISODES" / self.episode_name
         for name in (
             "source",
@@ -303,6 +307,56 @@ class FinalizeV2Tests(unittest.TestCase):
         vad_regions: list[dict] | None = None,
     ) -> dict:
         coverage_config = asdict(RawASRV2Config().speech_coverage_config())
+        trusted_utterances = copy.deepcopy(
+            utterances if utterances is not None else self._utterances()
+        )
+        segments = [
+            {
+                "segment_id": f"main-{index}",
+                "start_ms": item["coarse_start_ms"],
+                "end_ms": item["coarse_end_ms"],
+                "text": item["asr_text"],
+                "source": "main",
+                "word_timing_complete": True,
+                "words": [
+                    {
+                        "start_ms": item["coarse_start_ms"],
+                        "end_ms": item["coarse_end_ms"],
+                        "text": f" {item['asr_text']}",
+                    }
+                ],
+            }
+            for index, item in enumerate(trusted_utterances, start=1)
+        ]
+        trusted_vad = vad_regions or [
+            {
+                "vad_region_index": 1,
+                "start_ms": 1_000,
+                "end_ms": 2_500,
+                "source": "silero_vad",
+            },
+            {
+                "vad_region_index": 2,
+                "start_ms": 4_500,
+                "end_ms": 6_000,
+                "source": "silero_vad",
+            },
+        ]
+        words = [
+            {**copy.deepcopy(word), "segment_id": segment["segment_id"]}
+            for segment in segments
+            for word in segment["words"]
+        ]
+        settings = RawASRV2Config()
+        initial = raw_asr_module._analyze_raw_speech_coverage(
+            trusted_vad,
+            segments,
+            words,
+            config=settings.speech_coverage_config(),
+        )
+        batches, budget = raw_asr_module._plan_rescue_batches(
+            initial, trusted_vad, segments, words, settings
+        )
         return {
             "format_version": "2.0",
             "status": "completed",
@@ -311,33 +365,25 @@ class FinalizeV2Tests(unittest.TestCase):
             "audio_path": str(paths["audio"].resolve()),
             "audio_sha256": audio_sha,
             "language": "tr",
+            "segments": segments,
+            "words": words,
+            "required_acoustic_review_regions": (
+                raw_asr_module.required_acoustic_review_regions(
+                    segments, trusted_vad
+                )
+            ),
             "synthetic_timing_count": 0,
             "vad_fallback_reason": None,
             "independent_vad": True,
             "model": {"settings": asdict(RawASRV2Config())},
             "hallucination_review_utterance_uids": [],
-            "vad_regions": vad_regions or [
-                {
-                    "vad_region_index": 1,
-                    "start_ms": 1_000,
-                    "end_ms": 2_500,
-                    "source": "silero_vad",
-                },
-                {
-                    "vad_region_index": 2,
-                    "start_ms": 4_500,
-                    "end_ms": 6_000,
-                    "source": "silero_vad",
-                },
-            ],
-            "initial_speech_coverage": {
-                "config": copy.deepcopy(coverage_config),
-            },
+            "vad_regions": trusted_vad,
+            "initial_speech_coverage": initial,
+            "rescue_batches": batches,
+            "rescue_budget_audit": budget,
             "speech_coverage": {"config": coverage_config},
             "youtube_captions": [],
-            "correction_utterances": copy.deepcopy(
-                utterances if utterances is not None else self._utterances()
-            ),
+            "correction_utterances": trusted_utterances,
             "speech_hole_records": [],
             "asr_hallucination_records": [],
         }
@@ -628,6 +674,7 @@ class FinalizeV2Tests(unittest.TestCase):
             self.assertEqual(report["status"], "PASS")
             self.assertEqual(report["schema_sha256"], schema["schema_sha256"])
             self.assertTrue(report["timing_qa_v2"]["passed"])
+            self.assertTrue(report["timing_qa_v2"]["word_ownership_checked"])
             self.assertTrue(report["semantic_subtitle_qa"]["passed"])
             self.assertEqual(
                 report["id_translation_validation"]["review_required_count"], 0

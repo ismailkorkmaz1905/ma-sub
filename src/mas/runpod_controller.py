@@ -19,9 +19,10 @@ from .config import ROOT, episode_dir
 from .engine.tr_correction import validate_tr_correction_output
 from .id_return_preflight import preflight_local_id_return
 from .engine.download import _validated_cookie_file, validate_download
-from .remote import RemoteVerificationError, _run_watchdog
+from .remote import RemoteVerificationError, _run_watchdog, drive_preflight
 from .reliability import BudgetExceeded, RunBudget, atomic_json, digest
-from .delivery import READY_FOR_DELIVERY, WAIT_MP4_SAMPLE, publish_local_delivery, safe_relative, validate_delivery
+from .delivery import (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE, WAIT_PART_RETURN,
+                       READY_FOR_PARTIAL_ENCODE, NEXT_PART, publish_local_delivery, safe_relative, validate_delivery)
 from .hashing import sha256_file
 from .source_discovery import discover_episode_metadata
 from .runpod_capacity import (DEFAULT_GPU_TYPE_IDS, CapacityLease, CapacityPlan,
@@ -32,17 +33,53 @@ class RunPodControllerError(RuntimeError):
     pass
 
 
+def _runtime_policy():
+    return json.loads((Path(__file__).resolve().parents[2] / "config/runtime_policy.json").read_text(encoding="utf-8"))
+
+
+def _configured_runtime_image():
+    image = os.getenv("MAS_RUNPOD_IMAGE", "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}", image):
+        raise RunPodControllerError("MAS_RUNPOD_IMAGE must identify a qualified image by repository@sha256 digest")
+    return image
+
+
+def _local_encoder_preflight(local_root, episode, budget):
+    _production_priority()
+    execution = os.getenv("MAS_DELIVERY_EXECUTION_PLAN", "local-qsv-v1")
+    if execution == "remote-nvenc-v1":
+        return
+    if execution != "local-qsv-v1":
+        raise RunPodControllerError("unsupported MAS_DELIVERY_EXECUTION_PLAN")
+    for executable in ("ffmpeg", "ffprobe"):
+        if not shutil.which(executable):
+            raise RunPodControllerError(f"local QSV delivery requires {executable} before compute")
+    from .engine.burned_mp4 import _qsv_hardware
+    hardware = _qsv_hardware(timeout_seconds=min(55, budget.check()))
+    budget.check()
+    body = {"format": "mas-controller-local-encoder-preflight-1", "episode": episode,
+            "execution": execution, "hardware": hardware,
+            "scope": "SYNTHETIC_ENCODER_ONLY", "perceptual_acceptance": "NOT_ASSERTED"}
+    atomic_json(Path(local_root) / "work/controller-local-encoder-preflight.json",
+                {"data": body, "sha256": digest(body)})
+
+
 def _episode_budget(local_root, episode, *, now=None):
     now = now or datetime.now(timezone.utc)
     budget_path = Path(local_root) / "work" / "controller_budget.json"
     starts = []
     excluded_wait = 0.0
+    prior_limit = None
     if budget_path.exists():
         saved = json.loads(budget_path.read_text(encoding="utf-8"))
         body = saved.get("data")
         if not isinstance(body, dict) or saved.get("sha256") != digest(body) or body.get("episode") != episode:
             raise RunPodControllerError("episode budget checkpoint integrity mismatch")
         starts.append(datetime.fromisoformat(body["started_at"]))
+        prior_limit = body.get('limit_seconds')
+        if (type(prior_limit) not in (int, float) or not math.isfinite(prior_limit)
+                or not 0 < prior_limit <= 21600):
+            raise RunPodControllerError('invalid original episode budget limit')
         excluded_wait = body.get("excluded_wait_seconds", 0.0)
         if not isinstance(excluded_wait, (int, float)) or not math.isfinite(excluded_wait) or excluded_wait < 0:
             raise RunPodControllerError("invalid excluded wait duration")
@@ -55,7 +92,6 @@ def _episode_budget(local_root, episode, *, now=None):
             elapsed = (now - paused).total_seconds()
             if elapsed < 0:
                 raise RunPodControllerError("wait clock moved backwards")
-            excluded_wait += elapsed
     preflight_path = Path(local_root) / "work" / "controller-preflight-only.json"
     excluded = {}
     if preflight_path.is_file():
@@ -80,19 +116,25 @@ def _episode_budget(local_root, episode, *, now=None):
         raise RunPodControllerError("episode budget timestamps must include timezone")
     started_at = min(starts) if starts else now
     try:
-        limit = float(os.getenv("MAS_EPISODE_BUDGET_SECONDS", "14400"))
-        budget = RunBudget((started_at + timedelta(seconds=excluded_wait)).isoformat(), limit_seconds=limit)
+        policy = _runtime_policy()
+        limit = float(os.getenv("MAS_EPISODE_BUDGET_SECONDS", str(policy["max_wall_seconds"])))
+        if not math.isfinite(limit) or not 0 < limit <= policy["max_wall_seconds"]:
+            raise ValueError("episode limit exceeds the hard wall budget")
+        if prior_limit is not None:
+            limit = min(limit, prior_limit)
+        budget = RunBudget(started_at.isoformat(), limit_seconds=limit)
     except ValueError as exc:
-        raise RunPodControllerError("MAS_EPISODE_BUDGET_SECONDS must be finite and positive") from exc
+        raise RunPodControllerError("MAS_EPISODE_BUDGET_SECONDS must be positive and at most 21600 seconds") from exc
     body = {"episode": episode, "started_at": started_at.isoformat(),
-            "limit_seconds": budget.limit_seconds, "excluded_wait_seconds": excluded_wait}
+            "limit_seconds": budget.limit_seconds, "excluded_wait_seconds": excluded_wait,
+            "clock_policy": "all-wall-time-v2", "target_seconds": policy["target_wall_seconds"]}
     atomic_json(budget_path, {"data": body, "sha256": digest(body)})
     budget.check(now)
     return budget
 
 
 def _pause_episode_budget(local_root, episode, reason, evidence_path, shutdown_path):
-    if reason not in (20, 21, WAIT_MP4_SAMPLE):
+    if reason not in (20, 21, WAIT_MP4_SAMPLE, WAIT_PART_RETURN):
         raise RunPodControllerError("only a verified human handoff may pause the budget")
     local_root = Path(local_root)
     if not Path(evidence_path).is_file() or not Path(shutdown_path).is_file():
@@ -611,6 +653,7 @@ def _upload_episode_file_verified(
     host,
     budget=None,
     immutable=False,
+    reuse_verified=False,
     transfer_timeout=300,
     monitor_remote_growth=False,
 ):
@@ -623,17 +666,19 @@ def _upload_episode_file_verified(
                 budget.check()
             digest.update(chunk)
     expected_sha256 = digest.hexdigest()
-    if immutable:
+    if immutable or reuse_verified:
         quoted = shlex.quote(remote_path)
         existence = _network_retry(ssh + [f"if test -L {quoted}; then echo UNSAFE; "
                                    f"elif test -f {quoted}; then echo PRESENT; "
                                    f"elif test -e {quoted}; then echo UNSAFE; else echo MISSING; fi"],
                                    capture=True, total_timeout=30, budget=budget).strip()
         if existence == b"PRESENT":
-            if _remote_file_signature(ssh, remote_path, budget=budget) != (expected_size, expected_sha256):
+            observed = _remote_file_signature(ssh, remote_path, budget=budget)
+            if observed == (expected_size, expected_sha256):
+                return {"bytes": expected_size, "sha256": expected_sha256}
+            if immutable:
                 raise RunPodControllerError("immutable remote source identity differs; preserve it")
-            return {"bytes": expected_size, "sha256": expected_sha256}
-        if existence != b"MISSING":
+        elif existence != b"MISSING":
             raise RunPodControllerError("immutable remote source path is unsafe")
     partial = (
         "/workspace/.mas-upload/audio-review-overrides-"
@@ -851,7 +896,8 @@ def _write_runtime_env(path, values, commit):
         "MAS_GMAIL_APP_PASSWORD": values["MAS_GMAIL_APP_PASSWORD"],
         "MAS_NOTIFY_TO": values["MAS_NOTIFY_TO"],
         "MAS_GIT_COMMIT": commit,
-        "MAS_VENV_DIR": "/workspace/ma-sub/.venv",
+        "MAS_VENV_DIR": "/opt/venv",
+        "MAS_RUNTIME_MODE": "immutable",
         "UV_CACHE_DIR": "/workspace/.cache/uv",
         "UV_HTTP_TIMEOUT": "120",
         "UV_HTTP_RETRIES": "3",
@@ -859,8 +905,10 @@ def _write_runtime_env(path, values, commit):
         "HF_HOME": "/workspace/.cache/huggingface",
         "TORCH_HOME": "/workspace/.cache/torch",
         "MAS_EXTERNAL_RUNPOD_CONTROLLER": "1",
+        "MAS_DELIVERY_EXECUTION_PLAN": os.getenv("MAS_DELIVERY_EXECUTION_PLAN", "local-qsv-v1"),
+        "MAS_PRODUCTION_PRIORITY": _production_priority(),
     }
-    for name in ("MAS_NETWORK_VOLUME_QUOTA_BYTES", "MAS_EPISODE"):
+    for name in ("MAS_NETWORK_VOLUME_QUOTA_BYTES", "MAS_EPISODE", "MAS_CODE_FIX_RESUME"):
         if name in values:
             remote_values[name] = values[name]
     if values.get("MAS_YTDLP_COOKIES"):
@@ -1027,11 +1075,251 @@ def _validate_delivery_release(local_root, episode, released_path):
                                release.get("capacity_state"), release.get("capacity_shutdown"))
 
 
+def _write_encode_release(local_root, episode, pod_id, audit):
+    from .local_encode import validate_subtitle_export
+    validate_subtitle_export(local_root, episode)
+    records = {name: {"relative_path": (Path(audit) / filename).relative_to(local_root).as_posix(),
+                      "sha256": sha256_file(Path(audit) / filename)} for name, filename in
+               (("capacity_state", "capacity-state.json"), ("capacity_shutdown", "capacity-shutdown.json"))}
+    _capacity_release_evidence(local_root, episode, pod_id, records["capacity_state"], records["capacity_shutdown"])
+    release = {"format": "mas-gpu-released-for-encode-1", "episode": episode, "pod_id": pod_id,
+               "status": "ABSENT", "plan_sha256": sha256_file(local_root / "work/local-encode-plan.json"), **records}
+    atomic_json(local_root / "work/gpu-released-for-encode.json", {"data": release, "sha256": digest(release)})
+
+
+def _finish_local_encode(local_root, episode, budget):
+    from .local_encode import complete_local_encode
+    remote = os.getenv("MAS_DRIVE_STRICT_REMOTE", "")
+    if not remote or "\r" in remote or "\n" in remote:
+        raise RunPodControllerError("valid MAS_DRIVE_STRICT_REMOTE is required for local delivery")
+    complete_local_encode(local_root, episode, total_timeout=budget.check())
+    release = json.loads((local_root / "work/gpu-released-for-encode.json").read_text(encoding="utf-8"))["data"]
+    audit = safe_relative(local_root, release["capacity_state"]["relative_path"]).parent
+    validate_delivery(local_root, episode)
+    _write_delivery_release(local_root, episode, release["pod_id"], audit)
+    try:
+        return publish_local_delivery(local_root, episode, remote, total_timeout=budget.check())
+    finally:
+        _drain_notifications(local_root)
+
+
+def _drain_notifications(local_root):
+    try:
+        from .notify import drain_outbox
+        drain_outbox(local_root, total_timeout=60)
+    except Exception as exc:
+        print(f"[EMAIL] drain deferred: {type(exc).__name__}", file=sys.stderr)
+
+
+def drain_cli_notifications(episode):
+    local_root = episode_dir(episode)
+    try:
+        with _controller_lock(ROOT / 'var/production-controller.lock'):
+            reference_path = local_root / 'work/controller-lease.json'
+            if not reference_path.is_file():
+                _drain_notifications(local_root)
+                return
+            from .partial_delivery import _read_bound
+            reference = _read_bound(reference_path)
+            audit = safe_relative(local_root, reference['audit'])
+            state = _read_bound(audit / 'capacity-state.json')
+            if state.get('episode') != episode:
+                raise RunPodControllerError('notification lease belongs to another episode')
+            if state.get('status') == 'NO_CAPACITY' and not state.get('owned_pod_ids'):
+                _drain_notifications(local_root)
+            elif state.get('status') == 'RELEASED':
+                with _drain_after_capacity(local_root, episode, audit):
+                    pass
+    except Exception as exc:
+        print(f'[EMAIL] safe controller drain deferred: {type(exc).__name__}', file=sys.stderr)
+
+
+@contextmanager
+def _drain_after_capacity(local_root, episode, audit):
+    try:
+        yield
+    finally:
+        try:
+            state_path = Path(audit) / "capacity-state.json"
+            shutdown_path = Path(audit) / "capacity-shutdown.json"
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            owned = saved["data"].get("owned_pod_ids", [])
+            if owned:
+                _capacity_release_evidence(local_root, episode, owned[-1],
+                    {"relative_path": state_path.relative_to(local_root).as_posix(), "sha256": sha256_file(state_path)},
+                    {"relative_path": shutdown_path.relative_to(local_root).as_posix(), "sha256": sha256_file(shutdown_path)})
+                _drain_notifications(local_root)
+        except Exception as exc:
+            print(f"[EMAIL] post-release drain deferred: {type(exc).__name__}", file=sys.stderr)
+
+
+def _production_priority():
+    execution = os.getenv('MAS_DELIVERY_EXECUTION_PLAN', 'local-qsv-v1')
+    priority = os.getenv('MAS_PRODUCTION_PRIORITY',
+                         'first-hour-v1' if execution == 'local-qsv-v1' else 'whole-episode-v1')
+    if (priority not in {'first-hour-v1', 'whole-episode-v1'}
+            or (priority == 'first-hour-v1' and execution != 'local-qsv-v1')):
+        raise RunPodControllerError('unsupported production priority and execution combination')
+    return priority
+
+
+def _resume_partial_delivery(local_root, episode):
+    from .partial_delivery import part_directory, validate_published_part, complete_local_part, complete_parts, _read_bound
+    plan_path = local_root / 'work/part-plan.json'
+    if not plan_path.is_file():
+        return None
+    from .engine.part_audio import load_part_plan
+    plan = load_part_plan(local_root, episode, verify_files=False)
+    lease_path = local_root / 'work/controller-lease.json'
+    if lease_path.is_file():
+        lease = _read_bound(lease_path)
+        state_path = safe_relative(local_root, lease['audit']) / 'capacity-state.json'
+        if state_path.is_file() and _read_bound(state_path).get('status') not in {'RELEASED', 'NO_CAPACITY'}:
+            return None  # The existing lease cleanup owns an active or expired paid worker.
+    saved_budget = _read_bound(local_root / 'work/controller_budget.json')
+    if (saved_budget.get('episode') != episode or type(saved_budget.get('limit_seconds')) not in (int, float)
+            or not 0 < saved_budget['limit_seconds'] <= 21600):
+        raise RunPodControllerError('partial episode budget identity changed')
+    budget = RunBudget(saved_budget['started_at'], limit_seconds=saved_budget['limit_seconds'])
+    budget.check()
+    for part in plan['parts']:
+        part_id = part['part_id']
+        folder = part_directory(local_root, part_id)
+        if validate_published_part(local_root, episode, part_id, total_timeout=budget.check()) is not None:
+            continue
+        if (folder / 'work/gpu-released-for-encode.json').is_file():
+            try:
+                return complete_local_part(local_root, episode, part_id, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
+                                           total_timeout=_episode_budget(local_root, episode).check())
+            finally:
+                _drain_notifications(local_root)
+        handoff_path = local_root / 'work/partial-handoff.json'
+        if handoff_path.is_file():
+            from .progressive import validate_partial_handoff
+            handoff = validate_partial_handoff(local_root, episode)
+            if handoff['part_id'] == part_id and not safe_relative(local_root, handoff['expected_return']).is_file():
+                saved = saved_budget
+                wait = saved.get('wait', {})
+                if wait.get('reason') == WAIT_PART_RETURN:
+                    for key in ('evidence', 'shutdown'):
+                        if sha256_file(safe_relative(local_root, wait[key + '_path'])) != wait[key + '_sha256']:
+                            raise RunPodControllerError('partial handoff release evidence changed')
+                    if wait['evidence_sha256'] != sha256_file(handoff_path):
+                        raise RunPodControllerError('partial handoff wait belongs to a different part')
+                    RunBudget(saved['started_at'], limit_seconds=saved['limit_seconds']).check()
+                    return WAIT_PART_RETURN
+                released = _released_partial_audit(local_root, episode, WAIT_PART_RETURN)
+                if released is not None:
+                    _, audit = released
+                    _pause_episode_budget(local_root, episode, WAIT_PART_RETURN, handoff_path,
+                                          audit / 'capacity-shutdown.json')
+                    return WAIT_PART_RETURN
+        export_path = folder / 'work/partial-export.json'
+        if export_path.is_file():
+            released = _released_partial_audit(local_root, episode, READY_FOR_PARTIAL_ENCODE)
+            if released is not None:
+                from .partial_delivery import write_part_release
+                pod_id, audit = released
+                write_part_release(local_root, episode, part_id, pod_id, audit, total_timeout=budget.check())
+                try:
+                    return complete_local_part(local_root, episode, part_id, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
+                                               total_timeout=_episode_budget(local_root, episode).check())
+                finally:
+                    _drain_notifications(local_root)
+        return None
+    if complete_parts(local_root, episode, total_timeout=budget.check()) is None:
+        raise RunPodControllerError('complete-parts inventory changed')
+    _drain_notifications(local_root)
+    print('[COMPLETE_PARTS] every planned part has verified Drive byte/SHA readback; no single full-file claim')
+    return 0
+
+
+def _released_partial_audit(local_root, episode, exit_code):
+    from .partial_delivery import _read_bound
+    reference_path = local_root / 'work/controller-lease.json'
+    status_path = local_root / 'work/remote-job-status.json'
+    if not reference_path.is_file() or not status_path.is_file():
+        return None
+    status = json.loads(status_path.read_text(encoding='utf-8'))
+    if status.get('status') != 'EXITED' or status.get('exit_code') != exit_code:
+        return None
+    reference = _read_bound(reference_path)
+    request = _read_bound(local_root / 'work/remote-job-request.json')
+    from .remote_job import _identity
+    if (request.get('episode') != episode or request.get('commit') != reference.get('commit')
+            or status.get('identity') != _identity(episode, request['commit'], request['input_sha256'])):
+        raise RunPodControllerError('partial release job identity changed')
+    audit = safe_relative(local_root, reference['audit'])
+    state_path, shutdown_path = audit / 'capacity-state.json', audit / 'capacity-shutdown.json'
+    if not state_path.is_file() or not shutdown_path.is_file():
+        return None
+    state = _read_bound(state_path)
+    if state.get('status') != 'RELEASED':
+        return None
+    owned = state.get('owned_pod_ids', [])
+    if not owned:
+        raise RunPodControllerError('partial release has no owned Pod identity')
+    _capacity_release_evidence(local_root, episode, owned[-1],
+        {'relative_path': state_path.relative_to(local_root).as_posix(), 'sha256': sha256_file(state_path)},
+        {'relative_path': shutdown_path.relative_to(local_root).as_posix(), 'sha256': sha256_file(shutdown_path)})
+    return owned[-1], audit
+
+
+def _preflight_part_return(local_root, episode):
+    if not (local_root / 'work/partial-handoff.json').is_file():
+        return
+    from .progressive import validate_partial_handoff
+    handoff = validate_partial_handoff(local_root, episode)
+    output = safe_relative(local_root, handoff['expected_return'])
+    if not output.is_file():
+        return
+    pack = safe_relative(local_root, handoff['pack']['relative_path'])
+    if handoff['kind'] == 'tr':
+        from .engine.tr_correction import validate_tr_correction_output
+        validate_tr_correction_output(pack, output)
+    else:
+        from .engine.translation_workspace import validate_id_workspace_output
+        validate_id_workspace_output(pack, output)
+
+
+def _part_resume_files(local_root, episode):
+    if not (local_root / 'work/part-plan.json').is_file():
+        return []
+    from .engine.part_audio import load_part_plan
+    from .partial_delivery import part_directory, write_worker_delivery_ack
+    plan = load_part_plan(local_root, episode, verify_files=False)
+    paths = []
+    for part in plan['parts']:
+        folder = part_directory(local_root, part['part_id'])
+        for suffix in ('TR_TEXT_CORRECTED.zip', 'ID_TRANSLATED.zip', 'ID_TRANSLATED.zip.workspace.json'):
+            path = folder / 'translation_output' / f'Muhtemel Ask {episode}.Bolum_{suffix}'
+            if path.is_file():
+                paths.append(path)
+        for filename in ('audio_review_overrides.json', 'speaker_evidence_v1.json'):
+            path = folder / 'review' / filename
+            if path.is_file():
+                paths.append(path)
+        if (folder / 'final/drive_readback_receipt.json').is_file():
+            paths.append(write_worker_delivery_ack(local_root, episode, part['part_id']))
+    return paths
+
+
 def run_remote_episode(episode, source_url=None):
+    for _ in range(65):
+        result = _run_remote_episode_once(episode, source_url)
+        if result != NEXT_PART:
+            return result
+    raise RunPodControllerError('progressive episode continuation count exceeded')
+
+
+def _run_remote_episode_once(episode, source_url=None):
     if type(episode) is not int or episode <= 0:
         raise RunPodControllerError("episode must be a positive integer")
     with _controller_lock(ROOT / "var" / "production-controller.lock"):
         local_root = episode_dir(episode)
+        partial_result = _resume_partial_delivery(local_root, episode)
+        if partial_result is not None:
+            return partial_result
         released_path = local_root / "work" / "gpu-released-for-delivery.json"
         if released_path.is_file():
             _validate_delivery_release(local_root, episode, released_path)
@@ -1044,11 +1332,18 @@ def run_remote_episode(episode, source_url=None):
                 raise RunPodControllerError(
                     "MAS_DRIVE_STRICT_REMOTE must not contain line breaks"
                 )
-            return publish_local_delivery(local_root, episode, remote)
+            budget = _episode_budget(local_root, episode)
+            try:
+                return publish_local_delivery(local_root, episode, remote, total_timeout=budget.check())
+            finally:
+                _drain_notifications(local_root)
+        if (local_root / "work/gpu-released-for-encode.json").is_file():
+            return _finish_local_encode(local_root, episode, _episode_budget(local_root, episode))
         values = _required_environment()
-        commit, _ = _local_preflight(values)
+        commit, rclone_config = _local_preflight(values)
         _validate_local_tr_return(local_root, f"Muhtemel Ask {episode}.Bolum")
         preflight_local_id_return(local_root, episode, ROOT / "config" / "production")
+        _preflight_part_return(local_root, episode)
         last_status = local_root / "work" / "remote-job-status.json"
         if last_status.is_file():
             previous_job = json.loads(last_status.read_text(encoding="utf-8"))
@@ -1115,10 +1410,25 @@ def run_remote_episode(episode, source_url=None):
                 raise
             budget_error = exc
             episode_budget = None
+        if not resume_lease:
+            _guard_failed_remote_job(local_root, episode, source_url, commit)
         quote_path = os.getenv("MAS_RUNPOD_STORAGE_QUOTE")
         if not quote_path:
             raise RunPodControllerError("MAS_RUNPOD_STORAGE_QUOTE must name a fresh verified storage-price JSON before compute")
         storage_quote = load_storage_quote(Path(quote_path))
+        runtime_error = None
+        try:
+            runtime_image = _configured_runtime_image()
+        except RunPodControllerError as exc:
+            if not resume_lease:
+                raise
+            runtime_image, runtime_error = None, exc
+        if not resume_lease:
+            _local_encoder_preflight(local_root, episode, episode_budget)
+            drive_readiness = drive_preflight(values["MAS_DRIVE_STRICT_REMOTE"], required_bytes=0,
+                                              config_path=rclone_config,
+                                              total_timeout=min(60, episode_budget.check()))
+            atomic_json(local_root / "work" / "controller-drive-preflight.json", drive_readiness)
         provider = CapacityProvider(values["RUNPOD_POD_ID"], values["RUNPOD_API_KEY"])
         protected = provider.get_pod(values["RUNPOD_POD_ID"], 15)
         volume = provider.get_volume("xgogcmey5o", 15)
@@ -1127,7 +1437,7 @@ def run_remote_episode(episode, source_url=None):
         public_key = Path(values["MAS_RUNPOD_SSH_KEY"] + ".pub").read_text(encoding="utf-8").strip()
         payload = {"cloudType": "SECURE", "gpuCount": 1, "volumeInGb": 0,
                    "containerDiskInGb": max(30, int(protected.get("containerDiskInGb") or 30)),
-                   "imageName": protected.get("imageName"), "dockerArgs": "",
+                   "imageName": runtime_image or protected.get("imageName"), "dockerArgs": "",
                    "ports": "22/tcp", "volumeMountPath": "/workspace",
                    "env": [{"key": "PUBLIC_KEY", "value": public_key}],
                    "supportPublicIp": True, "startSsh": True}
@@ -1148,6 +1458,8 @@ def run_remote_episode(episode, source_url=None):
             try:
                 current = candidate.wait(lambda value: value.get("desiredStatus") == "RUNNING"
                                          and _ssh_endpoint(value), "startup", timeout=remaining)
+                if current.get("imageName") != runtime_image:
+                    raise RunPodControllerError("provider imageName does not match the configured immutable image")
                 host, port = _ssh_endpoint(current)
                 left = readiness - time.monotonic()
                 if left <= 0:
@@ -1165,10 +1477,12 @@ def run_remote_episode(episode, source_url=None):
         if not resume_lease:
             reference = {"commit": commit, "source_url": source_url, "audit": audit.relative_to(local_root).as_posix()}
             atomic_json(lease_reference, {"data": reference, "sha256": digest(reference)})
-        with CapacityLease(provider, payload, audit, plan,
-                           ready=None if budget_error else ready, resume=resume_lease) as lease:
+        with _drain_after_capacity(local_root, episode, audit), CapacityLease(provider, payload, audit, plan,
+                           ready=None if budget_error or runtime_error else ready, resume=resume_lease) as lease:
             if budget_error:
                 raise budget_error
+            if runtime_error:
+                raise runtime_error
             runtime_values = dict(values, RUNPOD_POD_ID=lease.pod["id"],
                                   MAS_NETWORK_VOLUME_QUOTA_BYTES=str(volume["size"] * 1_000_000_000),
                                   MAS_EPISODE=str(episode))
@@ -1176,10 +1490,27 @@ def run_remote_episode(episode, source_url=None):
                                          commit=commit,
                                          budget=_PaidBudget(episode_budget, lease), pod=lease.pod,
                                          resume_only=resume_lease)
+        if result == READY_FOR_PARTIAL_ENCODE:
+            from .partial_delivery import _read_bound, write_part_release, complete_local_part
+            part_id = json.loads((local_root / 'work/partial-export.json').read_text(encoding='utf-8'))['part_id']
+            write_part_release(local_root, episode, part_id, lease.pod['id'], audit,
+                               total_timeout=episode_budget.check())
+            try:
+                return complete_local_part(local_root, episode, part_id, values['MAS_DRIVE_STRICT_REMOTE'],
+                                           total_timeout=episode_budget.check())
+            finally:
+                _drain_notifications(local_root)
+        if result == WAIT_PART_RETURN:
+            _pause_episode_budget(local_root, episode, result, local_root / 'work/partial-handoff.json',
+                                  audit / 'capacity-shutdown.json')
+        if result == READY_FOR_LOCAL_ENCODE:
+            _write_encode_release(local_root, episode, lease.pod["id"], audit)
+            return _finish_local_encode(local_root, episode, episode_budget)
         if result == READY_FOR_DELIVERY:
             validate_delivery(local_root, episode)
             _write_delivery_release(local_root, episode, lease.pod["id"], audit)
-            return publish_local_delivery(local_root, episode, values["MAS_DRIVE_STRICT_REMOTE"])
+            return publish_local_delivery(local_root, episode, values["MAS_DRIVE_STRICT_REMOTE"],
+                                          total_timeout=episode_budget.check())
         if result in (20, 21, WAIT_MP4_SAMPLE):
             evidence = (local_root / "work" / "sample-export.json" if result == WAIT_MP4_SAMPLE else
                         local_root / "translation_input" / (f"Muhtemel Ask {episode}.Bolum_" +
@@ -1203,12 +1534,15 @@ def _download_record(record, local_root, remote_root, scp, host, budget, *, chec
             raise RunPodControllerError("local immutable source identity differs; preserve it")
         return local_episode_file
     if checkpoint:
-        destination = local_root / "work" / "remote-checkpoints" / expected / Path(relative).name
+        destination = safe_relative(local_root, f"work/remote-checkpoints/{expected}/{Path(relative).name}")
     remote_path = record.get("snapshot_path") or record.get("storage_path") or f"{remote_root}/{relative}"
     match = re.search(r"/Muhtemel Ask ([1-9][0-9]*)\.Bolum$", remote_root)
     external = (f"/tmp/mas-ep{match[1]}-output/{Path(relative).name}" if match else None)
     if (not remote_path.startswith(remote_root + "/") and remote_path != external) or "/../" in remote_path:
         raise RunPodControllerError("remote transfer path escapes episode")
+    if checkpoint and local_episode_file.is_file():
+        if local_episode_file.stat().st_size == size and sha256_file(local_episode_file) == expected:
+            return local_episode_file
     if destination.is_file():
         if destination.stat().st_size == size and sha256_file(destination) == expected:
             return destination
@@ -1302,10 +1636,12 @@ def _collection_failure_paths_match(failure, data, status_path):
             or (storage is not None and not isinstance(storage, str))):
         return False
     episode = data.get("episode")
-    export_relative = "work/delivery-export.json"
+    export_name = {READY_FOR_LOCAL_ENCODE: 'subtitle-export.json',
+                   READY_FOR_PARTIAL_ENCODE: 'partial-export.json'}.get(failure.get('exit_code'), 'delivery-export.json')
+    export_relative = f"work/{export_name}"
     export_storage = (
         f"/workspace/ma-sub/EPISODES/Muhtemel Ask {episode}.Bolum/"
-        "work/delivery-export.json"
+        f"work/{export_name}"
     )
     if relative == export_relative:
         return storage == export_storage
@@ -1316,12 +1652,14 @@ def _collection_failure_paths_match(failure, data, status_path):
     external = f"/tmp/mas-ep{episode}-output/{Path(relative).name}"
     if storage is not None and storage != external:
         return False
-    manifest_path = status_path.with_name("delivery-export.json")
+    manifest_path = status_path.with_name(export_name)
     if not manifest_path.is_file():
         return False
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     files = manifest.get("files")
-    if (manifest.get("episode") != episode or manifest.get("mode") != "strict"
+    expected_mode = {READY_FOR_LOCAL_ENCODE: 'strict-subtitles',
+                     READY_FOR_PARTIAL_ENCODE: 'strict-partial-subtitles'}.get(failure.get('exit_code'), 'strict')
+    if (manifest.get("episode") != episode or manifest.get("mode") != expected_mode
             or not isinstance(files, list)):
         return False
     return any(
@@ -1342,9 +1680,9 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
     data = request.get("data")
     if not isinstance(data, dict) or request.get("sha256") != digest(data):
         raise RunPodControllerError("remote job request integrity mismatch")
-    exit_code = status.get("exit_code") if status.get("status") == "EXITED" else None
+    exit_code = status.get("exit_code") if status.get("status") in {"EXITED", "FAILED"} else None
     failure_path = status_path.with_name("remote-result-collection-failure.json")
-    if exit_code == READY_FOR_DELIVERY:
+    if exit_code in (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, READY_FOR_PARTIAL_ENCODE):
         prior_base = data.get("base_input_sha256", data.get("input_sha256"))
         if prior_base != base_input_sha:
             return base_input_sha, 0
@@ -1382,17 +1720,173 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
         if not _collection_failure_paths_match(failure, data, status_path):
             raise RunPodControllerError("remote result collection failure path mismatch")
         attempt += 1
+        if attempt > _runtime_policy()["max_changed_evidence_retries"]:
+            raise RunPodControllerError("BLOCKED: collection retry budget exhausted")
         return digest({"base_input_sha256": base_input_sha, "attempt": attempt}), attempt
-    if exit_code in (None, 0, 20, 21, READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
+    if exit_code in (None, 0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
+                     WAIT_PART_RETURN, READY_FOR_PARTIAL_ENCODE):
         return base_input_sha, 0
-    prior_base = data.get("base_input_sha256", data.get("input_sha256"))
-    if prior_base != base_input_sha:
-        return base_input_sha, 0
+    ticket_path = status_path.with_name("remote-retry-authorization.json")
+    if not ticket_path.is_file():
+        raise RunPodControllerError("BLOCKED: unchanged failed job requires changed validated evidence before retry")
+    ticket = json.loads(ticket_path.read_text(encoding="utf-8"))
+    authorization = ticket.get("data")
+    if (not isinstance(authorization, dict) or ticket.get("sha256") != digest(authorization)
+            or authorization.get("request_sha256") != request["sha256"]
+            or authorization.get("base_input_sha256") != base_input_sha):
+        raise RunPodControllerError("remote retry authorization integrity or binding mismatch")
+    failure = json.loads(status_path.with_name("remote-failure-invariant.json").read_text(encoding="utf-8"))
+    if (failure.get("sha256") != digest(failure.get("data"))
+            or failure["sha256"] != authorization.get("failure_sha256")
+            or failure["data"].get("request_sha256") != request["sha256"]
+            or failure["data"].get("status_sha256") != digest(status)):
+        raise RunPodControllerError("remote retry failure evidence binding mismatch")
     attempt = data.get("attempt", 0)
     if type(attempt) is not int or attempt < 0:
         raise RunPodControllerError("remote job attempt evidence is invalid")
     attempt += 1
+    if attempt > _runtime_policy()["max_changed_evidence_retries"]:
+        raise RunPodControllerError("BLOCKED: changed-evidence retry budget exhausted")
     return digest({"base_input_sha256": base_input_sha, "attempt": attempt}), attempt
+
+
+def _remote_input_binding(local_root, source_url, commit, episode):
+    resume_files = [local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_{suffix}.zip"
+                    for suffix in ("TR_TEXT_CORRECTED", "ID_TRANSLATED")]
+    resume_files += [Path(str(resume_files[1]) + ".workspace.json")]
+    resume_files += _part_resume_files(local_root, episode)
+    validated_returns = {path.relative_to(local_root).as_posix(): sha256_file(path)
+                         for path in resume_files if path.is_file() and path.parent.name != 'review'}
+    resume_files += [local_root / "review" / "audio_review_overrides.json",
+                    local_root / "review" / "speaker_evidence_v1.json",
+                    local_root / "review" / "mp4-sample-approval.json",
+                    local_root / "review" / "code-fix-resume.json"]
+    inputs = {path.relative_to(local_root).as_posix(): sha256_file(path)
+              for path in resume_files if path.is_file()}
+    evidence = digest({"source_url": source_url, "files": validated_returns})
+    base = digest({"source_url": source_url, "commit": commit, "files": inputs,
+                   "production_priority": _production_priority(),
+                   "execution_plan": os.getenv('MAS_DELIVERY_EXECUTION_PLAN', 'local-qsv-v1'),
+                   "encoder": os.getenv("MAS_MP4_ENCODER", "h264_nvenc"),
+                   "encoder_options": os.getenv("MAS_MP4_ENCODER_OPTIONS"),
+                   "target_gb": os.getenv("MAS_MP4_TARGET_GB", "3")})
+    return base, evidence
+
+
+def _guard_failed_remote_job(local_root, episode, source_url, commit):
+    work = local_root / "work"
+    request_path, status_path = work / "remote-job-request.json", work / "remote-job-status.json"
+    if not status_path.is_file():
+        if request_path.is_file():
+            raise RunPodControllerError("remote job retry evidence is incomplete")
+        return
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    code = status.get("exit_code") if status.get("status") in {"EXITED", "FAILED"} else None
+    if code in (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, READY_FOR_PARTIAL_ENCODE):
+        base, _ = _remote_input_binding(local_root, source_url, commit, episode)
+        _remote_attempt_identity(base, request_path, status_path)
+        return
+    if code in (None, 0, 20, 21, WAIT_MP4_SAMPLE, WAIT_PART_RETURN):
+        return
+    if not request_path.is_file():
+        raise RunPodControllerError("remote job retry evidence is incomplete")
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    data = request.get("data")
+    if not isinstance(data, dict) or request.get("sha256") != digest(data):
+        raise RunPodControllerError("remote job request integrity mismatch")
+    identity = {"episode": data.get("episode"), "commit": data.get("commit"),
+                "input_sha256": data.get("input_sha256"),
+                "token": hashlib.sha256(f"{data.get('episode')}\n{data.get('commit')}\n{data.get('input_sha256')}\n".encode()).hexdigest()}
+    if data.get("episode") != episode or status.get("identity") != identity:
+        raise RunPodControllerError("remote failure status identity mismatch")
+    base, evidence = _remote_input_binding(local_root, source_url, commit, episode)
+    diagnostic_paths = ("state.json", "remote-checkpoint-manifest.json")
+    diagnostics = {name: sha256_file(work / name) for name in diagnostic_paths if (work / name).is_file()}
+    failure = {"format": "mas-failed-job-invariant-1", "request_sha256": request["sha256"],
+               "status_sha256": digest(status), "exit_code": code,
+               "evidence_input_sha256": data.get("evidence_input_sha256"),
+               "diagnostics": diagnostics, **_partial_failure_identity(local_root, episode)}
+    failure_path = work / "remote-failure-invariant.json"
+    if failure_path.is_file():
+        saved_failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        prior_failure = saved_failure.get("data")
+        if not isinstance(prior_failure, dict) or saved_failure.get("sha256") != digest(prior_failure):
+            raise RunPodControllerError("remote failure invariant integrity mismatch")
+        if prior_failure.get("request_sha256") == request["sha256"]:
+            failure = prior_failure
+    else:
+        atomic_json(failure_path, {"data": failure, "sha256": digest(failure)})
+    code_fix = local_root / "review/code-fix-resume.json"
+    qualified_code_fix = False
+    if code_fix.is_file():
+        from .retry_authorization import validate_code_fix_resume
+        validate_code_fix_resume(local_root, episode, commit, code_fix)
+        if failure.get("evidence_input_sha256") != evidence:
+            raise RunPodControllerError("code-fix retry cannot also change validated text inputs")
+        qualified_code_fix = True
+    if not qualified_code_fix and (not failure.get("evidence_input_sha256") or failure["evidence_input_sha256"] == evidence):
+        raise RunPodControllerError("BLOCKED: unchanged failed evidence; code or option changes alone do not authorize another GPU run")
+    attempt = data.get("attempt", 0)
+    if type(attempt) is not int or not 0 <= attempt < _runtime_policy()["max_changed_evidence_retries"]:
+        raise RunPodControllerError("BLOCKED: changed-evidence retry budget exhausted")
+    authorization = {"request_sha256": request["sha256"], "base_input_sha256": base,
+                     "evidence_input_sha256": evidence, "failure_sha256": digest(failure)}
+    atomic_json(work / "remote-retry-authorization.json", {"data": authorization, "sha256": digest(authorization)})
+
+
+def _record_failed_remote_evidence(exit_code, local_root, source_url, commit):
+    if exit_code in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
+                     WAIT_PART_RETURN, READY_FOR_PARTIAL_ENCODE):
+        return
+    work = local_root / "work"
+    request = json.loads((work / "remote-job-request.json").read_text(encoding="utf-8"))
+    if request.get("sha256") != digest(request.get("data")):
+        raise RunPodControllerError("remote job request integrity mismatch")
+    status = json.loads((work / "remote-job-status.json").read_text(encoding="utf-8"))
+    _, evidence = _remote_input_binding(local_root, source_url, commit, request["data"]["episode"])
+    failure = {"format": "mas-failed-job-invariant-1", "request_sha256": request["sha256"],
+               "status_sha256": digest(status), "exit_code": exit_code,
+               "evidence_input_sha256": evidence,
+               "diagnostics": {name: sha256_file(work / name) for name in
+                               ("state.json", "remote-checkpoint-manifest.json") if (work / name).is_file()},
+               **_partial_failure_identity(local_root, request['data']['episode'])}
+    atomic_json(work / "remote-failure-invariant.json", {"data": failure, "sha256": digest(failure)})
+
+
+def _partial_failure_identity(local_root, episode):
+    from .partial_delivery import _read_bound
+    from .delivery import verified_record
+    path = local_root / 'work/current-part.json'
+    if not path.is_file():
+        return {}
+    current = _read_bound(path)
+    status_path = local_root / 'work/remote-job-status.json'
+    if status_path.is_file():
+        status = json.loads(status_path.read_text(encoding='utf-8'))
+        if current.get('remote_job_token') != status.get('identity', {}).get('token'):
+            return {}  # A failure before child work must not adopt a previous job's alignment failure.
+    part_id = current.get('part_id')
+    if (current.get('format') != 'mas-current-part-1' or current.get('episode') != episode
+            or not re.fullmatch(r'part-[0-9]{3}', str(part_id))):
+        raise RunPodControllerError('failed partial stage identity changed')
+    identity = {'part_id': part_id, 'part_stage': current.get('stage')}
+    if identity['part_stage'] != 'forced_alignment':
+        return identity
+    state_record = current.get('state', {})
+    if state_record.get('relative_path') != f'parts/{part_id}/work/state.json':
+        raise RunPodControllerError('failed partial state escaped its part')
+    state = json.loads(verified_record(local_root, state_record).read_text(encoding='utf-8'))
+    from .engine.part_audio import load_part_plan
+    plan = load_part_plan(local_root, episode, verify_files=False)
+    if part_id not in {item['part_id'] for item in plan['parts']}:
+        raise RunPodControllerError('failed part not present in original plan')
+    hashes = {'part_plan_sha256': sha256_file(local_root / 'work/part-plan.json'),
+              'part_audio_lineage_sha256': sha256_file(safe_relative(local_root,
+                  f'parts/{part_id}/prepare/audio-part.done.json'))}
+    if (state.get('episode') != episode or state.get('part_id') != part_id
+            or any(current.get(key) != value or state.get(key) != value for key, value in hashes.items())):
+        raise RunPodControllerError('failed part plan/audio evidence changed')
+    return {**identity, **hashes}
 
 
 def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url, runtime_seconds, budget,
@@ -1401,17 +1895,8 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
     remote_root = f"/workspace/ma-sub/EPISODES/Muhtemel Ask {episode}.Bolum"
     prefix = ("source /workspace/.mas-secrets/runtime.env; "
               f"export MAS_MAX_RUNTIME_SECONDS={runtime_seconds}; cd {release}; "
-              "exec env PYTHONPATH=src /workspace/ma-sub/.venv/bin/python -m mas.remote_job ")
-    resume_files = sorted((local_root / "translation_output").glob("*.zip"))
-    resume_files += [local_root / "review" / "audio_review_overrides.json",
-                     local_root / "review" / "speaker_evidence_v1.json",
-                     local_root / "review" / "mp4-sample-approval.json"]
-    inputs = {path.relative_to(local_root).as_posix(): sha256_file(path)
-              for path in resume_files if path.is_file()}
-    base_input_sha = digest({"source_url": source_url, "commit": commit, "files": inputs,
-                             "encoder": os.getenv("MAS_MP4_ENCODER", "h264_nvenc"),
-                             "encoder_options": os.getenv("MAS_MP4_ENCODER_OPTIONS"),
-                             "target_gb": os.getenv("MAS_MP4_TARGET_GB", "3")})
+              'exec env PYTHONPATH=src "$MAS_VENV_DIR/bin/python" -m mas.remote_job ')
+    base_input_sha, evidence_input_sha = _remote_input_binding(local_root, source_url, commit, episode)
     input_sha = base_input_sha
     request_path = local_root / "work" / "remote-job-request.json"
     if resume_only:
@@ -1427,7 +1912,8 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
             local_root / "work" / "remote-job-status.json",
         )
         request = {"commit": commit, "episode": episode, "input_sha256": input_sha,
-                   "base_input_sha256": base_input_sha, "attempt": attempt}
+                   "base_input_sha256": base_input_sha, "attempt": attempt,
+                   "evidence_input_sha256": evidence_input_sha}
         atomic_json(request_path, {"data": request, "sha256": digest(request)})
     common = f" --root {release} --episode {episode} --commit {commit} --input-sha256 {input_sha}"
     start = prefix + "start" + common + " --recover-lost --source-url " + shlex.quote(source_url)
@@ -1470,10 +1956,21 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
             snapshot = _download_record(record, local_root, remote_root, scp, host, budget, checkpoint=True)
             current = snapshot.stat()
             downloaded[record_key] = (snapshot, (current.st_size, current.st_mtime_ns))
-            if record["relative_path"] == "work/state.json":
-                state_path = local_root / "work" / "state.json"
+            if (record["relative_path"] in {'work/state.json', 'work/current-part.json'} or re.fullmatch(
+                    r'parts/part-[0-9]{3}/work/state\.json', record['relative_path']) or re.fullmatch(
+                    r"work/notification-outbox/[0-9a-f]{64}\.json", record["relative_path"])):
+                state_path = safe_relative(local_root, record["relative_path"])
                 if state_path.is_file():
-                    retained = local_root / "work" / "remote-checkpoints" / sha256_file(state_path) / "state.json"
+                    if record["relative_path"].startswith("work/notification-outbox/"):
+                        prior_event = json.loads(state_path.read_text(encoding="utf-8"))
+                        remote_event = json.loads(snapshot.read_text(encoding="utf-8"))
+                        prior_data, remote_data = prior_event.get("data"), remote_event.get("data")
+                        if (not isinstance(prior_data, dict) or prior_event.get("sha256") != digest(prior_data)
+                                or not isinstance(remote_data, dict) or remote_event.get("sha256") != digest(remote_data)):
+                            raise RunPodControllerError("notification checkpoint integrity mismatch")
+                        if all(prior_data.get(key) == remote_data.get(key) for key in ("episode", "event", "kind", "details")):
+                            continue  # Local SMTP outcome/attempts remain authoritative.
+                    retained = local_root / "work" / "remote-checkpoints" / sha256_file(state_path) / state_path.name
                     retained.parent.mkdir(parents=True, exist_ok=True)
                     if not retained.exists():
                         shutil.copyfile(state_path, retained)
@@ -1489,11 +1986,151 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
         time.sleep(min(15, budget.check()))
 
 
+def _collect_diagnostics(episode, local_root, remote_root, ssh, scp, host, retrieval_deadline):
+    request = json.loads((local_root / "work/remote-job-request.json").read_text(encoding="utf-8"))
+    data = request.get("data")
+    if not isinstance(data, dict) or request.get("sha256") != digest(data):
+        raise RunPodControllerError("diagnostic request integrity mismatch")
+    from .remote_job import _identity
+    expected_identity = _identity(episode, data["commit"], data["input_sha256"])
+    release = f"/workspace/ma-sub/releases/{data['commit']}"
+    command = ("source /workspace/.mas-secrets/runtime.env; "
+               f"cd {release}; exec env PYTHONPATH=src \"$MAS_VENV_DIR/bin/python\" -m mas.remote_job "
+               f"diagnostics --root {release} --episode {episode} --commit {data['commit']} "
+               f"--input-sha256 {data['input_sha256']} --deadline-seconds 60")
+    class DiagnosticBudget:
+        def check(self):
+            remaining = retrieval_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RunPodControllerError("diagnostic shared grace expired")
+            return remaining
+    grace = DiagnosticBudget()
+    response = _network_retry(ssh + [command], capture=True, attempts=2,
+                              total_timeout=min(60, grace.check()), deadline=retrieval_deadline)
+    manifest = json.loads(response)
+    if manifest.get("identity") != expected_identity or manifest.get("kind") != "diagnostics":
+        raise RunPodControllerError("diagnostic manifest identity mismatch")
+    name = f"Muhtemel Ask {episode}.Bolum"
+    allowed = {f"translation_input/{name}_TR_CORRECTION_PACK.zip", "prepare/audio_review_v2.json",
+               "prepare/forced_alignment_units/resume-identity.json",
+               "prepare/forced_alignment_units/components/latest-conflict-failure.json",
+               "source/download.done.json", "prepare/audio.done.json", "prepare/raw_asr_v2.done.json",
+               "prepare/audio_review_v2.recovery.json", f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
+               f"translation_output/{name}_TR_CORRECTED.zip"}
+    if manifest.get('part_id') is not None:
+        from .retry_authorization import retry_diagnostic_layout
+        layout = retry_diagnostic_layout(episode, manifest['part_id'])
+        allowed = set(layout['files'])
+        allowed.update(prefix + relative for prefix in layout['prefixes'] for relative in (
+            'resume-identity.json', 'components/latest-conflict-failure.json'))
+        allowed.add(f"parts/{manifest['part_id']}/prepare/audio_review_v2.recovery.json")
+    records = manifest.get("files")
+    if (not isinstance(records, list) or len(records) > len(allowed)
+            or any(not isinstance(record, dict) or record.get("relative_path") not in allowed for record in records)
+            or len({record["relative_path"] for record in records}) != len(records)):
+        raise RunPodControllerError("diagnostic manifest path set is invalid")
+    atomic_json(local_root / "work/remote-diagnostic-manifest.json", manifest)
+    for missing in manifest.get("missing", []) + manifest.get("unstable", []):
+        if missing not in allowed:
+            raise RunPodControllerError("diagnostic manifest missing path is invalid")
+        print(f"[RUNPOD] diagnostic unavailable: {missing}", file=sys.stderr)
+    for record in records:
+        try:
+            retained = _download_record(record, local_root, remote_root, scp, host, grace, checkpoint=True)
+            canonical = safe_relative(local_root, record["relative_path"])
+            mutable = (record['relative_path'] == 'work/current-part.json'
+                       or re.fullmatch(r'parts/part-[0-9]{3}/work/state\.json', record['relative_path'])
+                       or '/forced_alignment_units/' in record['relative_path']
+                       or record['relative_path'].endswith('.recovery.json'))
+            if not canonical.exists() or mutable:
+                from .engine.download import atomic_write_bytes
+                if canonical.is_file() and sha256_file(canonical) != record['sha256']:
+                    previous = local_root / 'work/remote-checkpoints' / sha256_file(canonical) / canonical.name
+                    atomic_write_bytes(previous, canonical.read_bytes())
+                atomic_write_bytes(canonical, retained.read_bytes())
+        except RunPodControllerError as exc:
+            print(f"[RUNPOD] diagnostic download warning: {exc}", file=sys.stderr)
+            if time.monotonic() >= retrieval_deadline:
+                break
+
+
+def _collect_partial_results(exit_code, episode, local_root, remote_root, ssh, scp, host, budget, temporary):
+    from .partial_delivery import _read_bound, part_directory
+    filename = 'partial-handoff.json' if exit_code == WAIT_PART_RETURN else 'partial-export.json'
+    staged = temporary / filename
+    record = {'relative_path': 'work/' + filename, 'storage_path': remote_root + '/work/' + filename}
+    try:
+        _network_retry(scp + [f'root@{host}:{remote_root}/work/{filename}', str(staged)],
+                       budget=budget, total_timeout=min(60, budget.check()))
+        manifest = (_read_bound(staged) if exit_code == WAIT_PART_RETURN else
+                    json.loads(staged.read_text(encoding='utf-8')))
+        if manifest.get('episode') != episode:
+            raise RunPodControllerError('partial transfer episode mismatch')
+        part_id = manifest.get('part_id')
+        folder = part_directory(local_root, part_id)
+        if exit_code == WAIT_PART_RETURN:
+            if manifest.get('format') != 'mas-partial-handoff-1' or manifest.get('kind') not in {'tr', 'id'}:
+                raise RunPodControllerError('invalid partial handoff transfer')
+        elif manifest.get('mode') != 'strict-partial-subtitles':
+            raise RunPodControllerError('invalid partial subtitle export')
+        records = manifest.get('files', [])
+        relatives = [item['relative_path'] for item in records]
+        if not records or len(records) > 512 or len(relatives) != len(set(relatives)):
+            raise RunPodControllerError('partial transfer manifest is empty, duplicated or unbounded')
+        current = local_root / 'work' / filename
+        if current.is_file() and sha256_file(current) != sha256_file(staged):
+            retained = local_root / 'work/part-transfer-history' / (sha256_file(current) + '.json')
+            from .engine.download import atomic_write_bytes
+            atomic_write_bytes(retained, current.read_bytes())
+        from .engine.download import atomic_write_bytes
+        atomic_write_bytes(current, staged.read_bytes())
+        for item in records:
+            relative = item['relative_path']
+            if not (relative.startswith(f'parts/{part_id}/') or relative.startswith('source/')
+                    or relative.startswith('prepare/') or relative in {'work/part-plan.json', 'work/part-vad.json'}):
+                raise RunPodControllerError('partial transfer escaped its part and parent evidence')
+            if relative == f'parts/{part_id}/work/{filename}':
+                continue
+            record = {'relative_path': relative, 'storage_path': item.get('storage_path')}
+            _download_record(item, local_root, remote_root, scp, host, budget)
+        alias = folder / 'work' / filename
+        if alias.is_file() and sha256_file(alias) != sha256_file(current):
+            from .engine.download import atomic_write_bytes
+            retained = local_root / 'work/part-transfer-history' / (sha256_file(alias) + '.json')
+            atomic_write_bytes(retained, alias.read_bytes())
+        atomic_write_bytes(alias, staged.read_bytes())
+        if exit_code == WAIT_PART_RETURN:
+            frozen = folder / 'work' / ('partial-handoff-' + manifest['kind'] + '.json')
+            if frozen.exists() and frozen.read_bytes() != staged.read_bytes():
+                raise RunPodControllerError('frozen partial handoff changed during transfer')
+            atomic_write_bytes(frozen, staged.read_bytes())
+            from .progressive import validate_partial_handoff
+            validate_partial_handoff(local_root, episode, part_id)
+            if manifest['kind'] == 'id':
+                from .engine.translation_workspace import prepare_id_translation_workspaces
+                prepare_id_translation_workspaces(safe_relative(local_root, manifest['pack']['relative_path']),
+                                                  folder / 'translation_input/id-workers')
+        else:
+            from .engine.partial_finalize import validate_partial_export
+            validate_partial_export(local_root, episode, part_id, total_timeout=budget.check())
+    except BaseException:
+        if exit_code == READY_FOR_PARTIAL_ENCODE:
+            _record_result_collection_failure(local_root, exit_code, record)
+        raise
+
+
 def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, scp, host, budget, temporary):
     name = f"Muhtemel Ask {episode}.Bolum"
     retrieval_deadline = time.monotonic() + 120
-    if exit_code in (READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
-        export_name = "delivery-export.json" if exit_code == READY_FOR_DELIVERY else "sample-export.json"
+    if exit_code in (WAIT_PART_RETURN, READY_FOR_PARTIAL_ENCODE):
+        _collect_partial_results(exit_code, episode, local_root, remote_root, ssh, scp, host, budget, temporary)
+        return
+    if exit_code == NEXT_PART:
+        raise RunPodControllerError('worker has no unpublished part but local completion evidence is incomplete; '
+                                    'refusing a no-progress GPU continuation')
+    if exit_code in (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE):
+        export_name = {READY_FOR_DELIVERY: "delivery-export.json", READY_FOR_LOCAL_ENCODE: "subtitle-export.json",
+                       WAIT_MP4_SAMPLE: "sample-export.json"}[exit_code]
         export_path = temporary / export_name
         current_record = {
             "relative_path": f"work/{export_name}",
@@ -1503,7 +2140,8 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
             _network_retry(scp + [f"root@{host}:{remote_root}/work/{export_name}", str(export_path)],
                            budget=budget, total_timeout=60)
             manifest = json.loads(export_path.read_text(encoding="utf-8"))
-            expected_mode = "strict" if exit_code == READY_FOR_DELIVERY else "review"
+            expected_mode = {READY_FOR_DELIVERY: "strict", READY_FOR_LOCAL_ENCODE: "strict-subtitles",
+                             WAIT_MP4_SAMPLE: "review"}[exit_code]
             if manifest.get("episode") != episode or manifest.get("mode") != expected_mode:
                 raise RunPodControllerError("delivery export identity mismatch")
             atomic_json(local_root / "work" / export_name, manifest)
@@ -1514,65 +2152,15 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
                 }
                 _download_record(record, local_root, remote_root, scp, host, budget)
         except BaseException:
-            if exit_code == READY_FOR_DELIVERY:
+            if exit_code in (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE):
                 _record_result_collection_failure(local_root, exit_code, current_record)
             raise
 
-    if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
-        diagnostics = (
-            (
-                f"{remote_root}/translation_input/{name}_TR_CORRECTION_PACK.zip",
-                local_root / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip",
-            ),
-            (
-                f"{remote_root}/prepare/audio_review_v2.json",
-                local_root / "prepare" / "audio_review_v2.json",
-            ),
-            (
-                f"{remote_root}/prepare/audio_review_v2.recovery.json",
-                local_root / "prepare" / "audio_review_v2.recovery.json",
-            ),
-            (
-                f"{remote_root}/translation_output/{name}_TR_TEXT_CORRECTED.zip",
-                local_root
-                / "translation_output"
-                / f"{name}_TR_TEXT_CORRECTED.zip",
-            ),
-            (
-                f"{remote_root}/translation_output/{name}_TR_CORRECTED.zip",
-                local_root
-                / "translation_output"
-                / f"{name}_TR_CORRECTED.zip",
-            ),
-        )
-        for position, (remote_file, local_file) in enumerate(
-            diagnostics, start=1
-        ):
-            temporary_file = temporary / f"diagnostic-{position}"
-            try:
-                _network_retry(
-                    scp
-                    + [
-                        f"root@{host}:{remote_file}",
-                        str(temporary_file),
-                    ],
-                    attempts=2,
-                    deadline=retrieval_deadline,
-                )
-            except RunPodControllerError as exc:
-                print(
-                    f"[RUNPOD] diagnostic download warning: {exc}",
-                    file=sys.stderr,
-                )
-                if time.monotonic() >= retrieval_deadline:
-                    break
-                continue
-            local_file.parent.mkdir(parents=True, exist_ok=True)
-            if local_file.exists():
-                local_file = local_root / "work" / "remote-checkpoints" / sha256_file(temporary_file) / local_file.name
-                local_file.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(temporary_file, local_file)
-            print(f"[RUNPOD] diagnostic downloaded {local_file}")
+    if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE):
+        try:
+            _collect_diagnostics(episode, local_root, remote_root, ssh, scp, host, retrieval_deadline)
+        except RunPodControllerError as exc:
+            print(f"[RUNPOD] diagnostic collection warning: {exc}", file=sys.stderr)
 
     handoff = None
     if exit_code == 20:
@@ -1587,14 +2175,24 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
         _download_record({"relative_path": f"translation_input/{handoff}",
                           "size_bytes": size, "sha256": signature},
                          local_root, remote_root, scp, host, budget)
+        if exit_code == 21:
+            import zipfile
+            with zipfile.ZipFile(local_pack) as archive:
+                schema = json.loads(archive.read("schema.json"))
+            if "production_policy" in schema:
+                from .engine.translation_workspace import prepare_id_translation_workspaces
+                prepare_id_translation_workspaces(local_pack, local_root / "translation_input/id-workers")
         print(f"[HANDOFF] downloaded {local_pack}")
-    if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, WAIT_MP4_SAMPLE):
+    if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE):
         raise RunPodControllerError(f"remote pipeline failed with exit code {exit_code}")
 
 
 def _run_remote_session(episode, source_url, *, values, commit, budget, pod, resume_only=False):
     name = f"Muhtemel Ask {episode}.Bolum"
     local_root = episode_dir(episode)
+    code_fix_path = local_root / "review/code-fix-resume.json"
+    if code_fix_path.is_file():
+        values = dict(values, MAS_CODE_FIX_RESUME=f"/workspace/ma-sub/EPISODES/{name}/review/code-fix-resume.json")
     key = Path(values["MAS_RUNPOD_SSH_KEY"]).resolve()
     cookie = Path(values["MAS_YTDLP_COOKIES"]).resolve() if values.get("MAS_YTDLP_COOKIES") else None
     client = RunPodClient(values["RUNPOD_POD_ID"], values["RUNPOD_API_KEY"])
@@ -1613,8 +2211,11 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
             exit_code = _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
                                             int(budget.check()), budget, resume_only=True)
             with tempfile.TemporaryDirectory(prefix="ma-sub-resume-") as folder:
-                _collect_remote_results(exit_code, episode, local_root,
-                    f"/workspace/ma-sub/EPISODES/{name}", ssh, scp, host, budget, Path(folder))
+                try:
+                    _collect_remote_results(exit_code, episode, local_root,
+                        f"/workspace/ma-sub/EPISODES/{name}", ssh, scp, host, budget, Path(folder))
+                finally:
+                    _record_failed_remote_evidence(exit_code, local_root, source_url, commit)
             return exit_code
 
         with tempfile.TemporaryDirectory(prefix="ma-sub-runpod-") as temporary:
@@ -1661,6 +2262,13 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
             )
 
             remote_root = f"/workspace/ma-sub/EPISODES/{name}"
+            _upload_episode_file_verified(local_root / 'work/controller_budget.json',
+                f'{remote_root}/work/controller_budget.json', ssh=ssh, scp=scp, host=host,
+                budget=budget, reuse_verified=True)
+            for part_file in _part_resume_files(local_root, episode):
+                relative = part_file.relative_to(local_root).as_posix()
+                _upload_episode_file_verified(part_file, f'{remote_root}/{relative}',
+                    ssh=ssh, scp=scp, host=host, budget=budget, reuse_verified=True)
             for filename in ("source.url", "official-source.json"):
                 _upload_episode_file_verified(local_root / "source" / filename,
                     f"{remote_root}/source/{filename}", ssh=ssh, scp=scp, host=host, budget=budget, immutable=True)
@@ -1686,10 +2294,14 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                     destination = f"{remote_root}/translation_output/{filename}"
                     receipt = _upload_episode_file_verified(
                         local_return, destination, ssh=ssh, scp=scp, host=host,
-                        budget=budget,
+                        budget=budget, reuse_verified=True,
                     )
                     print(f"[RUNPOD] return upload verified: {filename}; "
                           f"bytes={receipt['bytes']} sha256={receipt['sha256']}")
+                    workspace_receipt = Path(str(local_return) + ".workspace.json")
+                    if workspace_receipt.is_file():
+                        _upload_episode_file_verified(workspace_receipt, destination + ".workspace.json",
+                                                     ssh=ssh, scp=scp, host=host, budget=budget, reuse_verified=True)
 
             override_receipt = _upload_audio_review_overrides(
                 local_root,
@@ -1711,6 +2323,17 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
             if approval.is_file():
                 _upload_episode_file_verified(approval, f"{remote_root}/review/{approval.name}",
                                                ssh=ssh, scp=scp, host=host, budget=budget)
+            if code_fix_path.is_file():
+                from .retry_authorization import validate_code_fix_resume
+                validate_code_fix_resume(local_root, episode, commit, code_fix_path)
+                permit = json.loads(code_fix_path.read_text(encoding="utf-8"))["data"]
+                relatives = {record["relative_path"] for record in permit["diagnostics"]}
+                relatives.update(record["relative_path"] for record in permit["predecessors"])
+                relatives.update({permit["fixture_result"]["relative_path"], "work/controller_budget.json",
+                                  "work/remote-failure-invariant.json", "review/code-fix-resume.json"})
+                for relative in sorted(relatives):
+                    _upload_episode_file_verified(safe_relative(local_root, relative), f"{remote_root}/{relative}",
+                                                 ssh=ssh, scp=scp, host=host, budget=budget, reuse_verified=True)
             if override_receipt is not None:
                 print(
                     "[RUNPOD] audio review overrides upload verified: "
@@ -1735,7 +2358,10 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                 raise BudgetExceeded("less than one second remains in episode runtime budget")
             exit_code = _monitor_remote_job(ssh, scp, host, episode, commit, local_root,
                                             source_url, runtime_seconds, budget)
-            _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, scp, host, budget, temporary)
+            try:
+                _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, scp, host, budget, temporary)
+            finally:
+                _record_failed_remote_evidence(exit_code, local_root, source_url, commit)
     finally:
         if endpoint:
             client.budget = None

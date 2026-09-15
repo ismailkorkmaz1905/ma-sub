@@ -18,7 +18,7 @@ jobs:
       - name: Install CPU test dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core
           pip install -r requirements-ci.lock
           pip install --no-deps -e .
       - name: Verify and extract exact reviewed implementation
@@ -40,6 +40,7 @@ jobs:
                   target.write_bytes(archive.extractfile(member).read())
           PY
           python .delivery-stage/apply.py
+          python .delivery-stage/fixup.py
       - name: Test with networking and GPUs disabled
         env:
           CUDA_VISIBLE_DEVICES: '-1'

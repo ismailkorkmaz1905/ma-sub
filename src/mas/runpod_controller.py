@@ -1243,7 +1243,7 @@ def _resume_partial_delivery(local_root, episode):
     if complete_parts(local_root, episode, total_timeout=budget.check()) is None:
         raise RunPodControllerError('complete-parts inventory changed')
     _drain_notifications(local_root)
-    print('[COMPLETE_PARTS] every planned part has verified Drive byte/SHA readback; no single full-file claim')
+    print('[DELIVERY] planned outputs have verified Drive byte/SHA readback')
     return 0
 
 
@@ -2084,7 +2084,7 @@ def _collect_partial_results(exit_code, episode, local_root, remote_root, ssh, s
         if exit_code == WAIT_PART_RETURN:
             if manifest.get('format') != 'mas-partial-handoff-1' or manifest.get('kind') not in {'tr', 'id'}:
                 raise RunPodControllerError('invalid partial handoff transfer')
-        elif manifest.get('mode') != 'strict-partial-subtitles':
+        elif manifest.get('mode') not in {'strict-partial-subtitles', 'delivery-first-subtitles'}:
             raise RunPodControllerError('invalid partial subtitle export')
         records = manifest.get('files', [])
         relatives = [item['relative_path'] for item in records]

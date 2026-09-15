@@ -115,6 +115,11 @@ def validate_partial_handoff(root, episode, part_id=None):
 
 def run_progressive_worker(root, episode, source_video, audio_path, captions_path=None, *, total_timeout,
                            config_dir, series, names, religious, resume_scope=None):
+    from .delivery_first import enabled, run_worker
+    if enabled(episode) and resume_scope is None:
+        return run_worker(root, episode, source_video, audio_path, captions_path,
+                          total_timeout=total_timeout, config_dir=config_dir,
+                          series=series, names=names, religious=religious)
     from . import pipeline
     from .delivery import NEXT_PART, READY_FOR_PARTIAL_ENCODE, WAIT_PART_RETURN
     from .engine.part_audio import prepare_episode_parts, extract_part_audio

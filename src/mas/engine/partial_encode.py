@@ -90,7 +90,8 @@ def burn_partial_indonesian_mp4(root, episode, part_id, *, total_timeout, target
         command = ['ffmpeg', '-hide_banner', '-nostdin', '-n', '-accurate_seek', '-seek_timestamp', '0',
             '-ss', f'{start:.9f}', '-i', str(source.resolve()), '-t', f'{duration:.9f}',
             '-map', '0:v:0', '-map', '0:a:0', '-sn', '-dn',
-            '-vf', "subtitles=id.srt:force_style='" + burn.SUBTITLE_STYLE + "'",
+            '-vf', ("subtitles=id.srt:force_style='" + burn.SUBTITLE_STYLE + "'"
+                    if subtitles.read_text(encoding='utf-8').strip() else 'null'),
             '-c:v', 'h264_qsv', *settings['encoder_options'],
             '-b:v', str(settings['planned_video_bitrate_bps']), '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-metadata:s:a:0', 'language=tur',
@@ -111,7 +112,7 @@ def burn_partial_indonesian_mp4(root, episode, part_id, *, total_timeout, target
         if validate_partial_export(root, episode, part_id, total_timeout=remaining()) != (export, report):
             raise ValueError('Partial subtitle export changed during encoding')
         remaining()
-        receipt = {'format': 'mas-partial-burned-id-mp4-1', 'mode': 'strict-partial',
+        receipt = {'format': 'mas-partial-burned-id-mp4-1', 'mode': report['mode'],
             'status': 'VERIFIED_PARTIAL_ENCODING', 'full_episode_complete': False,
             'episode': episode, 'part_id': part_id, 'identity': identity,
             'source_range_seconds': [start, start + duration], 'duration_seconds': float(encoded_probe['format']['duration']),
@@ -142,7 +143,7 @@ def validate_partial_encoding(root, episode, part_id, *, total_timeout=300):
     identity = receipt.get('identity', {})
     settings = identity.get('settings', {})
     unsigned_settings = {key: value for key, value in settings.items() if key != 'identity_sha256'}
-    if (receipt.get('format') != 'mas-partial-burned-id-mp4-1' or receipt.get('mode') != 'strict-partial'
+    if (receipt.get('format') != 'mas-partial-burned-id-mp4-1' or receipt.get('mode') != report['mode']
             or receipt.get('status') != 'VERIFIED_PARTIAL_ENCODING' or receipt.get('episode') != episode
             or receipt.get('part_id') != part_id or receipt.get('full_episode_complete') is not False
             or identity.get('scope') != report['scope'] or identity.get('episode') != episode

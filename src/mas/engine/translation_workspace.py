@@ -223,6 +223,9 @@ def _review_state(records, accepted, scope, policy, reviews):
 
 def collect_id_translation_workspaces(pack_path, workspace_path, worker_returns, *, reviews=(), out_zip=None):
     schema, manifest, records, freeze = _pack(pack_path)
+    if schema.get('publication_mode') == 'delivery-first-v1':
+        from ..delivery_first import collect_workspace
+        return collect_workspace(pack_path, workspace_path, worker_returns, reviews=reviews, out_zip=out_zip)
     policy = schema["production_policy"]
     envelope = read_json(workspace_path)
     workspace = envelope.get("payload")
@@ -300,6 +303,10 @@ def collect_id_translation_workspaces(pack_path, workspace_path, worker_returns,
 
 def validate_id_workspace_output(pack_path, translated_zip, *, receipt_path=None):
     schema, manifest, records, freeze = _pack(pack_path)
+    if schema.get('publication_mode') == 'delivery-first-v1':
+        from ..delivery_first import read_translations
+        _, warnings = read_translations(schema, translated_zip)
+        return {'status': 'DELIVERY_RETURN_VALIDATED', 'quality_status': 'NOT_STRICT', 'warnings': warnings}
     result = read_json(receipt_path or Path(str(translated_zip) + ".workspace.json"))
     payload = copy.deepcopy(result)
     claimed = payload.pop("result_sha256", None)

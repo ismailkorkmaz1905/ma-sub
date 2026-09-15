@@ -1,3 +1,4 @@
+"""Retained strict EP13 behavior; EP14 uses tests/engine/test_delivery_first.py."""
 import copy
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +21,7 @@ def worker(tmp_path, monkeypatch):
     regions = [{"vad_region_index": index, "start_ms": start, "end_ms": end, "source": "silero_vad"}
                for index, (start, end) in enumerate([(1000, 2500), (3600000, 3601000),
                                                     (3603000, 3605000), (7197000, 7199000)], 1)]
-    plan = build_part_plan(episode=14, source=source, audio=audio,
+    plan = build_part_plan(episode=13, source=source, audio=audio,
         vad={"independent_vad": True, "audio_sha256": audio["sha256"], "sample_count": audio["sample_count"],
              "config": {"policy": "canonical"}, "model": {"name": "silero"},
              "producer_sha256": "3" * 64, "regions": regions})
@@ -138,7 +139,7 @@ def worker(tmp_path, monkeypatch):
     monkeypatch.setattr(partial_finalize, "finalize_partial_episode", finalize)
     monkeypatch.setattr(partial_finalize, "validate_partial_export", lambda root, episode, part_id, **kwargs:
                         (read_json(tmp_path / "parts" / part_id / "work/partial-export.json"), {"full_episode_complete": False}))
-    options = {"root": tmp_path, "episode": 14, "source_video": tmp_path / "source/movie.mp4",
+    options = {"root": tmp_path, "episode": 13, "source_video": tmp_path / "source/movie.mp4",
                "audio_path": tmp_path / "prepare/audio.flac", "total_timeout": 30,
                "config_dir": tmp_path / "config", "series": {"whisper_model": "large-v3", "batch_size": 250},
                "names": {"canonical_names": []}, "religious": {"terms": []}}
@@ -147,16 +148,16 @@ def worker(tmp_path, monkeypatch):
 
 def add_return(worker, kind, part_id="part-001"):
     suffix = "_TR_TEXT_CORRECTED.zip" if kind == "tr" else "_ID_TRANSLATED.zip"
-    worker.put(worker.root / "parts" / part_id / "translation_output" / ("Muhtemel Ask 14.Bolum" + suffix))
+    worker.put(worker.root / "parts" / part_id / "translation_output" / ("Muhtemel Ask 13.Bolum" + suffix))
 
 
 def test_first_part_reaches_export_before_any_tail_asr(worker):
     assert progressive.run_progressive_worker(**worker.options) == WAIT_PART_RETURN
-    tr_handoff = progressive.validate_partial_handoff(worker.root, 14)
+    tr_handoff = progressive.validate_partial_handoff(worker.root, 13)
     assert tr_handoff["kind"] == "tr" and tr_handoff["part_id"] == "part-001"
     add_return(worker, "tr")
     assert progressive.run_progressive_worker(**worker.options) == WAIT_PART_RETURN
-    id_handoff = progressive.validate_partial_handoff(worker.root, 14)
+    id_handoff = progressive.validate_partial_handoff(worker.root, 13)
     assert id_handoff["kind"] == "id"
     assert sum("worker-" in item["relative_path"] for item in id_handoff["files"]) == 3
     schema_path = worker.root / "parts/part-001/prepare/aligned_tr_schema_v2.json"
@@ -195,27 +196,27 @@ def test_all_controller_acknowledgements_request_external_completion_not_full_pa
 def test_handoff_validation_requires_no_parent_media(worker):
     assert not worker.options["source_video"].exists() and not worker.options["audio_path"].exists()
     progressive.run_progressive_worker(**worker.options)
-    data = progressive.validate_partial_handoff(worker.root, 14)
+    data = progressive.validate_partial_handoff(worker.root, 13)
     assert data["plan_sha256"] == sha256_file(worker.root / "work/part-plan.json")
 
 
 def test_changed_pack_or_foreign_return_blocks_handoff(worker):
     progressive.run_progressive_worker(**worker.options)
-    handoff = progressive.validate_partial_handoff(worker.root, 14)
+    handoff = progressive.validate_partial_handoff(worker.root, 13)
     worker.put(worker.root / handoff["pack"]["relative_path"], b"changed")
     with pytest.raises(RuntimeError, match="pack or return ownership"):
-        progressive.validate_partial_handoff(worker.root, 14)
+        progressive.validate_partial_handoff(worker.root, 13)
 
 
 def test_cross_part_return_is_rejected_even_when_all_manifest_hashes_recomputed(worker):
     progressive.run_progressive_worker(**worker.options)
-    data = progressive.validate_partial_handoff(worker.root, 14)
+    data = progressive.validate_partial_handoff(worker.root, 13)
     data["expected_return"] = data["expected_return"].replace("part-001", "part-002")
     for path in (worker.root / "work/partial-handoff.json", worker.root / "parts/part-001/work/partial-handoff.json",
                  worker.root / "parts/part-001/work/partial-handoff-tr.json"):
         progressive._bound_json(path, data)
     with pytest.raises(RuntimeError, match="pack or return ownership"):
-        progressive.validate_partial_handoff(worker.root, 14)
+        progressive.validate_partial_handoff(worker.root, 13)
 
 
 def test_stage_budget_failure_does_not_start_next_stage(worker, monkeypatch):
@@ -232,7 +233,7 @@ def test_stage_budget_failure_does_not_start_next_stage(worker, monkeypatch):
     with pytest.raises(RuntimeError, match="episode budget expired"):
         progressive.run_progressive_worker(**worker.options)
     assert worker.calls == [("extract", "part-001"), ("asr", "part-001")]
-    assert not (worker.root / "parts/part-001/translation_input/Muhtemel Ask 14.Bolum_TR_CORRECTION_PACK.zip").exists()
+    assert not (worker.root / "parts/part-001/translation_input/Muhtemel Ask 13.Bolum_TR_CORRECTION_PACK.zip").exists()
 
 
 def test_rejected_quality_never_finalizes_or_starts_tail(worker, monkeypatch):
@@ -258,7 +259,7 @@ def test_unchanged_wait_has_one_central_action_per_part_kind_pack(worker, monkey
     assert len(first) == 1
     envelope = read_json(first[0])
     body = envelope["data"]
-    handoff = progressive.validate_partial_handoff(worker.root, 14)
+    handoff = progressive.validate_partial_handoff(worker.root, 13)
     assert body["kind"] == "action" and body["status"] == "queued"
     assert handoff["pack"]["sha256"] in body["event"] and "part-001 TR" in body["event"]
     body["status"] = "sent"
@@ -302,8 +303,8 @@ def test_scoped_retry_preserves_predecessors_and_passes_only_core_alignment_scop
     child = worker.root / "parts/part-001"
     predecessor_paths = [child / relative for relative in (
         "prepare/raw_asr_v2.json", "prepare/audio_review_v2.json",
-        "translation_input/Muhtemel Ask 14.Bolum_TR_CORRECTION_PACK.zip",
-        "translation_output/Muhtemel Ask 14.Bolum_TR_CORRECTED.zip")]
+        "translation_input/Muhtemel Ask 13.Bolum_TR_CORRECTION_PACK.zip",
+        "translation_output/Muhtemel Ask 13.Bolum_TR_CORRECTED.zip")]
     frozen = {path: path.read_bytes() for path in predecessor_paths}
     core = {"stage": "forced_alignment", "target_uids": ["b"], "context_uids": ["a", "b", "c"],
             **{key: "a" * 64 for key in ("audio_sha256", "model_state_sha256", "raw_alignment_binding", "source_sha256")}}

@@ -261,6 +261,7 @@ def extract_subtitle_tracks(
             "error",
             "-nostdin",
             "-y",
+            "-copyts",
             "-i",
             str(source),
             "-map",

@@ -314,6 +314,10 @@ def validate_partial_export(root, episode, part_id=None, *, total_timeout=300):
     current = (root / 'work/partial-export.json' if part_id is None
                else safe_relative(root, f'parts/{part_id}/work/partial-export.json'))
     export = read_json(current)
+    from ..delivery_first import EXPORT_MODE, validate_export
+    if export.get('mode') == EXPORT_MODE:
+        return validate_export(root, episode, part_id or export.get('part_id'), export,
+                               total_timeout=remaining())
     _verify_partial_export_auth(export)
     remaining()
     if (export.get('episode') != episode or export.get('mode') != 'strict-partial-subtitles'

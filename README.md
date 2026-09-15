@@ -1,5 +1,17 @@
 # Muhtemel Ask Subtitles
 
+## Delivery-first policy, 15 September 2026
+
+For Episode 14 onward the default first-hour/local-QSV route prioritizes delivery.
+See [the delivery-first contract](docs/DELIVERY_FIRST_2026-09-15.md). Bounded CTC
+failures retain source cue timing, or omit only the unusable cue with a report.
+Quality warnings must not become strict PASS, but they do not block this separate
+delivery mode. Source/authentication/identity errors remain hard failures. Publish
+the first approximately 60-minute burned-in MP4 first, then one full-episode MP4.
+A real Indonesian return is required; the delivery path uses authenticated primary
+Turkish ASR without requiring a separate manual Turkish correction/review handoff.
+No paid run is authorized merely by editing or testing this code.
+
 Current outcome and next-run checklist: [simple Episode 13 handoff](docs/SON_DURUM_VE_BOLUM_13.md). Main delivery now targets H.264/AAC MP4 with Indonesian subtitles burned into the image. Episode 12 MP4 is complete and delivered with two full remote byte/SHA-256 readbacks. Perceptual subtitle acceptance remains REVIEW_REQUIRED. Historical episode evidence moved outside the repository as described in that handoff.
 
 Muhtemel Ask Subtitles is the single production pipeline for turning one episode source into strict Turkish and Indonesian subtitle deliverables.

@@ -6,6 +6,19 @@ The system downloads one episode source, extracts audio, performs GPU-only Turki
 
 Start by reading `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`, `docs/ARCHITECTURE_DECISIONS.md`, and `docs/ASTRA_HANDOFF.md`. Use `docs/ASTRA_REVIEW_PROMPT.md` only for the independent Astra review.
 
+
+## Delivery-first policy, 15 September 2026
+
+For Episode 14 onward the default first-hour/local-QSV route prioritizes delivery.
+See [the delivery-first contract](docs/DELIVERY_FIRST_2026-09-15.md). Bounded CTC
+failures retain source cue timing, or omit only the unusable cue with a report.
+Quality warnings must not become strict PASS, but they do not block this separate
+delivery mode. Source/authentication/identity errors remain hard failures. Publish
+the first approximately 60-minute burned-in MP4 first, then one full-episode MP4.
+A real Indonesian return is required; the delivery path uses authenticated primary
+Turkish ASR without requiring a separate manual Turkish correction/review handoff.
+No paid run is authorized merely by editing or testing this code.
+
 ## Repository boundaries
 
 - Use `main` as the sole maintained production branch. PR #1 is merged and the obsolete feature branch has been deleted.

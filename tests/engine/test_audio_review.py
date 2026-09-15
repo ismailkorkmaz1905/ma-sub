@@ -50,13 +50,19 @@ def _wav(duration_ms: int = 1_000) -> bytes:
 
 
 class FakeDecoder:
-    def __init__(self, results: list[Mapping[str, Any]]) -> None:
+    def __init__(
+        self,
+        results: list[Mapping[str, Any]],
+        *,
+        identity: str = "fake-decoder-v1",
+    ) -> None:
         self.results = list(results)
         self.call_count = 0
+        self.identity = identity
 
     @property
     def provenance(self) -> Mapping[str, Any]:
-        return {"engine": "fake", "call_count": self.call_count}
+        return {"engine": "fake", "identity": self.identity}
 
     def decode(
         self, audio_path: Path, *, initial_prompt: str | None = None
@@ -1052,6 +1058,122 @@ class AudioReviewV2Tests(unittest.TestCase):
             )
             self.assertEqual(report["status"], "PASS")
             self.assertEqual(resumed_decoder.call_count, 0)
+
+    def test_changed_injected_decoder_identity_misses_recovery_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(
+                Path(directory),
+                candidate_reason="provisional_word_gap_requires_audio_review",
+                candidate_risk_flags=(
+                    "provisional_word_gap_requires_audio_review",
+                ),
+            )
+            with self.assertRaises(AudioReviewV2Error):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    decoder=FakeDecoder(
+                        [_decoded(), _decoded(), _decoded()], identity="decoder-a"
+                    ),
+                    progress=None,
+                )
+
+            changed = FakeDecoder([_decoded("Merhaba")], identity="decoder-b")
+            report = resolve_tr_audio_reviews_v2(
+                *paths, decoder=changed, progress=None
+            )
+
+            self.assertEqual(report["status"], "PASS")
+            self.assertEqual(changed.call_count, 1)
+
+    def test_identical_injected_decoder_identity_reuses_without_decode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory), orphan=True)
+            with self.assertRaises(AudioReviewV2Error):
+                resolve_tr_audio_reviews_v2(
+                    *paths,
+                    decoder=FakeDecoder(
+                        [_decoded(), _decoded(), _decoded()], identity="decoder-a"
+                    ),
+                    progress=None,
+                )
+            resumed = FakeDecoder([], identity="decoder-a")
+
+            report = resolve_tr_audio_reviews_v2(
+                *paths,
+                decoder=resumed,
+                manual_overrides={
+                    "candidate-1": {
+                        "disposition": "confirmed_dialogue",
+                        "tr_corrected": "Merhaba",
+                        "note": "Exact WAV dinlendi; konuşma doğrulandı.",
+                    }
+                },
+                progress=None,
+            )
+
+            self.assertEqual(report["status"], "PASS")
+            self.assertEqual(resumed.call_count, 0)
+
+    def test_production_model_or_runtime_change_rejects_completed_cache(self) -> None:
+        for changed_value in ("model", "runtime"):
+            with (
+                self.subTest(changed_value=changed_value),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                paths = _make_files(Path(directory))
+                decoder = FakeDecoder([_decoded("Merhaba")])
+                with (
+                    patch(
+                        "mas.engine.audio_review.primary_checkpoint.resolve_model",
+                        return_value=Path(directory) / "model",
+                    ),
+                    patch(
+                        "mas.engine.audio_review.primary_checkpoint.model_identity",
+                        return_value={"sha256": "model-a"},
+                    ) as model_identity,
+                    patch(
+                        "mas.engine.audio_review.primary_checkpoint.producer_identity",
+                        return_value={"sha256": "runtime-a"},
+                    ) as producer_identity,
+                    patch(
+                        "mas.engine.audio_review._FasterWhisperReviewDecoder",
+                        return_value=decoder,
+                    ) as decoder_factory,
+                ):
+                    resolve_tr_audio_reviews_v2(*paths, progress=None)
+                    self.assertEqual(decoder.call_count, 1)
+                    decoder_factory.reset_mock()
+                    cached = resolve_tr_audio_reviews_v2(*paths, progress=None)
+                    self.assertEqual(cached["status"], "PASS")
+                    decoder_factory.assert_not_called()
+                    if changed_value == "model":
+                        model_identity.return_value = {"sha256": "model-b"}
+                    else:
+                        producer_identity.return_value = {"sha256": "runtime-b"}
+                    with self.assertRaisesRegex(
+                        AudioReviewV2Error, "belongs to different inputs"
+                    ):
+                        resolve_tr_audio_reviews_v2(*paths, progress=None)
+                    decoder_factory.assert_not_called()
+
+    def test_production_decoder_identity_unavailable_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = _make_files(Path(directory))
+            with (
+                patch(
+                    "mas.engine.audio_review.primary_checkpoint.resolve_model",
+                    side_effect=RuntimeError("identity unavailable"),
+                ),
+                patch(
+                    "mas.engine.audio_review._FasterWhisperReviewDecoder"
+                ) as decoder_factory,
+            ):
+                with self.assertRaisesRegex(
+                    AudioReviewV2Error,
+                    "Production audio-review decoder identity is unavailable",
+                ):
+                    resolve_tr_audio_reviews_v2(*paths, progress=None)
+                decoder_factory.assert_not_called()
 
     def test_completed_review_hydrates_without_recovery_or_decoder(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

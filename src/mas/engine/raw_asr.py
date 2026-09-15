@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -39,6 +40,7 @@ from .speech_coverage import (
     analyze_speech_coverage,
     require_v2_beta_speech_coverage_config,
 )
+from ..reliability import IntegrityError, UnitJournal
 from . import primary_checkpoint
 from .tr_correction import (
     MAX_ASR_HALLUCINATION_AUDIO_FILES,
@@ -81,6 +83,9 @@ V2_BETA_ORPHAN_CAPTION_MIN_SHARED_TOKENS = 2
 V2_BETA_ORPHAN_CAPTION_MIN_CHARACTER_BIGRAM_DICE = 0.50
 RAW_ASR_V2_RECOVERY_FORMAT = "raw-asr-v2-recovery-1"
 RAW_ASR_V2_RECOVERY_FILENAME = "raw_asr_v2.recovery.json"
+RAW_ASR_V2_UNIT_JOURNAL_FORMAT = "raw-asr-v2-unit-journal-1"
+RAW_ASR_AUTH_KEY_ENV = "MAS_RAW_ASR_AUTH_KEY"
+RAW_ASR_AUTH_DOMAIN = b"ma-sub/raw-asr-producer-auth/v1\0"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -93,7 +98,7 @@ class RawASRV2Config:
     best_of: int = 5
     compute_type_gpu: str = "float16"
     compute_type_cpu: str = "int8"
-    allow_cpu_fallback: bool = True
+    allow_cpu_fallback: bool = False
     condition_on_previous_text: bool = False
     require_independent_vad: bool = True
     vad_threshold: float = 0.50
@@ -2408,6 +2413,13 @@ def validate_persisted_raw_asr_v2(
         trusted = json.loads(payload)
     except (TypeError, ValueError) as exc:
         raise TranscriptionError(f"Raw ASR V2 artifact is not strict JSON: {exc}") from exc
+    if require_independent_vad:
+        auth_key = _raw_asr_auth_key(RawASRV2Config())
+        if auth_key is None:
+            raise TranscriptionError(
+                "Production raw ASR artifact authentication key is unavailable"
+            )
+        _verify_raw_asr_artifact_auth(trusted, auth_key)
     errors = _validate_persisted_raw_asr_v2(
         trusted,
         input_sha256=expected_input_sha256,
@@ -2516,6 +2528,470 @@ def load_valid_raw_asr_v2(
         return None
 
 
+def _unit_result_sha256(result: Any) -> str:
+    return sha256_json(
+        json.loads(
+            json.dumps(
+                result,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    )
+
+
+def _raw_asr_auth_key(settings: RawASRV2Config) -> bytes | None:
+    value = os.getenv(RAW_ASR_AUTH_KEY_ENV)
+    if not value:
+        if settings.allow_cpu_fallback or not settings.require_independent_vad:
+            return None
+        raise TranscriptionError(
+            f"{RAW_ASR_AUTH_KEY_ENV} is required for production raw ASR"
+        )
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise TranscriptionError(
+            f"{RAW_ASR_AUTH_KEY_ENV} must be a strong 256-bit lowercase hex key"
+        )
+    return bytes.fromhex(value)
+
+
+def _raw_asr_auth_tag(key: bytes, purpose: str, body: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(body),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(
+        key,
+        RAW_ASR_AUTH_DOMAIN + purpose.encode("ascii") + b"\0" + encoded,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _sign_raw_asr_artifact(data: Mapping[str, Any], key: bytes) -> dict[str, Any]:
+    signed = dict(data)
+    signed.pop("raw_asr_auth_tag", None)
+    signed["raw_asr_auth_tag"] = _raw_asr_auth_tag(
+        key, "completed-artifact", signed
+    )
+    return signed
+
+
+def _verify_raw_asr_artifact_auth(data: Mapping[str, Any], key: bytes) -> None:
+    tag = data.get("raw_asr_auth_tag")
+    body = dict(data)
+    body.pop("raw_asr_auth_tag", None)
+    expected = _raw_asr_auth_tag(key, "completed-artifact", body)
+    if not isinstance(tag, str) or not hmac.compare_digest(tag, expected):
+        raise TranscriptionError(
+            "Completed raw ASR artifact authentication failed for the current key"
+        )
+
+
+def _signed_unit_result(
+    key: bytes,
+    *,
+    purpose: str,
+    binding: Mapping[str, Any],
+    uid: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    evidence = json.loads(
+        json.dumps(dict(result), ensure_ascii=False, allow_nan=False)
+    )
+    body = {
+        "binding_sha256": sha256_json(dict(binding)),
+        "uid": uid,
+        "result_sha256": _unit_result_sha256(evidence),
+    }
+    return {
+        "evidence": evidence,
+        "auth_tag": _raw_asr_auth_tag(key, purpose, body),
+    }
+
+
+def _verify_signed_unit_result(
+    saved: Any,
+    key: bytes,
+    *,
+    purpose: str,
+    binding: Mapping[str, Any],
+    uid: str,
+) -> dict[str, Any]:
+    if not isinstance(saved, Mapping) or not isinstance(saved.get("evidence"), Mapping):
+        raise TranscriptionError(f"{purpose} producer receipt is unsigned")
+    evidence = dict(saved["evidence"])
+    expected = _signed_unit_result(
+        key,
+        purpose=purpose,
+        binding=binding,
+        uid=uid,
+        result=evidence,
+    )["auth_tag"]
+    tag = saved.get("auth_tag")
+    if not isinstance(tag, str) or not hmac.compare_digest(tag, expected):
+        raise TranscriptionError(f"{purpose} producer receipt authentication failed")
+    return evidence
+
+
+def _primary_auth_record_path(destination: Path, identity: Mapping[str, Any]) -> Path:
+    return destination / "raw_asr_auth" / "primary" / f"{sha256_json(identity)}.json"
+
+
+def _primary_receipt_record(
+    destination: Path,
+    checkpoint: Path,
+    identity: Mapping[str, Any],
+    key: bytes,
+    *,
+    create: bool,
+) -> dict[str, Any] | None:
+    receipt_sha256 = sha256_file(checkpoint)
+    auth_body = {
+        "identity_sha256": sha256_json(identity),
+        "receipt_sha256": receipt_sha256,
+    }
+    auth_tag = _raw_asr_auth_tag(key, "primary", auth_body)
+    auth_path = _primary_auth_record_path(destination, identity)
+    if create:
+        atomic_write_json(auth_path, {**auth_body, "auth_tag": auth_tag})
+    elif not auth_path.is_file():
+        return None
+    try:
+        saved = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise TranscriptionError("Primary ASR authentication record is invalid") from exc
+    if saved != {**auth_body, "auth_tag": auth_tag}:
+        raise TranscriptionError("Primary ASR receipt authentication failed")
+    return {
+        "relative_path": checkpoint.relative_to(destination).as_posix(),
+        "sha256": receipt_sha256,
+        "auth_tag": auth_tag,
+    }
+
+
+def _primary_asr_options(
+    settings: RawASRV2Config,
+    prompt: str | None,
+) -> dict[str, Any]:
+    return {
+        "language": settings.language,
+        "task": "transcribe",
+        "beam_size": settings.beam_size,
+        "best_of": settings.best_of,
+        "temperature": 0.0,
+        "condition_on_previous_text": settings.condition_on_previous_text,
+        "initial_prompt": prompt,
+        "word_timestamps": True,
+        "vad_filter": True,
+        "vad_parameters": settings.transcription_config().vad_parameters,
+    }
+
+
+def _raw_asr_producer_identity() -> dict[str, Any]:
+    return primary_checkpoint.producer_identity(
+        (
+            transcribe_raw_audio_v2,
+            _primary_asr_options,
+            consume_coarse_segments,
+            _finite_ms,
+            _optional_finite_number,
+            _extract_vad_regions,
+        )
+    )
+
+
+def _canonical_primary_identity(
+    *,
+    episode: int,
+    audio_sha256: str,
+    settings: RawASRV2Config,
+    prompt: str | None,
+    model_identity: Mapping[str, Any],
+    producer_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    if settings.allow_cpu_fallback:
+        raise TranscriptionError(
+            "Recovery requires the canonical GPU-only raw ASR policy"
+        )
+    return {
+        "format": "mas-primary-asr-1",
+        "episode": episode,
+        "audio_sha256": audio_sha256,
+        "model": dict(model_identity),
+        "producer": dict(producer_identity),
+        "options": _primary_asr_options(settings, prompt),
+        "device": "cuda",
+        "compute_type": settings.compute_type_gpu,
+        "cpu_threads": max(1, os.cpu_count() or 1),
+        "num_workers": 1,
+    }
+
+
+def _vad_journal_binding(
+    *,
+    audio_sha256: str,
+    primary_receipt_sha256: str,
+    settings: RawASRV2Config,
+    producer: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "format": RAW_ASR_V2_UNIT_JOURNAL_FORMAT,
+        "kind": "independent_vad",
+        "audio_sha256": audio_sha256,
+        "primary_receipt_sha256": primary_receipt_sha256,
+        "producer": dict(producer),
+        "settings": {
+            "threshold": settings.vad_threshold,
+            "min_speech_duration_ms": settings.vad_min_speech_ms,
+            "min_silence_duration_ms": settings.vad_min_silence_ms,
+            "speech_pad_ms": settings.audit_vad_speech_pad_ms,
+            "require_independent_vad": settings.require_independent_vad,
+        },
+    }
+
+
+def _rescue_journal_binding(
+    *,
+    audio_sha256: str,
+    primary_receipt_sha256: str,
+    model_identity: Mapping[str, Any],
+    producer: Mapping[str, Any],
+    settings: RawASRV2Config,
+    prompt: str | None,
+    rescue_batches: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "format": RAW_ASR_V2_UNIT_JOURNAL_FORMAT,
+        "kind": "rescue_asr",
+        "audio_sha256": audio_sha256,
+        "primary_receipt_sha256": primary_receipt_sha256,
+        "model": dict(model_identity),
+        "producer": dict(producer),
+        "settings": {
+            "language": settings.language,
+            "beam_size": settings.rescue_beam_size,
+            "best_of": max(settings.best_of, settings.rescue_beam_size),
+            "temperature": 0.0,
+            "condition_on_previous_text": False,
+            "initial_prompt": prompt,
+            "word_timestamps": True,
+            "vad_filter": False,
+        },
+        "canonical_rescue_plan_sha256": sha256_json(list(rescue_batches)),
+    }
+
+
+def _rescue_batch_uid(index: int, span: Mapping[str, Any]) -> str:
+    return f"rescue-{index:03d}-{sha256_json(dict(span))}"
+
+
+def _load_primary_receipt_for_recovery(
+    destination: Path,
+    record: Mapping[str, Any],
+    *,
+    expected_identity: Mapping[str, Any],
+    auth_key: bytes,
+) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    relative_path = record.get("relative_path")
+    expected_sha256 = record.get("sha256")
+    if not isinstance(relative_path, str) or not isinstance(expected_sha256, str):
+        raise TranscriptionError("Recovery primary producer receipt is malformed")
+    receipt_path = (destination / relative_path).resolve()
+    primary_root = (destination / "primary_asr").resolve()
+    expected_path = primary_root / f"{sha256_json(expected_identity)}.json"
+    if (
+        receipt_path != expected_path
+        or receipt_path.parent != primary_root
+        or receipt_path.is_symlink()
+    ):
+        raise TranscriptionError("Recovery primary producer receipt path is unsafe")
+    if not receipt_path.is_file() or sha256_file(receipt_path) != expected_sha256:
+        raise TranscriptionError("Recovery primary producer receipt hash mismatch")
+    auth_body = {
+        "identity_sha256": sha256_json(expected_identity),
+        "receipt_sha256": expected_sha256,
+    }
+    expected_auth_tag = _raw_asr_auth_tag(auth_key, "primary", auth_body)
+    if not isinstance(record.get("auth_tag"), str) or not hmac.compare_digest(
+        record["auth_tag"], expected_auth_tag
+    ):
+        raise TranscriptionError("Recovery primary producer receipt authentication failed")
+    auth_path = _primary_auth_record_path(destination, expected_identity)
+    try:
+        saved_auth = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise TranscriptionError(
+            "Recovery primary authentication record is missing or invalid"
+        ) from exc
+    if saved_auth != {**auth_body, "auth_tag": expected_auth_tag}:
+        raise TranscriptionError("Recovery primary authentication record mismatch")
+    try:
+        envelope = json.loads(receipt_path.read_text(encoding="utf-8"))
+        body = envelope["data"]
+        identity = body["identity"]
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise TranscriptionError("Recovery primary producer receipt is invalid") from exc
+    if (
+        not isinstance(body, Mapping)
+        or not isinstance(identity, Mapping)
+        or identity != dict(expected_identity)
+    ):
+        raise TranscriptionError("Recovery primary producer receipt identity mismatch")
+    loaded = primary_checkpoint.load_primary(receipt_path, expected_identity)
+    if loaded is None:
+        raise TranscriptionError("Recovery primary producer receipt is stale")
+    return loaded, identity
+
+
+def _validate_recovery_producer_receipts(
+    destination: Path,
+    checkpoint: Mapping[str, Any],
+    *,
+    audio_sha256: str,
+    episode: int,
+    settings: RawASRV2Config,
+    canonical_names: Sequence[str],
+    religious_terms: Sequence[str],
+    segments: Sequence[Mapping[str, Any]],
+    words: Sequence[Mapping[str, Any]],
+    vad_regions: Sequence[Mapping[str, Any]],
+    rescue_failures: Sequence[Mapping[str, Any]],
+    expected_primary_identity: Mapping[str, Any],
+    auth_key: bytes,
+) -> None:
+    receipts = checkpoint.get("producer_receipts")
+    if not isinstance(receipts, Mapping):
+        raise TranscriptionError(
+            "Recovery checkpoint lacks immutable producer receipts"
+        )
+    primary_record = receipts.get("primary")
+    if not isinstance(primary_record, Mapping):
+        raise TranscriptionError("Recovery primary producer receipt is missing")
+    primary, identity = _load_primary_receipt_for_recovery(
+        destination,
+        primary_record,
+        expected_identity=expected_primary_identity,
+        auth_key=auth_key,
+    )
+    producer = expected_primary_identity.get("producer")
+    model_identity = expected_primary_identity.get("model")
+    if not isinstance(producer, Mapping) or not isinstance(model_identity, Mapping):
+        raise TranscriptionError("Recovery primary producer identity is incomplete")
+
+    primary_receipt_sha256 = str(primary_record["sha256"])
+    vad_binding = _vad_journal_binding(
+        audio_sha256=audio_sha256,
+        primary_receipt_sha256=primary_receipt_sha256,
+        settings=settings,
+        producer=producer,
+    )
+    try:
+        saved_vad_result = UnitJournal(
+            destination / "raw_asr_units" / "vad", vad_binding
+        ).read("independent-vad")
+    except (IntegrityError, KeyError, TypeError, ValueError) as exc:
+        raise TranscriptionError("Recovery VAD producer receipt is invalid") from exc
+    vad_result = _verify_signed_unit_result(
+        saved_vad_result,
+        auth_key,
+        purpose="vad",
+        binding=vad_binding,
+        uid="independent-vad",
+    )
+    if (
+        receipts.get("vad_result_sha256") != _unit_result_sha256(saved_vad_result)
+        or receipts.get("vad_auth_tag") != saved_vad_result.get("auth_tag")
+        or vad_result.get("vad_regions") != list(vad_regions)
+        or vad_result.get("vad_fallback_reason") != checkpoint.get("vad_fallback_reason")
+        or vad_result.get("independent_vad") != checkpoint.get("independent_vad")
+    ):
+        raise TranscriptionError("Recovery VAD evidence differs from its producer receipt")
+
+    batches = checkpoint.get("rescue_batches")
+    if not isinstance(batches, list):
+        raise TranscriptionError("Recovery canonical rescue plan is missing")
+    rescue_binding = _rescue_journal_binding(
+        audio_sha256=audio_sha256,
+        primary_receipt_sha256=primary_receipt_sha256,
+        model_identity=model_identity,
+        producer=producer,
+        settings=settings,
+        prompt=_prompt_text(canonical_names, religious_terms),
+        rescue_batches=batches,
+    )
+    saved_rescue_hashes = receipts.get("rescue_result_sha256")
+    saved_rescue_tags = receipts.get("rescue_auth_tags")
+    if not isinstance(saved_rescue_hashes, Mapping) or not isinstance(
+        saved_rescue_tags, Mapping
+    ):
+        raise TranscriptionError("Recovery rescue producer receipts are missing")
+    journal = UnitJournal(destination / "raw_asr_units" / "rescue", rescue_binding)
+    receipt_segments: list[dict[str, Any]] = []
+    receipt_words: list[dict[str, Any]] = []
+    receipt_failures: list[dict[str, Any]] = []
+    expected_uids: list[str] = []
+    for index, span in enumerate(batches, start=1):
+        if not isinstance(span, Mapping):
+            raise TranscriptionError("Recovery rescue batch identity is malformed")
+        uid = _rescue_batch_uid(index, span)
+        expected_uids.append(uid)
+        try:
+            saved_result = journal.read(uid)
+        except (IntegrityError, KeyError, TypeError, ValueError) as exc:
+            raise TranscriptionError(
+                f"Recovery rescue producer receipt is invalid: {uid}"
+            ) from exc
+        result = _verify_signed_unit_result(
+            saved_result,
+            auth_key,
+            purpose="rescue",
+            binding=rescue_binding,
+            uid=uid,
+        )
+        if (
+            result.get("target") != dict(span)
+            or saved_rescue_hashes.get(uid) != _unit_result_sha256(saved_result)
+            or saved_rescue_tags.get(uid) != saved_result.get("auth_tag")
+        ):
+            raise TranscriptionError(
+                f"Recovery rescue evidence differs from producer receipt: {uid}"
+            )
+        if result.get("status") == "completed":
+            found_segments = result.get("segments")
+            found_words = result.get("words")
+            if not isinstance(found_segments, list) or not isinstance(found_words, list):
+                raise TranscriptionError(f"Recovery rescue result is malformed: {uid}")
+            receipt_segments.extend(found_segments)
+            receipt_words.extend(found_words)
+        elif result.get("status") == "manual_review_required":
+            failure = result.get("failure")
+            if not isinstance(failure, Mapping):
+                raise TranscriptionError(f"Recovery rescue failure is malformed: {uid}")
+            receipt_failures.append(dict(failure))
+        else:
+            raise TranscriptionError(f"Recovery rescue status is invalid: {uid}")
+    if set(saved_rescue_hashes) != set(expected_uids) or set(
+        saved_rescue_tags
+    ) != set(expected_uids):
+        raise TranscriptionError("Recovery rescue producer receipt inventory mismatch")
+    receipt_segments, receipt_words = merge_rescue_evidence(
+        primary["segments"], primary["words"], receipt_segments, receipt_words
+    )
+    if (
+        receipt_segments != list(segments)
+        or receipt_words != list(words)
+        or receipt_failures != list(rescue_failures)
+    ):
+        raise TranscriptionError(
+            "Recovery ASR evidence differs from immutable producer receipts"
+        )
+
+
 def _write_raw_asr_v2_recovery_checkpoint(
     destination: Path,
     *,
@@ -2547,6 +3023,7 @@ def _write_raw_asr_v2_recovery_checkpoint(
     rescue_budget_audit: Mapping[str, Any],
     youtube_captions: Sequence[Mapping[str, Any]],
     speech_hole_records: Sequence[Mapping[str, Any]],
+    producer_receipts: Mapping[str, Any],
 ) -> Path:
     """Persist expensive ASR/VAD evidence before bounded review gates run."""
 
@@ -2590,6 +3067,7 @@ def _write_raw_asr_v2_recovery_checkpoint(
             "rescue_budget_audit": dict(rescue_budget_audit),
             "youtube_captions": list(youtube_captions),
             "speech_hole_records": list(speech_hole_records),
+            "producer_receipts": dict(producer_receipts),
         },
     )
     return checkpoint_path
@@ -2615,6 +3093,11 @@ def recover_raw_asr_v2_from_checkpoint(
         config,
         hallucination_review_utterance_uids,
     )
+    auth_key = _raw_asr_auth_key(settings)
+    if auth_key is None:
+        raise TranscriptionError(
+            "Raw ASR recovery requires authenticated production evidence"
+        )
     source_path = Path(audio_path)
     if not source_path.is_file() or source_path.stat().st_size <= 0:
         raise TranscriptionError(f"Audio input is missing or empty: {source_path}")
@@ -2763,6 +3246,43 @@ def recover_raw_asr_v2_from_checkpoint(
         json.dumps(final_coverage, ensure_ascii=False, allow_nan=False)
     )
     validate_raw_rescue_plan(checkpoint)
+    expected_primary_identity = _canonical_primary_identity(
+        episode=episode,
+        audio_sha256=audio_sha,
+        settings=settings,
+        prompt=_prompt_text(canonical_names, religious_terms),
+        model_identity=primary_checkpoint.model_identity(
+            primary_checkpoint.resolve_model(settings.model_name)
+        ),
+        producer_identity=_raw_asr_producer_identity(),
+    )
+    if (
+        saved_model.get("main_pass_device") != expected_primary_identity["device"]
+        or saved_model.get("main_pass_compute_type")
+        != expected_primary_identity["compute_type"]
+        or saved_model.get("final_runtime_device") != "cuda"
+        or saved_model.get("final_runtime_compute_type") != settings.compute_type_gpu
+        or saved_model.get("runtime_fallback_reason") not in (None, "")
+        or saved_model.get("language") != settings.language
+    ):
+        raise TranscriptionError(
+            "Recovery runtime does not match the canonical GPU-only producer identity"
+        )
+    _validate_recovery_producer_receipts(
+        destination,
+        checkpoint,
+        audio_sha256=audio_sha,
+        episode=episode,
+        settings=settings,
+        canonical_names=canonical_names,
+        religious_terms=religious_terms,
+        segments=segments,
+        words=words,
+        vad_regions=vad_regions,
+        rescue_failures=rescue_failures,
+        expected_primary_identity=expected_primary_identity,
+        auth_key=auth_key,
+    )
     for coverage in (initial_coverage, final_coverage):
         try:
             require_v2_beta_speech_coverage_config(
@@ -2951,6 +3471,7 @@ def recover_raw_asr_v2_from_checkpoint(
         "resumed": True,
         "recovery_checkpoint_sha256": sha256_file(recovery_path),
     }
+    data = _sign_raw_asr_artifact(data, auth_key)
     validation_errors = _validate_persisted_raw_asr_v2(
         data,
         input_sha256=input_sha,
@@ -3028,6 +3549,7 @@ def transcribe_raw_audio_v2(
         config,
         hallucination_review_utterance_uids,
     )
+    auth_key = _raw_asr_auth_key(settings)
     source_path = Path(audio_path)
     if not source_path.is_file() or source_path.stat().st_size <= 0:
         raise TranscriptionError(f"Audio input is missing or empty: {source_path}")
@@ -3058,6 +3580,17 @@ def transcribe_raw_audio_v2(
         if cached is not None:
             cached["resumed"] = True
             return cached
+        if auth_key is not None and output_path.is_file() and marker_path.is_file():
+            try:
+                completed = json.loads(output_path.read_text(encoding="utf-8"))
+                if not isinstance(completed, Mapping):
+                    raise TranscriptionError("Completed raw ASR artifact is malformed")
+                _verify_raw_asr_artifact_auth(completed, auth_key)
+            except (OSError, UnicodeError, json.JSONDecodeError, TranscriptionError) as exc:
+                raise TranscriptionError(
+                    "Completed raw ASR cache is not authenticated by the current key; "
+                    "an explicit force rerun is required"
+                ) from exc
         if require_resume:
             raise TranscriptionError("Scoped alignment retry requires a validated raw-ASR checkpoint")
         recovery_path = destination / RAW_ASR_V2_RECOVERY_FILENAME
@@ -3090,6 +3623,7 @@ def transcribe_raw_audio_v2(
     model: Any | None = None
     model_path = primary_checkpoint.resolve_model(settings.model_name)
     primary_model_identity = primary_checkpoint.model_identity(model_path)
+    primary_receipt_record: dict[str, Any] | None = None
 
     def load_model(target_device: str, target_compute_type: str) -> Any:
         return WhisperModel(
@@ -3101,18 +3635,8 @@ def transcribe_raw_audio_v2(
         )
 
     def run_main_pass(runtime_model: Any) -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
-        options = dict(
-            language=settings.language,
-            task="transcribe",
-            beam_size=settings.beam_size,
-            best_of=settings.best_of,
-            temperature=0.0,
-            condition_on_previous_text=settings.condition_on_previous_text,
-            initial_prompt=prompt,
-            word_timestamps=True,
-            vad_filter=True,
-            vad_parameters=transcription_settings.vad_parameters,
-        )
+        nonlocal primary_receipt_record
+        options = _primary_asr_options(settings, prompt)
         identity = {"format": "mas-primary-asr-1", "episode": episode,
                     "audio_sha256": audio_sha, "model": primary_model_identity,
                     "producer": primary_producer, "options": options,
@@ -3120,6 +3644,18 @@ def transcribe_raw_audio_v2(
                     "cpu_threads": cpu_threads, "num_workers": 1}
         checkpoint = destination / "primary_asr" / (sha256_json(identity) + ".json")
         cached = None if force else primary_checkpoint.load_primary(checkpoint, identity)
+        if cached is not None:
+            if auth_key is not None:
+                primary_receipt_record = _primary_receipt_record(
+                    destination, checkpoint, identity, auth_key, create=False
+                )
+                if primary_receipt_record is None:
+                    cached = None
+            else:
+                primary_receipt_record = {
+                    "relative_path": checkpoint.relative_to(destination).as_posix(),
+                    "sha256": sha256_file(checkpoint),
+                }
         if cached is not None:
             LOGGER.info("Reusing hash-bound primary ASR before VAD/rescue")
             mark_work_progress("raw_asr:primary_checkpoint", completed=True)
@@ -3135,6 +3671,15 @@ def transcribe_raw_audio_v2(
         primary_checkpoint.save_primary(
             checkpoint, identity, str(getattr(pass_info, "language", settings.language)),
             pass_segments, pass_words)
+        if auth_key is not None:
+            primary_receipt_record = _primary_receipt_record(
+                destination, checkpoint, identity, auth_key, create=True
+            )
+        else:
+            primary_receipt_record = {
+                "relative_path": checkpoint.relative_to(destination).as_posix(),
+                "sha256": sha256_file(checkpoint),
+            }
         return pass_info, pass_segments, pass_words
 
     def run_rescue_pass(
@@ -3162,8 +3707,7 @@ def transcribe_raw_audio_v2(
             source=f"rescue-{rescue_index}",
         )
 
-    primary_producer = primary_checkpoint.producer_identity(
-        (run_main_pass, load_model, consume_coarse_segments, _finite_ms, _optional_finite_number))
+    primary_producer = _raw_asr_producer_identity()
     try:
         try:
             model = load_model(device, compute_type)
@@ -3234,18 +3778,72 @@ def transcribe_raw_audio_v2(
 
         main_pass_device = device
         main_pass_compute_type = compute_type
-        vad_regions, vad_fallback_reason = _extract_vad_regions(
-            source_path, audit_vad_settings, primary_words
+        if primary_receipt_record is None:
+            raise TranscriptionError("Primary ASR producer receipt was not committed")
+        vad_binding = _vad_journal_binding(
+            audio_sha256=audio_sha,
+            primary_receipt_sha256=primary_receipt_record["sha256"],
+            settings=settings,
+            producer=primary_producer,
         )
-        independent_vad = (
-            not bool(str(vad_fallback_reason or "").strip())
-            and bool(vad_regions)
-            and all(
-                isinstance(region, Mapping)
-                and str(region.get("source", "")).strip() == "silero_vad"
-                for region in vad_regions
+        vad_journal = UnitJournal(
+            destination / "raw_asr_units" / "vad", vad_binding
+        )
+        try:
+            saved_vad_result = None if force else vad_journal.read("independent-vad")
+        except IntegrityError as exc:
+            raise TranscriptionError("Independent VAD producer receipt is invalid") from exc
+        if saved_vad_result is None:
+            vad_regions, vad_fallback_reason = _extract_vad_regions(
+                source_path, audit_vad_settings, primary_words
             )
-        )
+            independent_vad = (
+                not bool(str(vad_fallback_reason or "").strip())
+                and bool(vad_regions)
+                and all(
+                    isinstance(region, Mapping)
+                    and str(region.get("source", "")).strip() == "silero_vad"
+                    for region in vad_regions
+                )
+            )
+            vad_result = {
+                "vad_regions": vad_regions,
+                "vad_fallback_reason": vad_fallback_reason,
+                "independent_vad": independent_vad,
+            }
+            if sha256_file(source_path) != audio_sha:
+                raise TranscriptionError("Audio input changed during independent VAD")
+            saved_vad_result = (
+                _signed_unit_result(
+                    auth_key,
+                    purpose="vad",
+                    binding=vad_binding,
+                    uid="independent-vad",
+                    result=vad_result,
+                )
+                if auth_key is not None
+                else vad_result
+            )
+            vad_journal.write("independent-vad", saved_vad_result)
+        else:
+            vad_result = (
+                _verify_signed_unit_result(
+                    saved_vad_result,
+                    auth_key,
+                    purpose="vad",
+                    binding=vad_binding,
+                    uid="independent-vad",
+                )
+                if auth_key is not None
+                else saved_vad_result
+            )
+            if not isinstance(vad_result, Mapping):
+                raise TranscriptionError("Independent VAD producer receipt is malformed")
+            vad_regions = vad_result.get("vad_regions")
+            vad_fallback_reason = vad_result.get("vad_fallback_reason")
+            independent_vad = vad_result.get("independent_vad")
+            if not isinstance(vad_regions, list) or not isinstance(independent_vad, bool):
+                raise TranscriptionError("Independent VAD producer receipt is malformed")
         if settings.require_independent_vad and not independent_vad:
             raise TranscriptionError(
                 "V2 requires independent audio VAD; word-timing-derived or "
@@ -3303,15 +3901,86 @@ def transcribe_raw_audio_v2(
         rescue_segments: list[dict[str, Any]] = []
         rescue_words: list[dict[str, Any]] = []
         rescue_failures: list[dict[str, Any]] = []
+        rescue_result_hashes: dict[str, str] = {}
+        rescue_auth_tags: dict[str, str] = {}
+        rescue_binding = _rescue_journal_binding(
+            audio_sha256=audio_sha,
+            primary_receipt_sha256=primary_receipt_record["sha256"],
+            model_identity=primary_model_identity,
+            producer=primary_producer,
+            settings=settings,
+            prompt=prompt,
+            rescue_batches=rescue_spans,
+        )
+        rescue_journal = UnitJournal(
+            destination / "raw_asr_units" / "rescue",
+            rescue_binding,
+        )
         clips_dir = destination / "speech_holes"
         clips_dir.mkdir(parents=True, exist_ok=True)
         for index, span in enumerate(rescue_spans, start=1):
             start_ms = int(span["start_ms"])
             end_ms = int(span["end_ms"])
+            batch_uid = _rescue_batch_uid(index, span)
+            try:
+                saved_rescue_result = (
+                    None if force else rescue_journal.read(batch_uid)
+                )
+            except IntegrityError as exc:
+                raise TranscriptionError(
+                    f"Rescue producer receipt is invalid: {batch_uid}"
+                ) from exc
+            if saved_rescue_result is not None:
+                rescue_result = (
+                    _verify_signed_unit_result(
+                        saved_rescue_result,
+                        auth_key,
+                        purpose="rescue",
+                        binding=rescue_binding,
+                        uid=batch_uid,
+                    )
+                    if auth_key is not None
+                    else saved_rescue_result
+                )
+                if not isinstance(rescue_result, Mapping) or rescue_result.get(
+                    "target"
+                ) != dict(span):
+                    raise TranscriptionError(
+                        f"Rescue producer receipt identity mismatch: {batch_uid}"
+                    )
+                if rescue_result.get("status") == "completed":
+                    found_segments = rescue_result.get("segments")
+                    found_words = rescue_result.get("words")
+                    if not isinstance(found_segments, list) or not isinstance(
+                        found_words, list
+                    ):
+                        raise TranscriptionError(
+                            f"Rescue producer receipt is malformed: {batch_uid}"
+                        )
+                    rescue_segments.extend(found_segments)
+                    rescue_words.extend(found_words)
+                elif rescue_result.get("status") == "manual_review_required":
+                    failure = rescue_result.get("failure")
+                    if not isinstance(failure, Mapping):
+                        raise TranscriptionError(
+                            f"Rescue producer receipt is malformed: {batch_uid}"
+                        )
+                    rescue_failures.append(dict(failure))
+                else:
+                    raise TranscriptionError(
+                        f"Rescue producer receipt status is invalid: {batch_uid}"
+                    )
+                rescue_result_hashes[batch_uid] = _unit_result_sha256(
+                    saved_rescue_result
+                )
+                if auth_key is not None:
+                    rescue_auth_tags[batch_uid] = saved_rescue_result["auth_tag"]
+                continue
             clip_path = (
                 clips_dir
                 / f"speech_hole_{index:03d}_{start_ms}_{end_ms}.wav"
             )
+            rescue_result: dict[str, Any]
             try:
                 _extract_clip(source_path, clip_path, start_ms, end_ms)
                 found_segments, found_words = run_rescue_pass(
@@ -3353,9 +4022,16 @@ def transcribe_raw_audio_v2(
                             start_ms=start_ms,
                             rescue_index=index,
                         )
+                        rescue_result = {
+                            "target": dict(span),
+                            "status": "completed",
+                            "segments": found_segments,
+                            "words": found_words,
+                            "runtime_device": device,
+                            "runtime_compute_type": compute_type,
+                        }
                     except Exception as cpu_exc:
-                        rescue_failures.append(
-                            {
+                        failure = {
                                 "start_ms": start_ms,
                                 "end_ms": end_ms,
                                 "error_type": type(exc).__name__,
@@ -3363,21 +4039,61 @@ def transcribe_raw_audio_v2(
                                 "fallback_error_type": type(cpu_exc).__name__,
                                 "status": "manual_review_required",
                             }
-                        )
-                        continue
+                        rescue_result = {
+                            "target": dict(span),
+                            "status": "manual_review_required",
+                            "failure": failure,
+                            "runtime_device": device,
+                            "runtime_compute_type": compute_type,
+                        }
                 else:
-                    rescue_failures.append(
-                        {
+                    failure = {
                             "start_ms": start_ms,
                             "end_ms": end_ms,
                             "error_type": type(exc).__name__,
                             "fallback_attempted": False,
                             "status": "manual_review_required",
                         }
-                    )
-                    continue
-            rescue_segments.extend(found_segments)
-            rescue_words.extend(found_words)
+                    rescue_result = {
+                        "target": dict(span),
+                        "status": "manual_review_required",
+                        "failure": failure,
+                        "runtime_device": device,
+                        "runtime_compute_type": compute_type,
+                    }
+            else:
+                rescue_result = {
+                    "target": dict(span),
+                    "status": "completed",
+                    "segments": found_segments,
+                    "words": found_words,
+                    "runtime_device": device,
+                    "runtime_compute_type": compute_type,
+                }
+            if sha256_file(source_path) != audio_sha:
+                raise TranscriptionError("Audio input changed during rescue ASR")
+            saved_rescue_result = (
+                _signed_unit_result(
+                    auth_key,
+                    purpose="rescue",
+                    binding=rescue_binding,
+                    uid=batch_uid,
+                    result=rescue_result,
+                )
+                if auth_key is not None
+                else rescue_result
+            )
+            rescue_journal.write(batch_uid, saved_rescue_result)
+            rescue_result_hashes[batch_uid] = _unit_result_sha256(
+                saved_rescue_result
+            )
+            if auth_key is not None:
+                rescue_auth_tags[batch_uid] = saved_rescue_result["auth_tag"]
+            if rescue_result["status"] == "completed":
+                rescue_segments.extend(rescue_result["segments"])
+                rescue_words.extend(rescue_result["words"])
+            else:
+                rescue_failures.append(rescue_result["failure"])
 
         segments, words = merge_rescue_evidence(
             primary_segments, primary_words, rescue_segments, rescue_words
@@ -3435,6 +4151,17 @@ def transcribe_raw_audio_v2(
             rescue_budget_audit=rescue_budget_audit,
             youtube_captions=youtube_captions,
             speech_hole_records=speech_hole_records,
+            producer_receipts={
+                "primary": primary_receipt_record,
+                "vad_result_sha256": _unit_result_sha256(saved_vad_result),
+                "vad_auth_tag": (
+                    saved_vad_result.get("auth_tag")
+                    if auth_key is not None
+                    else None
+                ),
+                "rescue_result_sha256": rescue_result_hashes,
+                "rescue_auth_tags": rescue_auth_tags,
+            },
         )
         correction_utterances = include_speech_holes_for_correction(
             correction_utterances, speech_hole_records
@@ -3538,6 +4265,8 @@ def transcribe_raw_audio_v2(
             "synthetic_timing_count": 0,
             "resumed": False,
         }
+        if auth_key is not None:
+            data = _sign_raw_asr_artifact(data, auth_key)
         validation_errors = _validate_persisted_raw_asr_v2(
             data,
             input_sha256=input_sha,

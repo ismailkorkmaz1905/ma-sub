@@ -1205,6 +1205,11 @@ class RawASRV2Tests(unittest.TestCase):
 
 class RawASRV2RuntimeTests(unittest.TestCase):
     def setUp(self):
+        auth_patcher = patch.dict(
+            "os.environ", {"MAS_RAW_ASR_AUTH_KEY": "1" * 64}
+        )
+        auth_patcher.start()
+        self.addCleanup(auth_patcher.stop)
         model_directory = tempfile.TemporaryDirectory()
         self.addCleanup(model_directory.cleanup)
         model_path = Path(model_directory.name)
@@ -1290,6 +1295,27 @@ class RawASRV2RuntimeTests(unittest.TestCase):
             None,
         )
 
+    def test_production_auth_key_is_required_before_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audio, prepare = self._audio_and_prepare(directory)
+            for value, message in (
+                ("", "is required"),
+                ("short", "strong 256-bit"),
+            ):
+                with (
+                    patch.dict(
+                        "os.environ", {"MAS_RAW_ASR_AUTH_KEY": value}
+                    ),
+                    patch.object(
+                        raw_asr_v2_module,
+                        "_import_whisper",
+                        side_effect=AssertionError("inference setup must not run"),
+                    ) as imported,
+                    self.assertRaisesRegex(TranscriptionError, message),
+                ):
+                    transcribe_raw_audio_v2(audio, prepare, episode=12)
+                imported.assert_not_called()
+
     def test_cuda_model_initialization_falls_back_once_to_cpu(self) -> None:
         attempts: list[tuple[str, str]] = []
 
@@ -1316,7 +1342,12 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                     return_value=self._vad(),
                 ),
             ):
-                data = transcribe_raw_audio_v2(audio, prepare, episode=12)
+                data = transcribe_raw_audio_v2(
+                    audio,
+                    prepare,
+                    episode=12,
+                    config=RawASRV2Config(allow_cpu_fallback=True),
+                )
 
         self.assertEqual(attempts, [("cuda", "float16"), ("cpu", "int8")])
         self.assertEqual(data["model"]["device"], "cpu")
@@ -1324,7 +1355,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
         self.assertEqual(data["model"]["final_runtime_device"], "cpu")
         self.assertIn("CUDA initialization", data["model"]["runtime_fallback_reason"])
 
-    def test_existing_recovery_checkpoint_skips_model_inference(self) -> None:
+    def test_legacy_recovery_without_producer_receipts_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             audio, prepare = self._audio_and_prepare(directory)
             prepare.mkdir(parents=True, exist_ok=True)
@@ -1423,24 +1454,24 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 "_import_whisper",
                 side_effect=AssertionError("model inference must not run"),
             ):
-                data = transcribe_raw_audio_v2(
-                    audio,
-                    prepare,
-                    episode=12,
-                    captions_path=captions_path,
-                )
+                with self.assertRaisesRegex(
+                    TranscriptionError, "lacks immutable producer receipts"
+                ):
+                    transcribe_raw_audio_v2(
+                        audio,
+                        prepare,
+                        episode=12,
+                        captions_path=captions_path,
+                    )
 
-            self.assertTrue(data["resumed"])
-            self.assertEqual(len(data["correction_utterances"]), 1)
-            self.assertEqual(data["correction_utterances"][0]["asr_text"], "Merhaba")
-            self.assertTrue((prepare / "raw_asr_v2.json").is_file())
-            self.assertTrue((prepare / "raw_asr_v2.done.json").is_file())
-            self.assertIsNotNone(
+            self.assertTrue((prepare / "raw_asr_v2.recovery.json").is_file())
+            self.assertFalse((prepare / "raw_asr_v2.json").exists())
+            self.assertFalse((prepare / "raw_asr_v2.done.json").exists())
+            self.assertIsNone(
                 load_valid_raw_asr_v2(
                     prepare,
                     audio_path=audio,
                     episode=12,
-                    expected_input_sha256=data["input_sha256"],
                 )
             )
 
@@ -1641,7 +1672,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,
@@ -1724,7 +1755,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,
@@ -1783,6 +1814,9 @@ class RawASRV2RuntimeTests(unittest.TestCase):
 
             loose = json.loads(json.dumps(data))
             loose["speech_coverage"]["config"]["min_hole_ms"] = 10_000
+            loose = raw_asr_v2_module._sign_raw_asr_artifact(
+                loose, bytes.fromhex("1" * 64)
+            )
             with self.assertRaisesRegex(
                 TranscriptionError, "canonical V2 beta policy"
             ):
@@ -1797,6 +1831,9 @@ class RawASRV2RuntimeTests(unittest.TestCase):
             weakened_caption_gap["model"]["settings"][
                 "orphan_caption_max_unexplained_run_ms"
             ] = 10_000
+            weakened_caption_gap = raw_asr_v2_module._sign_raw_asr_artifact(
+                weakened_caption_gap, bytes.fromhex("1" * 64)
+            )
             with self.assertRaisesRegex(
                 TranscriptionError, "canonical V2 beta publication policy"
             ):
@@ -1818,6 +1855,9 @@ class RawASRV2RuntimeTests(unittest.TestCase):
             ):
                 item["utterance_index"] = utterance_index
             missing_orphan["asr_hallucination_records"] = []
+            missing_orphan = raw_asr_v2_module._sign_raw_asr_artifact(
+                missing_orphan, bytes.fromhex("1" * 64)
+            )
             with self.assertRaisesRegex(
                 TranscriptionError, "persisted orphan YouTube-caption candidates"
             ):
@@ -1866,7 +1906,12 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                     return_value=self._vad(),
                 ),
             ):
-                data = transcribe_raw_audio_v2(audio, prepare, episode=12)
+                data = transcribe_raw_audio_v2(
+                    audio,
+                    prepare,
+                    episode=12,
+                    config=RawASRV2Config(allow_cpu_fallback=True),
+                )
 
         self.assertEqual(attempts, ["cuda", "cpu"])
         self.assertEqual(data["model"]["device"], "cpu")
@@ -1964,7 +2009,12 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                     side_effect=[initial_report, final_report, final_report, initial_report],
                 ),
             ):
-                data = transcribe_raw_audio_v2(audio, prepare, episode=12)
+                data = transcribe_raw_audio_v2(
+                    audio,
+                    prepare,
+                    episode=12,
+                    config=RawASRV2Config(allow_cpu_fallback=True),
+                )
 
         self.assertEqual(attempts, ["cuda", "cpu"])
         self.assertEqual(data["model"]["device"], "cuda")
@@ -1988,11 +2038,12 @@ class RawASRV2RuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             audio, prepare = self._audio_and_prepare(directory)
+            production_config = RawASRV2Config(allow_cpu_fallback=False)
             with (
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,
@@ -2000,7 +2051,9 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                     return_value=self._vad(),
                 ),
             ):
-                first = transcribe_raw_audio_v2(audio, prepare, episode=12)
+                first = transcribe_raw_audio_v2(
+                    audio, prepare, episode=12, config=production_config
+                )
             loaded = load_valid_raw_asr_v2(
                 prepare,
                 audio_path=audio,
@@ -2012,12 +2065,19 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 "_import_whisper",
                 side_effect=AssertionError("model import must not run on resume"),
             ):
-                resumed = transcribe_raw_audio_v2(audio, prepare, episode=12)
+                resumed = transcribe_raw_audio_v2(
+                    audio,
+                    prepare,
+                    episode=12,
+                    config=production_config,
+                    require_resume=True,
+                )
             persisted = json.loads(
                 (prepare / "raw_asr_v2.json").read_text(encoding="utf-8")
             )
 
         self.assertFalse(first["resumed"])
+        self.assertFalse(first["model"]["settings"]["allow_cpu_fallback"])
         self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertFalse(loaded["resumed"])
@@ -2025,6 +2085,352 @@ class RawASRV2RuntimeTests(unittest.TestCase):
         self.assertEqual(persisted["status"], "completed")
         self.assertFalse(persisted["resumed"])
         self.assertEqual(resumed["input_sha256"], first["input_sha256"])
+
+    def test_completed_cache_rejects_missing_or_rotated_key_until_force(self) -> None:
+        calls = 0
+
+        class Model:
+            def __init__(self, _name: str, **_kwargs: object):
+                pass
+
+            def transcribe(self, _path: str, **_kwargs: object) -> tuple[object, Info]:
+                nonlocal calls
+                calls += 1
+                return iter([_complete_segment()]), Info()
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio, prepare = self._audio_and_prepare(directory)
+            with (
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    return_value=(Model, FakeCTranslate2),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_vad_regions",
+                    return_value=self._vad(),
+                ),
+            ):
+                transcribe_raw_audio_v2(audio, prepare, episode=12)
+            self.assertEqual(calls, 1)
+            persisted_text = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in prepare.rglob("*.json")
+            )
+            self.assertNotIn("1" * 64, persisted_text)
+
+            with (
+                patch.dict("os.environ", {"MAS_RAW_ASR_AUTH_KEY": ""}),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    side_effect=AssertionError("missing key must not infer"),
+                ) as imported,
+                self.assertRaisesRegex(TranscriptionError, "is required"),
+            ):
+                transcribe_raw_audio_v2(audio, prepare, episode=12)
+            imported.assert_not_called()
+
+            with (
+                patch.dict(
+                    "os.environ", {"MAS_RAW_ASR_AUTH_KEY": "2" * 64}
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    side_effect=AssertionError("rotated key must not infer"),
+                ) as imported,
+                self.assertRaisesRegex(
+                    TranscriptionError, "explicit force rerun is required"
+                ),
+            ):
+                transcribe_raw_audio_v2(audio, prepare, episode=12)
+            imported.assert_not_called()
+            self.assertEqual(calls, 1)
+
+            with (
+                patch.dict(
+                    "os.environ", {"MAS_RAW_ASR_AUTH_KEY": "2" * 64}
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    return_value=(Model, FakeCTranslate2),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_vad_regions",
+                    return_value=self._vad(),
+                ),
+            ):
+                refreshed = transcribe_raw_audio_v2(
+                    audio, prepare, episode=12, force=True
+                )
+                loaded = load_valid_raw_asr_v2(
+                    prepare, audio_path=audio, episode=12
+                )
+            self.assertEqual(calls, 2)
+            self.assertIsNotNone(loaded)
+            self.assertFalse(refreshed["resumed"])
+
+    def test_coherent_recovery_tamper_is_rejected_without_done_marker(self) -> None:
+        class Model:
+            def __init__(self, _name: str, **_kwargs: object):
+                pass
+
+            def transcribe(self, _path: str, **_kwargs: object) -> tuple[object, Info]:
+                return iter([_complete_segment()]), Info()
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio, prepare = self._audio_and_prepare(directory)
+            with (
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    return_value=(Model, FakeCTranslate2),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_vad_regions",
+                    return_value=self._vad(),
+                ),
+            ):
+                transcribe_raw_audio_v2(audio, prepare, episode=12)
+            (prepare / "raw_asr_v2.json").unlink()
+            (prepare / "raw_asr_v2.done.json").unlink()
+            recovery_path = prepare / "raw_asr_v2.recovery.json"
+            recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+            recovery["segments"][0]["text"] = "Değiştirilmiş"
+            recovery["segments"][0]["words"][0]["text"] = " Değiştirilmiş"
+            recovery["words"][0]["text"] = " Değiştirilmiş"
+            recovery_path.write_text(json.dumps(recovery), encoding="utf-8")
+
+            with (
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    side_effect=AssertionError("model inference must not run"),
+                ),
+                self.assertRaisesRegex(
+                    TranscriptionError, "differs from immutable producer receipts"
+                ),
+            ):
+                transcribe_raw_audio_v2(audio, prepare, episode=12)
+
+            self.assertFalse((prepare / "raw_asr_v2.json").exists())
+            self.assertFalse((prepare / "raw_asr_v2.done.json").exists())
+
+    def test_coherent_producer_receipt_replacement_is_rejected(self) -> None:
+        calls = 0
+
+        class Model:
+            def __init__(self, _name: str, **_kwargs: object):
+                pass
+
+            def transcribe(self, _path: str, **_kwargs: object) -> tuple[object, Info]:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return iter(
+                        [Segment(0, 2, "Merhaba bugün", [Word(0, 1, " Merhaba")])]
+                    ), Info()
+                return iter([_complete_segment()]), Info()
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio, prepare = self._audio_and_prepare(directory)
+            with (
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    return_value=(Model, FakeCTranslate2),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_vad_regions",
+                    return_value=self._vad(),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_clip",
+                    side_effect=_fake_extract_clip,
+                ),
+            ):
+                transcribe_raw_audio_v2(audio, prepare, episode=12)
+
+            (prepare / "raw_asr_v2.json").unlink()
+            (prepare / "raw_asr_v2.done.json").unlink()
+            recovery_path = prepare / "raw_asr_v2.recovery.json"
+            recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
+            primary_record = recovery["producer_receipts"]["primary"]
+            primary_path = prepare / primary_record["relative_path"]
+            envelope = json.loads(primary_path.read_text(encoding="utf-8"))
+            original_identity = envelope["data"]["identity"]
+            batches = recovery["rescue_batches"]
+            rescue_binding = raw_asr_v2_module._rescue_journal_binding(
+                audio_sha256=recovery["audio_sha256"],
+                primary_receipt_sha256=primary_record["sha256"],
+                model_identity=original_identity["model"],
+                producer=original_identity["producer"],
+                settings=RawASRV2Config(),
+                prompt=None,
+                rescue_batches=batches,
+            )
+            batch_uid = raw_asr_v2_module._rescue_batch_uid(1, batches[0])
+            rescue_result = raw_asr_v2_module.UnitJournal(
+                prepare / "raw_asr_units" / "rescue", rescue_binding
+            ).read(batch_uid)
+            self.assertIsNotNone(rescue_result)
+
+            vad_binding = raw_asr_v2_module._vad_journal_binding(
+                audio_sha256=recovery["audio_sha256"],
+                primary_receipt_sha256=primary_record["sha256"],
+                settings=RawASRV2Config(),
+                producer=original_identity["producer"],
+            )
+            saved_vad_result = raw_asr_v2_module.UnitJournal(
+                prepare / "raw_asr_units" / "vad", vad_binding
+            ).read("independent-vad")
+            self.assertIsNotNone(saved_vad_result)
+
+            envelope["data"]["segments"][0]["text"] = "Sahte ana çıktı"
+            envelope["data"]["segments"][0]["words"][0]["text"] = " Sahte"
+            envelope["data"]["words"][0]["text"] = " Sahte"
+            recovery["segments"][0]["text"] = "Sahte ana çıktı"
+            recovery["segments"][0]["words"][0]["text"] = " Sahte"
+            next(
+                word
+                for word in recovery["words"]
+                if word["segment_id"] == "main-1"
+            )["text"] = " Sahte"
+            envelope["sha256"] = raw_asr_v2_module.sha256_json(envelope["data"])
+            primary_path.write_text(json.dumps(envelope), encoding="utf-8")
+            forged_primary_sha = sha256_file(primary_path)
+            recovery["producer_receipts"]["primary"] = {
+                "relative_path": primary_path.relative_to(prepare).as_posix(),
+                "sha256": forged_primary_sha,
+                "auth_tag": primary_record["auth_tag"],
+            }
+
+            auth_path = raw_asr_v2_module._primary_auth_record_path(
+                prepare, original_identity
+            )
+            auth_record = json.loads(auth_path.read_text(encoding="utf-8"))
+            auth_record["receipt_sha256"] = forged_primary_sha
+            auth_path.write_text(json.dumps(auth_record), encoding="utf-8")
+            forged_vad_binding = raw_asr_v2_module._vad_journal_binding(
+                audio_sha256=recovery["audio_sha256"],
+                primary_receipt_sha256=forged_primary_sha,
+                settings=RawASRV2Config(),
+                producer=original_identity["producer"],
+            )
+            raw_asr_v2_module.UnitJournal(
+                prepare / "raw_asr_units" / "vad",
+                forged_vad_binding,
+            ).write("independent-vad", saved_vad_result)
+            recovery["producer_receipts"]["vad_result_sha256"] = (
+                raw_asr_v2_module._unit_result_sha256(saved_vad_result)
+            )
+            forged_rescue_binding = raw_asr_v2_module._rescue_journal_binding(
+                audio_sha256=recovery["audio_sha256"],
+                primary_receipt_sha256=forged_primary_sha,
+                model_identity=original_identity["model"],
+                producer=original_identity["producer"],
+                settings=RawASRV2Config(),
+                prompt=None,
+                rescue_batches=batches,
+            )
+            raw_asr_v2_module.UnitJournal(
+                prepare / "raw_asr_units" / "rescue", forged_rescue_binding
+            ).write(batch_uid, rescue_result)
+            recovery["producer_receipts"]["rescue_result_sha256"][batch_uid] = (
+                raw_asr_v2_module._unit_result_sha256(rescue_result)
+            )
+            recovery_path.write_text(json.dumps(recovery), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                TranscriptionError, "primary producer receipt authentication failed"
+            ):
+                raw_asr_v2_module.recover_raw_asr_v2_from_checkpoint(
+                    audio, prepare, episode=12
+                )
+            self.assertFalse((prepare / "raw_asr_v2.done.json").exists())
+
+    def test_completed_rescue_batch_is_not_rerun_after_interruption(self) -> None:
+        calls: list[str] = []
+
+        class Model:
+            def __init__(self, _name: str, **_kwargs: object):
+                pass
+
+            def transcribe(self, path: str, **_kwargs: object) -> tuple[object, Info]:
+                calls.append(path)
+                if len(calls) == 1:
+                    return iter(
+                        [Segment(0, 2, "Merhaba bugün", [Word(0, 1, " Merhaba")])]
+                    ), Info()
+                return iter([_complete_segment()]), Info()
+
+        original_write = raw_asr_v2_module.UnitJournal.write
+        interrupted = False
+
+        def write_then_interrupt(journal, uid, result):
+            nonlocal interrupted
+            original_write(journal, uid, result)
+            if uid.startswith("rescue-") and not interrupted:
+                interrupted = True
+                raise RuntimeError("interrupted after committed rescue batch")
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio, prepare = self._audio_and_prepare(directory)
+            with (
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    return_value=(Model, FakeCTranslate2),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_vad_regions",
+                    return_value=self._vad(),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_clip",
+                    side_effect=_fake_extract_clip,
+                ),
+                patch.object(
+                    raw_asr_v2_module.UnitJournal,
+                    "write",
+                    new=write_then_interrupt,
+                ),
+                self.assertRaisesRegex(RuntimeError, "interrupted after committed"),
+            ):
+                transcribe_raw_audio_v2(audio, prepare, episode=12)
+            self.assertFalse((prepare / "raw_asr_v2.recovery.json").exists())
+
+            with (
+                patch.object(
+                    raw_asr_v2_module,
+                    "_import_whisper",
+                    return_value=(Model, FakeCTranslate2),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_vad_regions",
+                    side_effect=AssertionError("VAD must be reused"),
+                ),
+                patch.object(
+                    raw_asr_v2_module,
+                    "_extract_clip",
+                    side_effect=_fake_extract_clip,
+                ),
+            ):
+                data = transcribe_raw_audio_v2(audio, prepare, episode=12)
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(data["rescue_budget_audit"]["actual_batch_count"], 1)
+            self.assertTrue((prepare / "raw_asr_v2.done.json").is_file())
 
     def test_marker_cannot_redirect_resume_to_another_file(self) -> None:
         class Model:
@@ -2040,7 +2446,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,
@@ -2074,7 +2480,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 (prepare / "raw_asr_v2.json").resolve(),
             )
 
-    def test_valid_marker_hash_cannot_hide_internal_input_identity_mismatch(self) -> None:
+    def test_rehashed_marker_cannot_hide_unauthenticated_completed_artifact(self) -> None:
         class Model:
             def __init__(self, _name: str, **_kwargs: object):
                 pass
@@ -2088,7 +2494,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,
@@ -2114,9 +2520,10 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 "_import_whisper",
                 side_effect=AssertionError("model inference must not run"),
             ):
-                recovered = transcribe_raw_audio_v2(audio, prepare, episode=12)
-            self.assertTrue(recovered["resumed"])
-            self.assertEqual(recovered["input_sha256"], data["input_sha256"])
+                with self.assertRaisesRegex(
+                    TranscriptionError, "explicit force rerun is required"
+                ):
+                    transcribe_raw_audio_v2(audio, prepare, episode=12)
 
     def test_missing_caption_fails_before_model_import(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2154,7 +2561,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,
@@ -2243,7 +2650,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,
@@ -2284,7 +2691,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,
@@ -2332,7 +2739,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
                 patch.object(
                     raw_asr_v2_module,
                     "_import_whisper",
-                    return_value=(Model, FakeCPUOnlyCTranslate2),
+                    return_value=(Model, FakeCTranslate2),
                 ),
                 patch.object(
                     raw_asr_v2_module,

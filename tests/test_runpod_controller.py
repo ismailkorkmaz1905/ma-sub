@@ -1125,6 +1125,12 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(
     tmp_path, monkeypatch
 ):
     monkeypatch.delenv("MAS_ALLOW_C0E3_VENV_ADOPTION", raising=False)
+    chmod_calls = []
+    monkeypatch.setattr(
+        runpod_controller.os,
+        "chmod",
+        lambda path, mode: chmod_calls.append((Path(path), mode)),
+    )
     values = {
         "RUNPOD_POD_ID": "pod123",
         "RUNPOD_API_KEY": "api secret",
@@ -1138,6 +1144,10 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(
     runpod_controller._write_runtime_env(target, values, "a" * 40)
     content = target.read_text(encoding="utf-8")
     assert "export RUNPOD_API_KEY='api secret'" in content
+    derived = runpod_controller._derive_raw_asr_auth_key("api secret")
+    assert f"MAS_RAW_ASR_AUTH_KEY={derived}" in content
+    assert derived != hashlib.sha256(b"api secret").hexdigest()
+    assert chmod_calls == [(target, 0o600)]
     assert "MAS_DRIVE_STRICT_REMOTE" not in content
     assert "RCLONE_CONFIG" not in content
     assert "gdrive:path with spaces" not in content
@@ -1156,12 +1166,14 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(
     content = target.read_text(encoding="utf-8")
     assert "MAS_YTDLP_COOKIES=/workspace/.mas-secrets/youtube-cookies.txt" in content
     assert "C:/private/cookies.txt" not in content
+    assert chmod_calls == [(target, 0o600), (target, 0o600)]
 
     monkeypatch.setenv("MAS_ALLOW_C0E3_VENV_ADOPTION", "1")
     runpod_controller._write_runtime_env(target, values, "a" * 40)
     assert "export MAS_ALLOW_C0E3_VENV_ADOPTION=1" in target.read_text(
         encoding="utf-8"
     )
+    assert chmod_calls == [(target, 0o600)] * 3
 
 
 def test_cli_dispatches_production_run_to_controller(monkeypatch, tmp_path):

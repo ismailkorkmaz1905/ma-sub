@@ -88,7 +88,7 @@ def drive_upload(tmp_path, monkeypatch):
     source.write_bytes(b"movie content")
     target = "drive:delivery/Official.mp4"
     files, identities, calls = {}, {}, []
-    failures = {"cat": 0, "copyto": 0, "moveto": 0}
+    failures = {"cat": 0, "copyto": 0, "moveto": 0, "moveto_before": 0}
     monkeypatch.setattr(remote.shutil, "which", lambda _: "rclone")
 
     def run(command, *, stdout_handler=None, **kwargs):
@@ -103,6 +103,9 @@ def drive_upload(tmp_path, monkeypatch):
             files[command[3]] = source.read_bytes()
             identities[command[3]] = "upload-object"
         if operation == "moveto":
+            if failures["moveto_before"]:
+                failures["moveto_before"] -= 1
+                raise remote.RemoteVerificationError("connection unavailable before move")
             assert command[3] not in files
             files[command[3]] = files.pop(command[2])
             identities[command[3]] = identities.pop(command[2])
@@ -301,6 +304,61 @@ def test_preservation_readback_must_complete_before_retry_can_upload(drive_uploa
     assert files[retained] == b"old movie"
     assert files[target] == source.read_bytes()
     assert sum(command[1] == "copyto" for command in calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["moveto_before", "moveto"])
+def test_pending_preservation_reconciles_interrupted_move_without_reupload(
+        drive_upload, tmp_path, failure):
+    source, target, files, identities, calls, failures = drive_upload
+    files[target], identities[target] = b"old movie", "old-id"
+    failures[failure] = 1
+    preserve = tmp_path / "preserve.json"
+    with pytest.raises(remote.RemoteVerificationError):
+        remote.upload_verified(source, target, preservation_receipt=preserve)
+
+    receipt = remote.upload_verified(source, target, preservation_receipt=preserve)
+
+    retained = next(key for key in files if "/.retained/" in key)
+    assert files[retained] == b"old movie"
+    assert identities[retained] == "old-id"
+    assert files[target] == source.read_bytes()
+    assert receipt["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert json.loads(preserve.read_text())["status"] == "PRESERVED"
+    assert sum(command[1] == "copyto" for command in calls) == 1
+
+
+def test_pending_preservation_rejects_changed_original_before_move_retry(
+        drive_upload, tmp_path):
+    source, target, files, identities, calls, failures = drive_upload
+    files[target], identities[target] = b"old movie", "old-id"
+    failures["moveto_before"] = 1
+    preserve = tmp_path / "preserve.json"
+    with pytest.raises(remote.RemoteVerificationError):
+        remote.upload_verified(source, target, preservation_receipt=preserve)
+    files[target] = b"changed old movie"
+
+    with pytest.raises(remote.RemoteVerificationError, match="retained Drive byte/SHA"):
+        remote.upload_verified(source, target, preservation_receipt=preserve)
+
+    assert not any(command[1] == "copyto" for command in calls)
+
+
+def test_pending_preservation_rejects_original_and_archive_both_present(
+        drive_upload, tmp_path):
+    source, target, files, identities, calls, failures = drive_upload
+    files[target], identities[target] = b"old movie", "old-id"
+    failures["moveto_before"] = 1
+    preserve = tmp_path / "preserve.json"
+    with pytest.raises(remote.RemoteVerificationError):
+        remote.upload_verified(source, target, preservation_receipt=preserve)
+    checkpoint = json.loads(next(tmp_path.glob("preserve-upload-*.json")).read_text())
+    retained = checkpoint["payload"]["retained_pending"]["retained_remote"]
+    files[retained], identities[retained] = b"old movie", "old-id"
+
+    with pytest.raises(remote.RemoteVerificationError, match="ambiguous retained Drive"):
+        remote.upload_verified(source, target, preservation_receipt=preserve)
+
+    assert not any(command[1] == "copyto" for command in calls)
 
 
 def test_preflight_uses_no_secret_values_in_configuration_errors(tmp_path, monkeypatch):

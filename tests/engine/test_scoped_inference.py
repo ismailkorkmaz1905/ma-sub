@@ -6,6 +6,7 @@ from mas.engine.transcribe import TranscriptionError
 
 @pytest.mark.parametrize('force', [True, False])
 def test_scoped_alignment_cannot_start_raw_inference(tmp_path, monkeypatch, force):
+    monkeypatch.setenv("MAS_RAW_ASR_AUTH_KEY", "1" * 64)
     audio = tmp_path / 'synthetic.wav'
     audio.write_bytes(b'synthetic-not-opened')
     monkeypatch.setattr(raw_asr, 'load_valid_raw_asr_v2', lambda *a, **k: None)

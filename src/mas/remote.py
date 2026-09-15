@@ -399,34 +399,75 @@ def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600,
             old_size, old_sha = signature(remote)
             prior = {"remote": remote, "bytes": old_size, "sha256": old_sha,
                      "object_id": existing.get("ID")}
+            if not isinstance(prior["object_id"], str) or not prior["object_id"]:
+                raise RemoteVerificationError("existing Drive object identity is unavailable")
         retained_pending = transaction.get("retained_pending")
+        preservation_reconciled = False
         if retained_pending:
-            retained = retained_pending["retained_remote"]
-            retained_prefix = parent + "/.retained/" + retained_pending["prior"]["sha256"] + "-"
+            if not isinstance(retained_pending, dict) or not isinstance(retained_pending.get("prior"), dict):
+                raise RemoteVerificationError("invalid retained Drive checkpoint evidence")
+            retained = retained_pending.get("retained_remote")
+            if not isinstance(retained, str):
+                raise RemoteVerificationError("invalid retained Drive checkpoint evidence")
+            saved_prior = retained_pending["prior"]
+            if (saved_prior.get("remote") != remote
+                    or type(saved_prior.get("bytes")) is not int or saved_prior["bytes"] <= 0
+                    or not isinstance(saved_prior.get("sha256"), str)
+                    or len(saved_prior["sha256"]) != 64
+                    or any(char not in "0123456789abcdef" for char in saved_prior["sha256"])
+                    or not isinstance(saved_prior.get("object_id"), str)
+                    or not saved_prior["object_id"]):
+                raise RemoteVerificationError("invalid retained Drive checkpoint evidence")
+            retained_prefix = parent + "/.retained/" + saved_prior["sha256"] + "-"
             retained_suffix = retained.removeprefix(retained_prefix).removesuffix("/" + filename)
             if (not retained.startswith(retained_prefix) or not retained.endswith("/" + filename)
                     or len(retained_suffix) != 32
                     or any(char not in "0123456789abcdef" for char in retained_suffix)):
                 raise RemoteVerificationError("unsafe retained Drive checkpoint path")
+            if (not isinstance(retained_pending.get("attempt_path"), str)
+                    or not isinstance(retained_pending.get("evidence"), dict)):
+                raise RemoteVerificationError("invalid retained Drive checkpoint evidence")
             saved_attempt = Path(retained_pending["attempt_path"])
             attempt_suffix = saved_attempt.stem.removeprefix(evidence_path.stem + "-")
             if (saved_attempt.parent.resolve() != evidence_path.parent.resolve()
                     or saved_attempt.suffix != ".json" or len(attempt_suffix) != 32
                     or any(char not in "0123456789abcdef" for char in attempt_suffix)):
                 raise RemoteVerificationError("unsafe Drive preservation receipt checkpoint path")
-            preserved = signature(retained)
-            if preserved != (retained_pending["prior"]["bytes"], retained_pending["prior"]["sha256"]):
+            retained_listing = inventory(retained.rsplit("/", 1)[0])
+            retained_object = unique_object(retained_listing, filename)
+            if existing is not None and retained_object is not None:
+                raise RemoteVerificationError("ambiguous retained Drive preservation state")
+            if existing is None and retained_object is None:
+                raise RemoteVerificationError("retained Drive preservation object is missing")
+            current_object = existing if existing is not None else retained_object
+            if current_object.get("ID") != saved_prior["object_id"]:
+                raise RemoteVerificationError("retained Drive object identity changed")
+            current_remote = remote if existing is not None else retained
+            preserved = signature(current_remote)
+            if preserved != (saved_prior["bytes"], saved_prior["sha256"]):
                 raise RemoteVerificationError("retained Drive byte/SHA-256 readback mismatch")
+            if existing is not None:
+                _run_watchdog(["rclone", "moveto", remote, retained, "--immutable", *common],
+                              idle_timeout=idle_timeout, total_timeout=remaining())
+                retained_object = unique_object(inventory(retained.rsplit("/", 1)[0]), filename)
+                if retained_object is None or retained_object.get("ID") != saved_prior["object_id"]:
+                    raise RemoteVerificationError("retained Drive object identity changed")
+                preserved = signature(retained)
+                if preserved != (saved_prior["bytes"], saved_prior["sha256"]):
+                    raise RemoteVerificationError("retained Drive byte/SHA-256 readback mismatch")
             retained_pending["status"] = "PRESERVED"
             atomic_json(retained_pending["attempt_path"], retained_pending["evidence"] | {"status": "PRESERVED"})
             atomic_json(evidence_path, retained_pending["evidence"] | {"status": "PRESERVED"})
             transaction.pop("retained_pending")
             save_transaction()
-        evidence = {"destination": remote, "prior": prior, "status": "INVENTORIED"}
-        # Each attempt keeps its own inventory, including failures after a remote move.
-        attempt_path = evidence_path.with_name(evidence_path.stem + "-" + uuid.uuid4().hex + ".json")
-        atomic_json(attempt_path, evidence)
-        atomic_json(evidence_path, evidence)
+            prior = None
+            preservation_reconciled = True
+        if not preservation_reconciled:
+            evidence = {"destination": remote, "prior": prior, "status": "INVENTORIED"}
+            # Each attempt keeps its own inventory, including failures after a remote move.
+            attempt_path = evidence_path.with_name(evidence_path.stem + "-" + uuid.uuid4().hex + ".json")
+            atomic_json(attempt_path, evidence)
+            atomic_json(evidence_path, evidence)
         if prior and (old_size, old_sha) == (expected_size, expected_sha):
             transaction["status"] = "VERIFIED_FINAL"
             save_transaction()

@@ -27,6 +27,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from . import primary_checkpoint
 from .download import atomic_write_json, sha256_file, sha256_json, utc_now_iso
 from ..progress import mark_work_progress
 from .transcribe import (
@@ -295,8 +296,16 @@ def _normalize_decoder_result(value: Mapping[str, Any]) -> dict[str, Any]:
 class _FasterWhisperReviewDecoder:
     """Load one pinned model and reuse it for every bounded review WAV."""
 
-    def __init__(self, config: AudioReviewV2Config) -> None:
+    def __init__(
+        self,
+        config: AudioReviewV2Config,
+        *,
+        model_dir: Path | None = None,
+        cache_identity: Mapping[str, Any] | None = None,
+    ) -> None:
         self.config = config
+        self._model_dir = model_dir
+        self._cache_identity = copy.deepcopy(dict(cache_identity or {}))
         self._model: Any | None = None
         self._device = ""
         self._compute_type = ""
@@ -328,7 +337,7 @@ class _FasterWhisperReviewDecoder:
             device, compute_type = "cpu", self.config.compute_type_cpu
         try:
             self._model = WhisperModel(
-                self.config.model_name,
+                str(self._model_dir or self.config.model_name),
                 device=device,
                 compute_type=compute_type,
                 cpu_threads=max(1, os.cpu_count() or 1),
@@ -342,7 +351,7 @@ class _FasterWhisperReviewDecoder:
             ):
                 self._fallback_reason = f"{type(exc).__name__}: {exc}"
                 self._model = WhisperModel(
-                    self.config.model_name,
+                    str(self._model_dir or self.config.model_name),
                     device="cpu",
                     compute_type=self.config.compute_type_cpu,
                     cpu_threads=max(1, os.cpu_count() or 1),
@@ -370,6 +379,7 @@ class _FasterWhisperReviewDecoder:
             "initial_prompt_policy": "blind_first_then_evidence_prompt_on_ambiguity",
             "vad_filter": False,
             "fallback_reason": self._fallback_reason,
+            "cache_identity": copy.deepcopy(self._cache_identity),
         }
 
     def _decode_once(
@@ -2051,12 +2061,52 @@ def resolve_tr_audio_reviews_v2(
             f"{unsupported_pending}"
         )
 
+    runtime_decoder = decoder
+    owns_decoder = decoder is None
+    resolved_model_dir: Path | None = None
+    if decoder is not None:
+        try:
+            decoder_identity = copy.deepcopy(dict(decoder.provenance))
+            sha256_json(decoder_identity)
+        except Exception as exc:
+            raise AudioReviewV2Error(
+                "Injected audio-review decoder identity is unavailable"
+            ) from exc
+        if not decoder_identity:
+            raise AudioReviewV2Error(
+                "Injected audio-review decoder identity is unavailable"
+            )
+    elif not inventory:
+        decoder_identity = {
+            "engine": "not-used",
+            "reason": "empty-review-inventory",
+        }
+    else:
+        try:
+            resolved_model_dir = primary_checkpoint.resolve_model(settings.model_name)
+            decoder_identity = {
+                "engine": "faster-whisper",
+                "model": primary_checkpoint.model_identity(resolved_model_dir),
+                "runtime": primary_checkpoint.producer_identity(
+                    (
+                        _FasterWhisperReviewDecoder._decode_once,
+                        _normalize_decoder_result,
+                        _finite_milliseconds,
+                    )
+                ),
+            }
+        except Exception as exc:
+            raise AudioReviewV2Error(
+                "Production audio-review decoder identity is unavailable"
+            ) from exc
+
     code_path = Path(__file__)
     identity = {
         "correction_input_sha256": pack.manifest["input_sha256"],
         "provisional_output_sha256": provisional.output_sha256,
         "config": asdict(settings),
         "code_sha256": sha256_file(code_path),
+        "decoder": decoder_identity,
     }
     review_input_sha256 = sha256_json(identity)
     final_output_file = Path(final_output_path)
@@ -2210,8 +2260,6 @@ def resolve_tr_audio_reviews_v2(
         except (OSError, UnicodeError, json.JSONDecodeError):
             cached = {}
 
-    runtime_decoder = decoder
-    owns_decoder = decoder is None
     machine_decisions: dict[str, dict[str, Any]] = {}
 
     def save_recovery() -> None:
@@ -2406,7 +2454,11 @@ def resolve_tr_audio_reviews_v2(
                 clip_path = temporary_root / f"{position:03d}.wav"
                 clip_path.write_bytes(payload)
                 if runtime_decoder is None:
-                    runtime_decoder = _FasterWhisperReviewDecoder(settings)
+                    runtime_decoder = _FasterWhisperReviewDecoder(
+                        settings,
+                        model_dir=resolved_model_dir,
+                        cache_identity=decoder_identity,
+                    )
                 decoded = _normalize_decoder_result(
                     runtime_decoder.decode(clip_path, initial_prompt=None)
                 )
@@ -2523,6 +2575,31 @@ def resolve_tr_audio_reviews_v2(
         if owns_decoder and runtime_decoder is not None:
             runtime_decoder.close()
 
+    if decoder is not None:
+        try:
+            current_decoder_identity = copy.deepcopy(dict(decoder.provenance))
+        except Exception as exc:
+            raise AudioReviewV2Error(
+                "Injected audio-review decoder identity is unavailable after review"
+            ) from exc
+        if current_decoder_identity != decoder_identity:
+            raise AudioReviewV2Error(
+                "Injected audio-review decoder identity changed during review"
+            )
+    elif resolved_model_dir is not None:
+        try:
+            current_model_identity = primary_checkpoint.model_identity(
+                resolved_model_dir
+            )
+        except Exception as exc:
+            raise AudioReviewV2Error(
+                "Production audio-review model identity is unavailable after review"
+            ) from exc
+        if current_model_identity != decoder_identity["model"]:
+            raise AudioReviewV2Error(
+                "Production audio-review model changed during review"
+            )
+
     if legacy_migration is not None:
         save_recovery()
 
@@ -2591,6 +2668,7 @@ def resolve_tr_audio_reviews_v2(
         "provisional_output_sha256": provisional.output_sha256,
         "correction_output_sha256": None,
         "review_input_sha256": review_input_sha256,
+        "decoder_identity": decoder_identity,
         "manual_overrides_sha256": sha256_json(overrides),
         "config": asdict(settings),
         "decoder": decoder_provenance,

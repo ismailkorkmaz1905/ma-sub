@@ -494,8 +494,6 @@ def _validate_raw_vad_inventory(
     expected_policy = _strict_json_copy(
         asdict(RawASRV2Config()), "canonical raw ASR policy"
     )
-    if actual_policy.get("allow_cpu_fallback") is False:
-        expected_policy["allow_cpu_fallback"] = False
     actual_review_uids = actual_policy.pop("extra_audio_review_uids", None)
     expected_policy.pop("extra_audio_review_uids", None)
     if (

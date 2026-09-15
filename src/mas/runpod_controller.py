@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -31,6 +32,16 @@ from .runpod_capacity import (DEFAULT_GPU_TYPE_IDS, CapacityLease, CapacityPlan,
 
 class RunPodControllerError(RuntimeError):
     pass
+
+
+def _derive_raw_asr_auth_key(api_key):
+    if not isinstance(api_key, str) or not api_key or "\r" in api_key or "\n" in api_key:
+        raise RunPodControllerError("RUNPOD_API_KEY is missing or invalid")
+    return hmac.new(
+        api_key.encode("utf-8"),
+        b"ma-sub/raw-asr-auth-key/v1",
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _runtime_policy():
@@ -892,6 +903,7 @@ def _write_runtime_env(path, values, commit):
     remote_values = {
         "RUNPOD_POD_ID": values["RUNPOD_POD_ID"],
         "RUNPOD_API_KEY": values["RUNPOD_API_KEY"],
+        "MAS_RAW_ASR_AUTH_KEY": _derive_raw_asr_auth_key(values["RUNPOD_API_KEY"]),
         "MAS_GMAIL_ADDRESS": values["MAS_GMAIL_ADDRESS"],
         "MAS_GMAIL_APP_PASSWORD": values["MAS_GMAIL_APP_PASSWORD"],
         "MAS_NOTIFY_TO": values["MAS_NOTIFY_TO"],
@@ -921,6 +933,7 @@ def _write_runtime_env(path, values, commit):
         remote_values["MAS_ALLOW_C0E3_VENV_ADOPTION"] = "1"
     lines = [f"export {name}={shlex.quote(value)}" for name, value in remote_values.items()]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    os.chmod(path, 0o600)
 
 
 @contextmanager
@@ -2233,7 +2246,8 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
             scp = _scp_args(key, host, port)
             _network_retry(ssh + [
                 "install -d -m 700 /workspace/.mas-secrets /workspace/.mas-upload; "
-                "rm -f -- /workspace/.mas-secrets/rclone.conf"
+                "rm -f -- /workspace/.mas-secrets/rclone.conf; "
+                "install -m 600 /dev/null /workspace/.mas-secrets/runtime.env"
             ], budget=budget)
             _network_retry(scp + [str(archive), f"root@{host}:/workspace/.mas-upload/release.tar.gz"], budget=budget)
             _network_retry(scp + [str(runtime_env), f"root@{host}:/workspace/.mas-secrets/runtime.env"], budget=budget)

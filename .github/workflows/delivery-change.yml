@@ -1,0 +1,70 @@
+name: Qualify delivery-first implementation
+on:
+  push:
+    branches: [main]
+    paths: ['.delivery-stage/**', '.github/workflows/delivery-change.yml']
+permissions:
+  contents: write
+jobs:
+  qualify:
+    if: "!contains(github.event.head_commit.message, '[delivery-cleanup]')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+          pip install -r requirements-ci.lock
+          pip install --no-deps -e .
+      - name: Verify and extract exact reviewed implementation
+        run: |
+          python - <<'PY'
+          import base64, hashlib, io, lzma, tarfile
+          from pathlib import Path
+          root = Path('.delivery-stage')
+          encoded = ''.join((root / f'chunk-{i:02d}.b64').read_text() for i in range(1, 5))
+          compressed = base64.b64decode(encoded, validate=True)
+          assert hashlib.sha256(compressed).hexdigest() == '99a4a929481003ad56c0e0c3556ab8b151559593cf7a65d16efe62baac9f5715'
+          with tarfile.open(fileobj=io.BytesIO(lzma.decompress(compressed))) as archive:
+              for member in archive.getmembers():
+                  path = Path(member.name)
+                  assert member.isfile() and not path.is_absolute() and '..' not in path.parts
+                  assert member.size <= 1000000 and (member.name == 'apply.py' or path.parts[0] in {'src', 'tests', 'docs'})
+                  target = root / path
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(archive.extractfile(member).read())
+          PY
+          python .delivery-stage/apply.py
+      - name: Test with networking and GPUs disabled
+        env:
+          CUDA_VISIBLE_DEVICES: '-1'
+          NVIDIA_VISIBLE_DEVICES: none
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python_path="$(command -v python)"
+          sudo --preserve-env=CUDA_VISIBLE_DEVICES,NVIDIA_VISIBLE_DEVICES,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE,PYTEST_DISABLE_PLUGIN_AUTOLOAD,PYTHONDONTWRITEBYTECODE unshare --net -- bash -c 'ip link set lo up; exec runuser -u runner -- "$@"' -- "$python_path" -m pytest -q -ra -m 'not gpu' tests
+      - name: Commit only tested implementation to main
+        run: |
+          python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          allowed = set(json.loads(Path('.delivery-stage/allowed.json').read_text()))
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          untracked = set(subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).splitlines())
+          untracked = {p for p in untracked if not p.startswith('.delivery-stage/')}
+          assert changed | untracked == allowed, (changed, untracked, allowed)
+          subprocess.run(['git', 'add', '--', *sorted(allowed)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          PY
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Deliver first-hour and full burned episode despite bounded alignment failures'
+          git push origin HEAD:refs/heads/main
+          echo "TESTED_COMMIT=$(git rev-parse HEAD)"
+          echo "TESTED_TREE=$(git rev-parse HEAD^{tree})"

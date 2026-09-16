@@ -1,0 +1,26 @@
+name: Audit source snapshot
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/audit-snapshot.yml']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive exact audit baseline
+        run: |
+          git cat-file -e 04f1b19b79a6ce113c09a266fe8a31614427fc2a^{commit}
+          git archive --format=tar.gz --output=ma-sub-audit-source.tar.gz 04f1b19b79a6ce113c09a266fe8a31614427fc2a
+          sha256sum ma-sub-audit-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ma-sub-audit-source
+          path: ma-sub-audit-source.tar.gz
+          retention-days: 1

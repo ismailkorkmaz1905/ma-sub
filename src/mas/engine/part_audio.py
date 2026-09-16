@@ -200,7 +200,7 @@ def _scan_vad(audio_path, output_path, sample_count):
     model = _vad_model_identity()
     config, config_evidence = _audit_config()
     regions, fallback = _extract_vad_regions(Path(audio_path), config, ())
-    if fallback or not regions or any(region.get("source") != "silero_vad" for region in regions):
+    if fallback not in (None, "silero_vad_returned_no_regions") or any(region.get("source") != "silero_vad" for region in regions):
         raise PartScopeError("independent parent VAD failed; fallback cannot define part boundaries")
     if file_digest(Path(audio_path)) != audio_sha or _vad_model_identity() != model:
         raise PartScopeError("parent audio or independent VAD model changed during scan")
@@ -269,15 +269,17 @@ def prepare_episode_parts(root, episode, source_video, audio_path, captions_path
     for record in (source, audio, captions):
         if record is not None:
             _verify_file(root, record, deadline)
-    plan = build_part_plan(episode=episode, source=source, audio=audio, vad=vad, captions=captions)
+    from .part_scope import DELIVERY_BOUNDARY_POLICY
+    plan = build_part_plan(episode=episode, source=source, audio=audio, vad=vad, captions=captions,
+                           boundary_policy=DELIVERY_BOUNDARY_POLICY if episode >= 14 else None)
     _write_envelope(plan_path, plan)
     return plan
 
 
 def _caption_records(plan, part):
     return [{**item, "caption_index": index,
-             "start_ms": item["start_ms"] - part["start_ms"],
-             "end_ms": item["end_ms"] - part["start_ms"]}
+             "start_ms": max(item["start_ms"], part["start_ms"]) - part["start_ms"],
+             "end_ms": min(item["end_ms"], part["end_ms"]) - part["start_ms"]}
             for index, item in enumerate(
                 (item for item in plan["captions"]["records"]
                  if item["caption_index"] in part["caption_indices"]), 1)]

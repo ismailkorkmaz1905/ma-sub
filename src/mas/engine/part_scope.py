@@ -13,6 +13,8 @@ PART_AUDIO_FORMAT = "mas-derived-audio-part-1"
 SAMPLE_RATE = 16000
 TARGET_DURATION_MS = 3600000
 MIN_BOUNDARY_GAP_MS = 1000
+DELIVERY_BOUNDARY_POLICY = "delivery-bounded-v1"
+MAX_BOUNDARY_DELAY_MS = 90000
 
 
 class PartScopeError(IntegrityError):
@@ -58,7 +60,7 @@ def _inventory(plan):
             or not re.fullmatch(r"[0-9a-f]{64}", str(vad.get("producer_sha256", "")))):
         raise PartScopeError("part plan requires bound independent VAD evidence")
     regions = vad.get("regions")
-    if not isinstance(regions, list) or not regions:
+    if not isinstance(regions, list) or (not regions and plan.get("boundary_policy") != DELIVERY_BOUNDARY_POLICY):
         raise PartScopeError("part plan requires complete nonempty VAD inventory")
     captions = plan.get("captions")
     if captions is not None:
@@ -99,19 +101,25 @@ def _planned_parts(plan):
     gaps = [(left[1], right[0]) for left, right in zip(merged, merged[1:])
             if right[0] - left[1] >= MIN_BOUNDARY_GAP_MS]
     cuts = [0]
+    forced_cuts = set()
     while samples - cuts[-1] > TARGET_DURATION_MS * 16:
         target_ms = cuts[-1] // 16 + TARGET_DURATION_MS
         right_guard_ms = V2_BETA_SPEECH_COVERAGE_CONFIG.max_word_outside_speech_ms
         candidates = [right - right_guard_ms for left, right in gaps
                       if right - right_guard_ms >= target_ms]
-        if not candidates:
-            if len(cuts) > 1:
-                break
-            raise PartScopeError(
-                f"no proven speech/caption gap at or after {target_ms} ms; "
-                "refusing to cut dialogue or silently make one full-episode part"
-            )
-        cut = min(candidates) * 16
+        if plan.get("boundary_policy") == DELIVERY_BOUNDARY_POLICY and (
+                not candidates or min(candidates) > target_ms + MAX_BOUNDARY_DELAY_MS):
+            cut = target_ms * 16
+            forced_cuts.add(cut)
+        else:
+            if not candidates:
+                if len(cuts) > 1:
+                    break
+                raise PartScopeError(
+                    f"no proven speech/caption gap at or after {target_ms} ms; "
+                    "refusing to cut dialogue or silently make one full-episode part"
+                )
+            cut = min(candidates) * 16
         if cut >= samples:
             raise PartScopeError("part boundary reaches the source end")
         cuts.append(cut)
@@ -125,29 +133,42 @@ def _planned_parts(plan):
             "part_id": f"part-{index:03d}", "part_index": index,
             "start_ms": start_ms, "end_ms": end_ms,
             "start_sample": start, "end_sample": end,
+            **({"boundary_warning": "bounded_cut_without_proven_silence"}
+               if start in forced_cuts or end in forced_cuts else {}),
             "vad_region_indices": [item["vad_region_index"] for item in regions
-                                   if start_ms <= item["start_ms"] and item["end_ms"] <= end_ms],
+                                   if (item["end_ms"] > start_ms and item["start_ms"] < end_ms
+                                       if plan.get("boundary_policy") == DELIVERY_BOUNDARY_POLICY else
+                                       start_ms <= item["start_ms"] and item["end_ms"] <= end_ms)],
             "caption_indices": [item["caption_index"] for item in captions
-                                if start_ms <= item["start_ms"] and item["end_ms"] <= end_ms],
+                                if (item["end_ms"] > start_ms and item["start_ms"] < end_ms
+                                    if plan.get("boundary_policy") == DELIVERY_BOUNDARY_POLICY else
+                                    start_ms <= item["start_ms"] and item["end_ms"] <= end_ms)],
         })
     return parts
 
 
-def build_part_plan(*, episode, source, audio, vad, captions=None):
+def build_part_plan(*, episode, source, audio, vad, captions=None, boundary_policy=None):
     plan = copy.deepcopy({
         "format": PART_PLAN_FORMAT, "episode": episode, "source": source,
         "audio": audio, "vad": vad, "captions": captions,
         "target_duration_ms": TARGET_DURATION_MS,
     })
+    if boundary_policy is not None:
+        if boundary_policy != DELIVERY_BOUNDARY_POLICY or type(episode) is not int or episode < 14:
+            raise PartScopeError("unsupported delivery boundary policy")
+        plan['boundary_policy'] = boundary_policy
     plan["parts"] = _planned_parts(plan)
     return plan
 
 
 def validate_part_plan(plan):
-    if not isinstance(plan, dict) or set(plan) != {
-        "format", "episode", "source", "audio", "vad", "captions",
-        "target_duration_ms", "parts",
-    } or plan.get("format") != PART_PLAN_FORMAT:
+    required = {"format", "episode", "source", "audio", "vad", "captions", "target_duration_ms", "parts"}
+    if isinstance(plan, dict) and 'boundary_policy' in plan:
+        if (plan['boundary_policy'] != DELIVERY_BOUNDARY_POLICY
+                or type(plan.get('episode')) is not int or plan['episode'] < 14):
+            raise PartScopeError("unsupported delivery boundary policy")
+        required.add('boundary_policy')
+    if not isinstance(plan, dict) or set(plan) != required or plan.get("format") != PART_PLAN_FORMAT:
         raise PartScopeError("invalid part plan contract")
     if not isinstance(plan.get("parts"), list) or not 1 <= len(plan["parts"]) <= 64:
         raise PartScopeError("part plan requires between 1 and 64 parts")
@@ -172,8 +193,8 @@ def get_part(plan, part_id):
 def project_part_vad(plan, part_id):
     part = get_part(plan, part_id)
     return [{**copy.deepcopy(region),
-             "start_ms": region["start_ms"] - part["start_ms"],
-             "end_ms": region["end_ms"] - part["start_ms"]}
+             "start_ms": max(region["start_ms"], part["start_ms"]) - part["start_ms"],
+             "end_ms": min(region["end_ms"], part["end_ms"]) - part["start_ms"]}
             for region in plan["vad"]["regions"]
             if region["vad_region_index"] in part["vad_region_indices"]]
 

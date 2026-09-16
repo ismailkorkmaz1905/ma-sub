@@ -1,6 +1,7 @@
 """Bounded, optional CTC refinement. Failures retain the source cue interval."""
 import contextlib
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -39,7 +40,8 @@ class BoundedAligner:
         self.reader = threading.Thread(target=consume, daemon=True)
         self.reader.start()
         try:
-            if self._receive(startup_seconds).get('event') != 'ready':
+            self.ready = self._receive(startup_seconds)
+            if self.ready.get('event') != 'ready':
                 raise AlignmentUnavailable('alignment_model_unavailable')
         except BaseException:
             self.close()
@@ -100,8 +102,8 @@ def _interval(result, cue):
                 and end <= cue['end_ms'] + 500):
             raise ValueError('unusable_ctc_timing')
         previous = end
-    start = max(cue['start_ms'], round(float(words[0]['start']) * 1000))
-    end = min(cue['end_ms'], round(float(words[-1]['end']) * 1000))
+    start = max(0, round(float(words[0]['start']) * 1000))
+    end = round(float(words[-1]['end']) * 1000)
     if end <= start:
         raise ValueError('empty_ctc_interval')
     return start, end
@@ -140,17 +142,20 @@ def _worker(audio_path):
 
 def refine_cues(cues, audio_path, journal_root, binding, *, remaining,
                 group_seconds=20, total_seconds=600, reserve_seconds=1800, budget_path=None,
-                session_factory=BoundedAligner):
+                session_factory=None):
     from ..delivery_first import read_signed, write_signed
     from ..reliability import digest
     from ..progress import mark_work_progress
+    session_factory = session_factory or BoundedAligner
     root = Path(journal_root)
     root.mkdir(parents=True, exist_ok=True)
     budget_path = Path(budget_path) if budget_path is not None else root / 'budget.json'
     # Each group is charged before launch. A killed parent never grants a free retry.
     budget = (read_signed(budget_path, 'alignment-budget') if budget_path.exists()
               else {'episode': binding['episode'], 'spent_seconds': 0.0, 'limit_seconds': total_seconds})
-    if budget['episode'] != binding['episode'] or budget['limit_seconds'] != total_seconds:
+    if (budget.get('episode') != binding['episode'] or budget.get('limit_seconds') != total_seconds
+            or type(budget.get('spent_seconds')) not in (int, float)
+            or not math.isfinite(budget['spent_seconds']) or not 0 <= budget['spent_seconds'] <= total_seconds):
         raise ValueError('delivery alignment budget identity changed')
     session = None
     restarts = 0
@@ -205,10 +210,11 @@ def refine_cues(cues, audio_path, journal_root, binding, *, remaining,
             if result.get('status') == 'aligned':
                 start, end = result.get('start_ms'), result.get('end_ms')
                 if (type(start) is not int or type(end) is not int
-                        or not cue['start_ms'] <= start < end <= cue['end_ms']):
+                        or not max(0, cue['start_ms'] - 500) <= start < end <= cue['end_ms'] + 500):
                     result = {'status': 'fallback', 'reason': 'invalid_ctc_interval'}
                 else:
-                    item.update(start_ms=start, end_ms=end, timing_source='ctc_cue_bounds')
+                    item.update(start_ms=start, end_ms=end, timing_source='ctc_cue_bounds',
+                                source_interval_ms=[cue['start_ms'], cue['end_ms']])
             if result.get('status') != 'aligned':
                 item['timing_source'] = 'source_interval_fallback'
                 warnings.append({'uid': cue['uid'], 'start_ms': cue['start_ms'], 'end_ms': cue['end_ms'],

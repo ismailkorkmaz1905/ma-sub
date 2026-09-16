@@ -1194,7 +1194,28 @@ def _resume_partial_delivery(local_root, episode):
             or not 0 < saved_budget['limit_seconds'] <= 21600):
         raise RunPodControllerError('partial episode budget identity changed')
     budget = RunBudget(saved_budget['started_at'], limit_seconds=saved_budget['limit_seconds'])
-    budget.check()
+    delivery_late = False
+    try:
+        budget.check()
+    except BudgetExceeded:
+        from .delivery_first import EXPORT_MODE, _clock
+        first = local_root / 'parts' / plan['parts'][0]['part_id'] / 'work/partial-export.json'
+        if not first.is_file() or json.loads(first.read_text(encoding='utf-8')).get('mode') != EXPORT_MODE:
+            raise
+        # This allowance is only used in this local function. It never authorizes a Pod.
+        remaining = _clock(3600)
+        class LocalDeliveryBudget:
+            def check(self):
+                seconds = remaining()
+                if seconds <= 0:
+                    raise BudgetExceeded('Local delivery retry allowance expired; artifacts retained')
+                return seconds
+        budget = LocalDeliveryBudget()
+        delivery_late = True
+        atomic_json(local_root / 'work/delivery-deadline-missed.json', {
+            'episode': episode, 'original_started_at': saved_budget['started_at'],
+            'original_limit_seconds': saved_budget['limit_seconds'],
+            'status': 'SLO_MISSED', 'local_retry_seconds': 3600, 'gpu_authorized': False})
     for part in plan['parts']:
         part_id = part['part_id']
         folder = part_directory(local_root, part_id)
@@ -1203,11 +1224,11 @@ def _resume_partial_delivery(local_root, episode):
         if (folder / 'work/gpu-released-for-encode.json').is_file():
             try:
                 return complete_local_part(local_root, episode, part_id, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
-                                           total_timeout=_episode_budget(local_root, episode).check())
+                                           total_timeout=budget.check())
             finally:
                 _drain_notifications(local_root)
         handoff_path = local_root / 'work/partial-handoff.json'
-        if handoff_path.is_file():
+        if not delivery_late and handoff_path.is_file():
             from .progressive import validate_partial_handoff
             handoff = validate_partial_handoff(local_root, episode)
             if handoff['part_id'] == part_id and not safe_relative(local_root, handoff['expected_return']).is_file():
@@ -1236,7 +1257,7 @@ def _resume_partial_delivery(local_root, episode):
                 write_part_release(local_root, episode, part_id, pod_id, audit, total_timeout=budget.check())
                 try:
                     return complete_local_part(local_root, episode, part_id, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
-                                               total_timeout=_episode_budget(local_root, episode).check())
+                                               total_timeout=budget.check())
                 finally:
                     _drain_notifications(local_root)
         return None
@@ -1672,7 +1693,15 @@ def _collection_failure_paths_match(failure, data, status_path):
     files = manifest.get("files")
     expected_mode = {READY_FOR_LOCAL_ENCODE: 'strict-subtitles',
                      READY_FOR_PARTIAL_ENCODE: 'strict-partial-subtitles'}.get(failure.get('exit_code'), 'strict')
-    if (manifest.get("episode") != episode or manifest.get("mode") != expected_mode
+    from .delivery_first import EXPORT_MODE, _tag
+    delivery_mode = failure.get('exit_code') == READY_FOR_PARTIAL_ENCODE and manifest.get('mode') == EXPORT_MODE
+    if delivery_mode:
+        body = dict(manifest)
+        tag = body.pop('auth_tag', None)
+        if (type(episode) is not int or episode < 14 or not isinstance(tag, str)
+                or not hmac.compare_digest(tag, _tag(body, 'export'))):
+            return False
+    if (manifest.get("episode") != episode or (not delivery_mode and manifest.get("mode") != expected_mode)
             or not isinstance(files, list)):
         return False
     return any(

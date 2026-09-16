@@ -140,8 +140,11 @@ def test_handoff_to_real_authenticated_delivery_export(synthetic_parents, monkey
     primary_calls = []
     def primary(*a, **kw):
         primary_calls.append(1)
-        return {'segments': [{'start_ms': 500, 'end_ms': 1000, 'text': 'Merhaba', 'words': []}]}
+        return {'identity': {'model': {'fixture': True}, 'producer': {}},
+                'segments': [{'start_ms': 500, 'end_ms': 1000, 'text': 'Merhaba', 'words': []}]}
     monkeypatch.setattr(df, 'primary_transcript', primary)
+    from mas.engine import delivery_coverage
+    monkeypatch.setattr(delivery_coverage, 'model_binding', lambda _: {'model': {'fixture': True}, 'producer': {}})
     series, names, religious, _ = policy
     from mas.progressive import run_progressive_worker
     args = dict(total_timeout=1200, config_dir=None, series=series, names=names, religious=religious)

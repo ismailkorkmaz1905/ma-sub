@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import contextmanager
 import math
 import shutil
 import tempfile
@@ -11,6 +12,19 @@ from .partial_finalize import validate_partial_export
 from ..delivery import safe_relative, verified_record
 from ..hashing import sha256_file
 from ..reliability import atomic_json, digest, read_json
+
+
+@contextmanager
+def _encode_workspace(parent, log_path):
+    with tempfile.TemporaryDirectory(prefix='.partial-burn-', dir=parent) as folder:
+        work = Path(folder)
+        try:
+            yield work
+        except BaseException:
+            encoded = work / 'partial.mp4'
+            if encoded.is_file():
+                burn._preserve_failed_partial(encoded, log_path)
+            raise
 
 
 def burn_partial_indonesian_mp4(root, episode, part_id, *, total_timeout, target_size_gb=3):
@@ -54,6 +68,9 @@ def burn_partial_indonesian_mp4(root, episode, part_id, *, total_timeout, target
                 or pending.get('identity') != identity
                 or pending.get('output', {}).get('relative_path') != output.relative_to(root).as_posix()):
             raise ValueError('Pending partial encode publication identity changed')
+        if report['mode'] == 'delivery-first-v1':
+            from ..delivery_first import verify_evidence
+            verify_evidence(pending, 'partial-encoding')
         candidates = (output, output.with_suffix('.encode.partial.mp4'), output.with_suffix('.encode.interrupted.mp4'),
                       output.with_suffix('.partial-encode.failed.mp4'))
         for candidate in candidates:
@@ -83,8 +100,7 @@ def burn_partial_indonesian_mp4(root, episode, part_id, *, total_timeout, target
     if output.exists():
         raise ValueError('Unbound partial MP4 exists; preserve it')
     video = next(stream for stream in probe['streams'] if stream['codec_type'] == 'video')
-    with tempfile.TemporaryDirectory(prefix='.partial-burn-', dir=output.parent) as folder:
-        work = Path(folder)
+    with _encode_workspace(output.parent, output.with_suffix('.partial-encode.log')) as work:
         shutil.copyfile(subtitles, work / 'id.srt')
         encoded = work / 'partial.mp4'
         command = ['ffmpeg', '-hide_banner', '-nostdin', '-n', '-accurate_seek', '-seek_timestamp', '0',
@@ -122,6 +138,9 @@ def burn_partial_indonesian_mp4(root, episode, part_id, *, total_timeout, target
             'output': {'relative_path': output.relative_to(root).as_posix(), 'size_bytes': encoded.stat().st_size,
                        'sha256': sha256_file(encoded)}, 'command': command}
         remaining()
+        if report['mode'] == 'delivery-first-v1':
+            from ..delivery_first import sign_evidence
+            receipt = sign_evidence(receipt, 'partial-encoding')
         atomic_json(pending_path, {'data': receipt, 'sha256': digest(receipt)})
         try:
             burn._stage_output(encoded, output)
@@ -140,6 +159,9 @@ def validate_partial_encoding(root, episode, part_id, *, total_timeout=300):
     export, report = validate_partial_export(root, episode, part_id, total_timeout=total_timeout)
     path = safe_relative(root, f'parts/{part_id}/final/partial-encoding.json')
     receipt = read_json(path)
+    if report['mode'] == 'delivery-first-v1':
+        from ..delivery_first import verify_evidence
+        verify_evidence(receipt, 'partial-encoding')
     identity = receipt.get('identity', {})
     settings = identity.get('settings', {})
     unsigned_settings = {key: value for key, value in settings.items() if key != 'identity_sha256'}

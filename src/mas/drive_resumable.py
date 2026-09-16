@@ -114,12 +114,25 @@ class SessionStore:
         atomic_json(self.path, envelope)
 
 
-def _session_url(url):
+def prepare_session(partial, binding, *, allow_create, session_dir=None):
+    # Durable local intent precedes the controller's "started" flag and any HTTP create.
+    with SessionStore(partial, session_dir) as store:
+        state = store.load()
+        if state is None:
+            if not allow_create:
+                raise ResumableUploadError("saved upload session is missing; restart is not authorized")
+            store.save({"binding": binding, "status": "PREPARED", "acked": 0, "sent_through": 0})
+        elif state.get("binding") != binding:
+            raise ResumableUploadError("upload session source/destination/OAuth binding changed")
+
+
+def _session_url(url, object_id=None):
     try:
         parts = urlsplit(url)
         valid = (parts.scheme == "https" and parts.hostname == "www.googleapis.com"
                  and parts.port in (None, 443) and not parts.username and not parts.password
-                 and parts.path == "/upload/drive/v3/files" and not parts.fragment
+                 and parts.path in {"/upload/drive/v3/files", "/upload/drive/v3/files/" + str(object_id)}
+                 and not parts.fragment
                  and "upload_id=" in parts.query)
     except (ValueError, TypeError):
         valid = False
@@ -207,13 +220,27 @@ def upload(source, remote, partial, parent_id, size, sha256, credentials, *, tot
                 if (type(state.get("acked")) is not int or type(state.get("sent_through")) is not int
                         or not 0 <= state["acked"] <= state["sent_through"] <= size):
                     raise ResumableUploadError("invalid saved upload acknowledgement")
+                reserved = state.get("reserved_id")
+                if reserved is not None and (not isinstance(reserved, str)
+                        or re.fullmatch(r"[A-Za-z0-9_-]{1,256}", reserved) is None):
+                    raise ResumableUploadError("invalid reserved Drive object identity")
                 if state.get("status") == "COMPLETE":
-                    if state["acked"] != size or not isinstance(state.get("object_id"), str) or not state["object_id"]:
+                    if (state["acked"] != size or not isinstance(state.get("object_id"), str) or not state["object_id"]
+                            or reserved is not None and state["object_id"] != reserved):
                         raise ResumableUploadError("saved completion evidence is invalid")
                     return _completion(state)
-                if state.get("status") != "ACTIVE" or not state.get("session_uri"):
-                    raise ResumableUploadError("upload session initiation is ambiguous; evidence preserved")
-                _session_url(state["session_uri"])
+                if state.get("status") == "PREPARED":
+                    if state["acked"] != 0 or state["sent_through"] != 0 or state.get("session_uri"):
+                        raise ResumableUploadError("prepared upload intent is invalid")
+                elif state.get("status") in {"INITIATING", "EXPIRED"} and reserved is not None:
+                    pass  # Reconcile this exact pre-generated object, never create a second identity.
+                else:
+                    if state.get("status") != "ACTIVE" or not state.get("session_uri"):
+                        raise ResumableUploadError("upload session initiation is ambiguous; evidence preserved")
+                    _session_url(state["session_uri"], reserved)
+            else:
+                state = {"binding": binding, "status": "PREPARED", "acked": 0, "sent_through": 0}
+                store.save(state)
 
             token = None
             refreshes = 0
@@ -237,24 +264,96 @@ def upload(source, remote, partial, parent_id, size, sha256, credentials, *, tot
                 except (OSError, http.client.HTTPException, ValueError):
                     raise ResumableUploadError("private Drive OAuth refresh failed") from None
 
+            def start_session():
+                # Generate and persist an ID before create. A lost POST response can
+                # then be retried without creating duplicate Drive objects.
+                api = "https://www.googleapis.com/drive/v3/files"
+                endpoint = "https://www.googleapis.com/upload/drive/v3/files"
+                fields = "id,name,size,parents,sha256Checksum"
+                if not state.get("reserved_id"):
+                    try:
+                        code, _, data = transport("GET", api + "/generateIds?count=1&space=drive",
+                            {"Authorization": "Bearer " + token}, None, remaining())
+                    except (OSError, http.client.HTTPException):
+                        raise ResumableUploadError("Drive ID reservation failed; prepared intent retained") from None
+                    remaining()
+                    try:
+                        ids = json.loads(data).get("ids")
+                        if (code != 200 or not isinstance(ids, list) or len(ids) != 1
+                                or not isinstance(ids[0], str)
+                                or re.fullmatch(r"[A-Za-z0-9_-]{1,256}", ids[0]) is None):
+                            raise ValueError("id")
+                    except (ValueError, AttributeError):
+                        raise ResumableUploadError("Drive returned invalid reserved file identity") from None
+                    state["reserved_id"] = ids[0]
+                    store.save(state)
+                object_id = state["reserved_id"]
+                for _ in range(3):
+                    method, suffix = "POST", ""
+                    metadata = {"id": object_id, "name": partial.rsplit("/", 1)[-1], "parents": [parent_id]}
+                    if state["status"] in {"INITIATING", "EXPIRED"}:
+                        try:
+                            code, _, data = transport("GET", api + "/" + object_id + "?" + urlencode({
+                                "supportsAllDrives": "true", "fields": fields}),
+                                {"Authorization": "Bearer " + token}, None, remaining())
+                        except (OSError, http.client.HTTPException):
+                            continue
+                        remaining()
+                        if code == 401:
+                            refresh()
+                            continue
+                        if code == 200:
+                            try:
+                                observed = json.loads(data)
+                                observed_size = observed.get("size", "0")
+                                if (observed.get("id") != object_id or observed.get("name") != metadata["name"]
+                                        or observed.get("parents") != [parent_id]
+                                        or not isinstance(observed_size, str) or not observed_size.isdigit()
+                                        or int(observed_size) > size):
+                                    raise ValueError("identity")
+                            except (ValueError, AttributeError):
+                                raise ResumableUploadError("reserved Drive object ownership changed") from None
+                            if int(observed_size) == size:
+                                if observed.get("sha256Checksum", sha256) != sha256:
+                                    raise ResumableUploadError("reserved Drive object content changed")
+                                # This is upload completion only. The publisher still
+                                # reads every remote byte before any delivery receipt.
+                                state.update(status="COMPLETE", acked=size, sent_through=size, object_id=object_id)
+                                state.pop("session_uri", None)
+                                store.save(state)
+                                advance("upload", size)
+                                return True
+                            method, suffix, metadata = "PATCH", "/" + object_id, {}
+                        elif code != 404:
+                            if code in {408, 429, 500, 502, 503, 504}:
+                                continue
+                            raise ResumableUploadError(f"Drive object reconciliation rejected (HTTP {code})")
+                    state["status"] = "INITIATING"
+                    store.save(state)
+                    try:
+                        code, headers, _ = transport(method, endpoint + suffix + "?" + urlencode({
+                            "uploadType": "resumable", "supportsAllDrives": "true", "fields": fields}),
+                            {"Authorization": "Bearer " + token, "Content-Type": "application/json; charset=UTF-8",
+                             "X-Upload-Content-Type": "application/octet-stream", "X-Upload-Content-Length": str(size)},
+                            json.dumps(metadata).encode(), remaining())
+                    except (OSError, http.client.HTTPException):
+                        continue
+                    remaining()
+                    if code == 200:
+                        state.update(status="ACTIVE", acked=0, sent_through=0,
+                                     session_uri=_session_url(headers.get("location"), object_id))
+                        store.save(state)
+                        return False
+                    if code == 401:
+                        refresh()
+                    elif code not in {408, 409, 429, 500, 502, 503, 504}:
+                        raise ResumableUploadError(f"Drive upload initiation rejected (HTTP {code}); intent retained")
+                raise ResumableUploadError("Drive initiation retry allowance exhausted; reserved identity retained")
+
             refresh()
-            if state is None:
-                state = {"binding": binding, "status": "INITIATING", "acked": 0, "sent_through": 0}
-                store.save(state)
-                metadata = json.dumps({"name": partial.rsplit("/", 1)[-1], "parents": [parent_id]}).encode()
-                try:
-                    code, headers, _ = transport("POST", "https://www.googleapis.com/upload/drive/v3/files?"
-                        + urlencode({"uploadType": "resumable", "supportsAllDrives": "true", "fields": "id,name,size,parents"}),
-                        {"Authorization": "Bearer " + token, "Content-Type": "application/json; charset=UTF-8",
-                         "X-Upload-Content-Type": "application/octet-stream", "X-Upload-Content-Length": str(size)},
-                        metadata, remaining())
-                except (OSError, http.client.HTTPException):
-                    raise ResumableUploadError("upload session initiation is ambiguous; evidence preserved") from None
-                remaining()
-                if code != 200:
-                    raise ResumableUploadError("Drive upload session initiation failed; evidence preserved")
-                state.update(status="ACTIVE", session_uri=_session_url(headers.get("location")))
-                store.save(state)
+            if state["status"] != "ACTIVE" and start_session():
+                return _completion(state)
+            session_restarts = 0
             query = True
             stalled = 0
             while True:
@@ -293,7 +392,8 @@ def upload(source, remote, partial, parent_id, size, sha256, credentials, *, tot
                     if (not isinstance(metadata, dict) or not isinstance(metadata.get("id"), str) or not metadata["id"]
                             or metadata.get("name") != partial.rsplit("/", 1)[-1]
                             or metadata.get("parents") != [parent_id] or metadata.get("size") != str(size)
-                            or state["sent_through"] != size):
+                            or state["sent_through"] != size
+                            or state.get("reserved_id", metadata["id"]) != metadata["id"]):
                         raise ResumableUploadError("Drive upload completion does not match exact file binding")
                     state.update(status="COMPLETE", acked=size, object_id=metadata["id"])
                     state.pop("session_uri", None)
@@ -318,7 +418,13 @@ def upload(source, remote, partial, parent_id, size, sha256, credentials, *, tot
                 elif code == 404:
                     state["status"] = "EXPIRED"
                     store.save(state)
-                    raise ResumableUploadError("Drive upload session expired; restart is not authorized")
+                    if not state.get("reserved_id") or session_restarts >= 2:
+                        raise ResumableUploadError("Drive upload session expired; bounded restart unavailable")
+                    session_restarts += 1
+                    if start_session():
+                        return _completion(state)
+                    query, stalled = True, 0
+                    continue
                 elif code not in (408, 429, 500, 502, 503, 504):
                     raise ResumableUploadError(f"Drive upload rejected (HTTP {code}); session preserved")
                 stalled += 1

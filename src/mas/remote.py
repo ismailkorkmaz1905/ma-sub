@@ -267,7 +267,7 @@ class _UploadProgress:
 
 
 def _upload_resumable(source, remote, partial, expected_size, expected_sha, preflight,
-                      *, idle_timeout, total_timeout, allow_session_create):
+                      *, idle_timeout, total_timeout, allow_session_create, on_prepared=None):
     deadline = time.monotonic() + total_timeout
     credentials = _drive_credentials(remote, total_timeout=min(60, total_timeout))
     if credentials["credential_identity_sha256"] != preflight["credential_identity_sha256"]:
@@ -283,6 +283,13 @@ def _upload_resumable(source, remote, partial, expected_size, expected_sha, pref
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise RemoteVerificationError("Drive session upload deadline expired")
+    binding = {"source": str(Path(source).resolve()), "remote": remote, "partial": partial,
+               "parent_id": folder["ID"], "bytes": expected_size, "sha256": expected_sha,
+               "credential_identity_sha256": credentials["credential_identity_sha256"]}
+    if on_prepared is not None:
+        from .drive_resumable import prepare_session
+        prepare_session(partial, binding, allow_create=allow_session_create)
+        on_prepared()
     result = json.loads(_run_watchdog(
         [sys.executable, "-m", "mas.drive_resumable", "--source", str(Path(source).resolve()),
          "--remote", remote, "--partial", partial, "--parent-id", folder["ID"],
@@ -433,7 +440,10 @@ def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600,
                     or saved_attempt.suffix != ".json" or len(attempt_suffix) != 32
                     or any(char not in "0123456789abcdef" for char in attempt_suffix)):
                 raise RemoteVerificationError("unsafe Drive preservation receipt checkpoint path")
-            retained_listing = inventory(retained.rsplit("/", 1)[0])
+            retained_parent = retained.rsplit("/", 1)[0]
+            _run_watchdog(["rclone", "mkdir", retained_parent, *common],
+                          idle_timeout=idle_timeout, total_timeout=remaining())
+            retained_listing = inventory(retained_parent)
             retained_object = unique_object(retained_listing, filename)
             if existing is not None and retained_object is not None:
                 raise RemoteVerificationError("ambiguous retained Drive preservation state")
@@ -517,11 +527,13 @@ def upload_verified(source, remote, *, idle_timeout=120, total_timeout=3600,
             save_transaction()
         if require_drive_preflight:
             allow_session_create = not transaction.get("native_session_started", False)
-            transaction["native_session_started"] = True
-            save_transaction()
+            def prepared():
+                transaction["native_session_started"] = True
+                save_transaction()
             completion = _upload_resumable(path, remote, partial, expected_size, expected_sha, preflight,
                                           idle_timeout=idle_timeout, total_timeout=remaining(),
-                                          allow_session_create=allow_session_create)
+                                          allow_session_create=allow_session_create, on_prepared=prepared)
+            transaction["native_session_started"] = True
             transaction["resumable"] = completion
             save_transaction()
         else:

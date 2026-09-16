@@ -68,6 +68,11 @@ def validate_published_part(root, episode, part_id, *, total_timeout=300):
     if not path.is_file():
         return None
     data = _read_bound(path)
+    from .engine.partial_finalize import validate_partial_export
+    export, _ = validate_partial_export(root, episode, part_id, total_timeout=_remaining(deadline))
+    from .delivery_first import EXPORT_MODE, verify_evidence
+    if export['mode'] == EXPORT_MODE:
+        verify_evidence(data, 'part-publication')
     validate_part_release(root, episode, part_id, total_timeout=_remaining(deadline))
     from .engine.partial_encode import validate_partial_encoding
     encoding, mp4 = validate_partial_encoding(root, episode, part_id, total_timeout=_remaining(deadline))
@@ -93,6 +98,10 @@ def write_worker_delivery_ack(root, episode, part_id, *, total_timeout=300):
         raise ValueError('cannot acknowledge an unpublished part')
     data = {'format': 'mas-controller-part-ack-1', 'episode': episode, 'part_id': part_id,
             'delivery': delivery, 'delivery_data_sha256': digest(delivery)}
+    from .delivery_first import verify_evidence, sign_evidence
+    if delivery.get('quality_status') == 'NOT_STRICT':
+        verify_evidence(delivery, 'part-publication')
+        data = sign_evidence(data, 'controller-part-ack')
     path = part_directory(root, part_id) / 'work/controller-delivery-ack.json'
     if path.exists() and _read_bound(path) != data:
         raise ValueError('Existing controller part acknowledgement changed; preserve it')
@@ -109,7 +118,13 @@ def validate_worker_published_part(root, episode, part_id, *, total_timeout=300)
     ack = _read_bound(path)
     delivery = ack.get('delivery')
     from .engine.partial_finalize import validate_partial_export
-    validate_partial_export(root, episode, part_id, total_timeout=total_timeout)
+    export, _ = validate_partial_export(root, episode, part_id, total_timeout=total_timeout)
+    from .delivery_first import EXPORT_MODE, verify_evidence
+    if export['mode'] == EXPORT_MODE:
+        verify_evidence(ack, 'controller-part-ack')
+        if not isinstance(delivery, dict):
+            raise ValueError('Controller acknowledgement has no delivery evidence')
+        verify_evidence(delivery, 'part-publication')
     if (ack.get('format') != 'mas-controller-part-ack-1' or ack.get('episode') != episode
             or ack.get('part_id') != part_id or not isinstance(delivery, dict)
             or ack.get('delivery_data_sha256') != digest(delivery)
@@ -179,7 +194,9 @@ def complete_local_part(root, episode, part_id, remote_root, *, total_timeout):
     from .engine.partial_finalize import validate_partial_export
     export, report = validate_partial_export(root, episode, part_id, total_timeout=remaining())
     if report.get('mode') == 'delivery-first-v1':
+        from .delivery_first import sign_evidence
         data.update(quality_status='NOT_STRICT', quality_report=export['report'])
+        data = sign_evidence(data, 'part-publication')
     atomic_json(folder / 'final/drive_readback_receipt.json', {'data': data, 'sha256': digest(data)})
     validate_published_part(root, episode, part_id, total_timeout=remaining())
     write_worker_delivery_ack(root, episode, part_id, total_timeout=remaining())
@@ -192,18 +209,18 @@ def complete_parts(root, episode, *, total_timeout=300):
     root = Path(root)
     from .engine.part_audio import load_part_plan
     plan = load_part_plan(root, episode, verify_files=False)
+    from .delivery_first import EXPORT_MODE
+    first_path = part_directory(root, plan['parts'][0]['part_id']) / 'work/partial-export.json'
+    if first_path.is_file() and read_json(first_path).get('mode') == EXPORT_MODE:
+        import os
+        from .full_delivery import publish_full_episode
+        return publish_full_episode(root, episode, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
+                                    total_timeout=_remaining(deadline))
     published = []
     for part in plan['parts']:
         if validate_published_part(root, episode, part['part_id'], total_timeout=_remaining(deadline)) is None:
             return None
         published.append(file_record(part_directory(root, part['part_id']) / 'final/drive_readback_receipt.json', root))
-    from .delivery_first import EXPORT_MODE
-    first_export = read_json(part_directory(root, plan['parts'][0]['part_id']) / 'work/partial-export.json')
-    if first_export.get('mode') == EXPORT_MODE:
-        import os
-        from .full_delivery import publish_full_episode
-        return publish_full_episode(root, episode, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
-                                    total_timeout=_remaining(deadline))
     data = {'format': 'mas-complete-parts-1', 'status': 'COMPLETE_PARTS', 'episode': episode,
             'plan_sha256': sha256_file(root / 'work/part-plan.json'), 'source': plan['source'],
             'audio_sample_count': plan['audio']['sample_count'], 'parts': published,

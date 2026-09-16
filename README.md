@@ -1,5 +1,7 @@
 # Muhtemel Ask Subtitles
 
+Current audit and repair: [16 September 2026 A-Z results](docs/AZ_REPAIR_2026-09-16.md). Delivery-first remains the EP14+ policy; real acoustic quality and the four-to-six-hour target are not yet certified.
+
 ## Delivery-first policy, 15 September 2026
 
 For Episode 14 onward the default first-hour/local-QSV route prioritizes delivery.

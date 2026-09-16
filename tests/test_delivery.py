@@ -368,3 +368,29 @@ def test_preflight_uses_no_secret_values_in_configuration_errors(tmp_path, monke
     with pytest.raises(remote.RemoteVerificationError) as error:
         remote.drive_preflight("drive:delivery", required_bytes=0, config_path=config)
     assert "this-is-a-secret" not in str(error.value)
+
+
+def test_pending_preservation_creates_missing_retention_directory_before_listing(drive_upload, tmp_path, monkeypatch):
+    source, target, files, identities, calls, failures = drive_upload
+    files[target], identities[target] = b'old movie', 'old-id'
+    original = remote._run_watchdog
+    directories = set()
+    def backend(command, **kwargs):
+        if command[1] == 'lsjson' and command[2] not in directories:
+            raise remote.RemoteVerificationError('directory not found (rclone exit 3)')
+        result = original(command, **kwargs)
+        if command[1] == 'mkdir':
+            directories.add(command[2])
+        if command[1] == 'moveto':
+            directories.add(command[3].rsplit('/', 1)[0])
+        return result
+    monkeypatch.setattr(remote, '_run_watchdog', backend)
+    failures['moveto_before'] = 1
+    receipt = tmp_path / 'preserve.json'
+    with pytest.raises(remote.RemoteVerificationError):
+        remote.upload_verified(source, target, preservation_receipt=receipt)
+    result = remote.upload_verified(source, target, preservation_receipt=receipt)
+    assert result['sha256'] == hashlib.sha256(source.read_bytes()).hexdigest()
+    retained = next(k for k in files if '/.retained/' in k)
+    assert files[retained] == b'old movie' and identities[retained] == 'old-id'
+    assert sum(c[1] == 'copyto' for c in calls) == 1

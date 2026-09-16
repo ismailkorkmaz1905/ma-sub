@@ -456,7 +456,7 @@ def test_network_watchdog_observes_small_progress_chunks():
         "print('done')\n"
     )
     output = _run_watchdog(
-        [sys.executable, "-u", "-c", script], idle_timeout=0.2, total_timeout=3
+        [sys.executable, "-S", "-u", "-c", script], idle_timeout=0.2, total_timeout=3
     )
     assert output.strip() == b"done"
 
@@ -465,14 +465,14 @@ def test_network_watchdog_total_timeout_survives_closed_pipes():
     script = "import os,time; os.close(1); os.close(2); time.sleep(5)"
     with pytest.raises(RemoteVerificationError, match="watchdog expired"):
         _run_watchdog(
-            [sys.executable, "-c", script], idle_timeout=0.2, total_timeout=0.4
+            [sys.executable, "-S", "-c", script], idle_timeout=0.2, total_timeout=0.4
         )
 
 
 def test_network_watchdog_accepts_external_byte_progress_for_silent_process():
     progress = iter((True, True, True, True, True))
     _run_watchdog(
-        [sys.executable, "-c", "import time; time.sleep(0.35)"],
+        [sys.executable, "-S", "-c", "import time; time.sleep(0.35)"],
         idle_timeout=0.1,
         total_timeout=1,
         progress_probe=lambda: next(progress, False),

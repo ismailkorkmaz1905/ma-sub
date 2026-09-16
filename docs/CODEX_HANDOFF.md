@@ -1,5 +1,7 @@
 # Codex handoff
 
+Current audit and repair: [16 September 2026 A-Z results](AZ_REPAIR_2026-09-16.md). Delivery-first remains the EP14+ policy; real acoustic quality and the four-to-six-hour target are not yet certified.
+
 ## Current architecture update - 2026-09-12
 
 This section supersedes older architecture and resume descriptions below where

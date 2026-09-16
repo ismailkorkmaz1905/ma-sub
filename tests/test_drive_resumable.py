@@ -31,6 +31,8 @@ class FakeDrive:
         self.reject_chunks = False
         self.bad_metadata = False
         self.partial = PARTIAL
+        self.object_exists = False
+        self.created_ids = []
 
     def __call__(self, method, url, headers, body, timeout):
         assert 0 < timeout <= 30
@@ -40,8 +42,25 @@ class FakeDrive:
             assert b"grant_type=refresh_token" in body and b"secret-refresh" in body
             return 200, {}, b'{"access_token":"secret-access","token_type":"Bearer"}'
         assert headers["Authorization"] == "Bearer secret-access"
+        if method == "GET" and "/generateIds?" in url:
+            return 200, {}, b'{"ids":["object-id"]}'
+        if method == "GET":
+            assert "/files/object-id?" in url
+            if not self.object_exists:
+                return 404, {}, b""
+            return 200, {}, json.dumps({"id": "object-id", "name": self.partial.rsplit("/", 1)[-1],
+                "size": str(len(self.received)), "parents": ["folder-id"]}).encode()
         if method == "POST":
-            assert json.loads(body) == {"name": self.partial.rsplit("/", 1)[-1], "parents": ["folder-id"]}
+            assert json.loads(body) == {"id": "object-id", "name": self.partial.rsplit("/", 1)[-1], "parents": ["folder-id"]}
+            if self.object_exists:
+                return 409, {}, b""
+            self.object_exists = True
+            self.created_ids.append("object-id")
+            return 200, {"location": SESSION}, b""
+        if method == "PATCH":
+            assert self.object_exists and "/files/object-id?" in url and json.loads(body) == {}
+            self.received.clear()
+            self.query_status = None
             return 200, {"location": SESSION}, b""
         assert url == SESSION
         if body:
@@ -142,8 +161,8 @@ def test_changed_same_size_source_blocked_before_network(setup_upload):
     assert len(drive.calls) == count
 
 
-@pytest.mark.parametrize("status", [404, 403])
-def test_expired_or_forbidden_session_never_restarts(setup_upload, status):
+def test_forbidden_session_never_restarts(setup_upload):
+    status = 403
     _, drive, options = setup_upload
     drive.break_process = True
     with pytest.raises(KeyboardInterrupt):
@@ -182,20 +201,100 @@ def test_repeated_failure_is_bounded_without_new_session(setup_upload):
     assert "secret" not in str(error.value)
 
 
-def test_unknown_initiation_preserves_evidence_and_refuses_second_post(setup_upload):
+def test_ambiguous_initiation_retries_same_reserved_object(setup_upload):
     _, drive, options = setup_upload
+    first = [True]
+    def lost(method, url, *args):
+        result = drive(method, url, *args)
+        if method == "POST" and "upload/drive" in url and first[0]:
+            first[0] = False
+            raise OSError("lost create response")
+        return result
+    result = resume.upload(**(options | {"transport": lost}))
+    assert result['object_id'] == 'object-id'
+    assert drive.created_ids == ['object-id']
+    assert any(call[0] == 'PATCH' for call in drive.calls)
+    assert bytes(drive.received) == drive.content
 
-    def broken(method, url, *args):
-        if method == "POST" and url != "https://oauth2.googleapis.com/token":
-            raise OSError("secret session from failed response")
-        return drive(method, url, *args)
 
-    with pytest.raises(resume.ResumableUploadError, match="initiation is ambiguous"):
-        resume.upload(**(options | {"transport": broken}))
+def test_legacy_ambiguous_initiation_without_reserved_id_does_not_create(setup_upload):
+    _, drive, options = setup_upload
+    drive.break_process = True
+    with pytest.raises(KeyboardInterrupt):
+        resume.upload(**options)
+    with resume.SessionStore(PARTIAL, options['session_dir']) as store:
+        state = store.load()
+        state.pop('reserved_id')
+        state.pop('session_uri')
+        state['status'] = 'INITIATING'
+        store.save(state)
     count = len(drive.calls)
-    with pytest.raises(resume.ResumableUploadError, match="initiation is ambiguous"):
+    with pytest.raises(resume.ResumableUploadError, match='initiation is ambiguous'):
         resume.upload(**options)
     assert len(drive.calls) == count
+
+
+def test_expired_session_restarts_only_the_owned_temporary_object(setup_upload):
+    _, drive, options = setup_upload
+    drive.break_process = True
+    with pytest.raises(KeyboardInterrupt):
+        resume.upload(**options)
+    drive.query_status = 404
+    result = resume.upload(**options, allow_session_create=False)
+    assert result['object_id'] == 'object-id'
+    assert drive.created_ids == ['object-id']
+    assert bytes(drive.received) == drive.content
+    assert sum(call[0] == 'PATCH' for call in drive.calls) == 1
+
+
+def test_expired_session_does_not_overwrite_an_object_with_changed_ownership(setup_upload):
+    _, drive, options = setup_upload
+    drive.break_process = True
+    with pytest.raises(KeyboardInterrupt):
+        resume.upload(**options)
+    drive.query_status = 404
+    def foreign(method, url, *args):
+        code, headers, data = drive(method, url, *args)
+        if method == 'GET' and '/files/object-id?' in url:
+            metadata = json.loads(data)
+            metadata['parents'] = ['foreign-folder']
+            data = json.dumps(metadata).encode()
+        return code, headers, data
+    with pytest.raises(resume.ResumableUploadError, match='ownership changed'):
+        resume.upload(**(options | {'transport': foreign}), allow_session_create=False)
+    assert not any(call[0] == 'PATCH' for call in drive.calls)
+
+
+def test_lost_final_response_then_expired_session_does_not_send_bytes_again(setup_upload):
+    _, drive, options = setup_upload
+    def lost_final(method, url, headers, body, timeout):
+        result = drive(method, url, headers, body, timeout)
+        if method == 'PUT' and body and len(drive.received) == len(drive.content):
+            raise KeyboardInterrupt('final bytes received, reply lost')
+        return result
+    with pytest.raises(KeyboardInterrupt):
+        resume.upload(**(options | {'transport': lost_final}))
+    before = len(data_calls(drive))
+    drive.query_status = 404
+    assert resume.upload(**options)['status'] == 'UPLOAD_COMPLETE'
+    assert len(data_calls(drive)) == before
+    assert drive.created_ids == ['object-id']
+    assert not any(call[0] == 'PATCH' for call in drive.calls)
+
+
+def test_lost_create_response_before_remote_creation_is_bounded_and_resumable(setup_upload):
+    _, drive, options = setup_upload
+    attempts = []
+    def broken(method, url, *args):
+        if method == 'POST' and 'upload/drive' in url:
+            attempts.append(1)
+            raise OSError('request never reached server')
+        return drive(method, url, *args)
+    with pytest.raises(resume.ResumableUploadError, match='initiation retry allowance'):
+        resume.upload(**(options | {'transport': broken}))
+    assert len(attempts) == 3 and not drive.created_ids
+    assert resume.upload(**options, allow_session_create=False)['object_id'] == 'object-id'
+    assert drive.created_ids == ['object-id']
 
 
 def test_completion_metadata_must_match_exact_partial(setup_upload):
@@ -410,3 +509,27 @@ def test_cli_failure_never_prints_session_or_credentials(setup_upload, monkeypat
     output = capsys.readouterr()
     assert output.out == ""
     assert "secret" not in output.err and "googleapis" not in output.err
+
+
+def test_oauth_failure_leaves_resumable_prepared_intent_not_missing_session(setup_upload):
+    _, drive, options = setup_upload
+    def unavailable(*args):
+        raise OSError('temporary OAuth outage before file creation')
+    with pytest.raises(resume.ResumableUploadError, match='OAuth'):
+        resume.upload(**(options | {'transport': unavailable}))
+    with resume.SessionStore(PARTIAL, options['session_dir']) as store:
+        assert store.load()['status'] == 'PREPARED'
+    result = resume.upload(**options, allow_session_create=False)
+    assert result['status'] == 'UPLOAD_COMPLETE'
+    assert sum(c[0] == 'POST' and c[1] != 'https://oauth2.googleapis.com/token' for c in drive.calls) == 1
+
+
+def test_prepared_session_survives_controller_flag_before_worker_starts(setup_upload):
+    source, drive, options = setup_upload
+    binding = {'source': str(source.resolve()), 'remote': TARGET, 'partial': PARTIAL,
+               'parent_id': 'folder-id', 'bytes': options['size'], 'sha256': options['sha256'],
+               'credential_identity_sha256': CREDENTIALS['credential_identity_sha256']}
+    resume.prepare_session(PARTIAL, binding, allow_create=True, session_dir=options['session_dir'])
+    assert drive.calls == []
+    resume.prepare_session(PARTIAL, binding, allow_create=False, session_dir=options['session_dir'])
+    assert resume.upload(**options, allow_session_create=False)['status'] == 'UPLOAD_COMPLETE'

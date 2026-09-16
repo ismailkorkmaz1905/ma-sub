@@ -492,6 +492,13 @@ def validate_production_translation_policy(policy):
     return expected
 
 
+def _empty_delivery_scope(schema):
+    return (schema.get('publication_mode') == 'delivery-first-v1'
+            and schema.get('quality_status') == 'NOT_STRICT'
+            and schema.get('empty_scope') is True
+            and type(schema.get('episode')) is int and schema['episode'] >= 14)
+
+
 def validate_aligned_turkish_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and canonicalize a final Turkish forced-aligned V2 schema.
 
@@ -514,10 +521,10 @@ def validate_aligned_turkish_schema(schema: Mapping[str, Any]) -> dict[str, Any]
     episode = _require_int(trusted.get("episode"), "episode", minimum=1)
 
     blocks = trusted.get("blocks")
-    if not isinstance(blocks, list) or not blocks:
+    if not isinstance(blocks, list) or (not blocks and not _empty_delivery_scope(trusted)):
         raise IDTranslationError("blocks must be a non-empty JSON array")
     declared_count = trusted.get("block_count", len(blocks))
-    declared_count = _require_int(declared_count, "block_count", minimum=1)
+    declared_count = _require_int(declared_count, "block_count", minimum=0 if _empty_delivery_scope(trusted) else 1)
     if declared_count != len(blocks):
         raise IDTranslationError(
             f"block_count mismatch: expected {len(blocks)}, got {declared_count}"
@@ -759,6 +766,11 @@ def _validate_member_name(name: str) -> None:
         raise IDTranslationError(f"ZIP members must be top-level files: {name}")
 
 
+MAX_ID_ZIP_MEMBERS = 2048
+MAX_ID_ZIP_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_ID_ZIP_TOTAL_BYTES = 64 * 1024 * 1024
+
+
 def _open_checked_zip(path: Path) -> zipfile.ZipFile:
     if not path.is_file():
         raise IDTranslationError(f"ZIP not found: {path}")
@@ -767,6 +779,11 @@ def _open_checked_zip(path: Path) -> zipfile.ZipFile:
     except zipfile.BadZipFile as exc:
         raise IDTranslationError(f"Corrupt ZIP: {path}") from exc
     infos = archive.infolist()
+    if (len(infos) > MAX_ID_ZIP_MEMBERS
+            or any(i.file_size > MAX_ID_ZIP_MEMBER_BYTES for i in infos)
+            or sum(i.file_size for i in infos) > MAX_ID_ZIP_TOTAL_BYTES):
+        archive.close()
+        raise IDTranslationError("ID ZIP resource limit exceeded before decompression")
     names = [info.filename for info in infos]
     if len(names) != len(set(names)):
         archive.close()
@@ -896,8 +913,11 @@ def validate_id_translation_pack(
             raise IDTranslationError("ID translation instructions were modified")
 
         batch_count = _require_int(
-            manifest.get("batch_count"), "manifest batch_count", minimum=1
+            manifest.get("batch_count"), "manifest batch_count",
+            minimum=0 if _empty_delivery_scope(packed_schema) else 1
         )
+        if batch_count > len(names):
+            raise IDTranslationError("ID batch count exceeds archive inventory")
         batch_names = [
             f"batch_{number:03d}.jsonl" for number in range(1, batch_count + 1)
         ]

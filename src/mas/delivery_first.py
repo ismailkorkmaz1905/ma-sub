@@ -55,10 +55,25 @@ def read_signed(path, purpose):
     return body
 
 
+def sign_evidence(body, purpose):
+    signed = dict(body)
+    signed.pop('delivery_auth_tag', None)
+    signed['delivery_auth_tag'] = _tag(signed, purpose)
+    return signed
+
+
+def verify_evidence(body, purpose):
+    unsigned = dict(body)
+    tag = unsigned.pop('delivery_auth_tag', None)
+    if not isinstance(tag, str) or not hmac.compare_digest(tag, _tag(unsigned, purpose)):
+        raise ValueError('Delivery ' + purpose + ' authentication failed')
+
+
 def producer():
     root = Path(__file__).resolve().parents[2]
     names = ['src/mas/delivery_first.py', 'src/mas/engine/delivery_align.py',
-             'src/mas/full_delivery.py', 'src/mas/engine/id_translation.py',
+             'src/mas/full_delivery.py', 'src/mas/engine/delivery_coverage.py',
+             'src/mas/engine/id_translation.py',
              'src/mas/engine/translation_workspace.py', 'src/mas/engine/part_audio.py',
              'src/mas/engine/part_scope.py', 'requirements.lock']
     names += ['config/production/' + x for x in ('series.yaml', 'names.yaml', 'religious_terms.yaml')]
@@ -175,13 +190,14 @@ def build_schema(cues, episode, duration_ms, production_policy):
                        'start_ms': start, 'end_ms': end, 'tr_text': cue['text'],
                        'alignment_provenance': {'timing_source': cue['timing_source'],
                                                 'strict_alignment_pass': False,
-                                                'source_interval_ms': [cue['start_ms'], cue['end_ms']]}})
+                                                'source_interval_ms': cue.get('source_interval_ms', [cue['start_ms'], cue['end_ms']])}})
         last_end = end
     if not blocks:
-        raise ValueError('No usable Turkish dialogue is available for Indonesian translation')
+        warnings.append({'reason': 'no_usable_dialogue_in_scope', 'action': 'delivered_without_cues'})
     return validate_aligned_turkish_schema({
         'schema_version': '2.0', 'episode': episode, 'block_count': len(blocks), 'blocks': blocks,
         'publication_mode': MODE, 'quality_status': 'NOT_STRICT', 'delivery_policy': POLICY,
+        **({'empty_scope': True} if not blocks else {}),
         'production_policy': production_policy}), warnings
 
 
@@ -193,6 +209,13 @@ def read_translations(schema, translated_zip):
     with _open_checked_zip(Path(translated_zip)) as archive:
         batches = sorted(name for name in archive.namelist() if OUTPUT_BATCH_RE.fullmatch(name))
         if not batches:
+            if schema.get('empty_scope') is True and not expected:
+                from .engine.id_translation import _parse_json
+                report = _parse_json(archive.read('translation_report.json'), member='translation_report.json')
+                if (set(archive.namelist()) != {'translation_report.json'}
+                        or report != {'kind': 'delivery-empty-scope', 'schema_sha256': schema['schema_sha256']}):
+                    raise ValueError('Empty scope translation identity changed')
+                return {}, []
             raise ValueError('No Indonesian translation batches have been supplied')
         for name in batches:
             for record in _parse_jsonl(archive.read(name), member=name):
@@ -371,8 +394,11 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
         atomic_json(root / 'work/partial-export.json', export)
         return READY_FOR_PARTIAL_ENCODE
     derived = extract_part_audio(root, episode, part_id, total_timeout=max(.001, remaining()))
+    from .engine.delivery_coverage import model_binding, recover_gaps
     binding = {'episode': episode, 'part_id': part_id, 'audio_sha256': derived['lineage']['audio']['sha256'],
-               'plan_sha256': sha256_file(root / 'work/part-plan.json'), 'producer': producer()}
+               'plan_sha256': sha256_file(root / 'work/part-plan.json'), 'producer': producer(),
+               'duration_ms': (part['end_sample'] - part['start_sample']) // 16,
+               'primary_producer': model_binding(series)}
     transcript_path = child / 'prepare/delivery-primary.json'
     schema_path = child / 'prepare/delivery-schema.json'
     if schema_path.exists():
@@ -387,10 +413,17 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
                 raise ValueError('Delivery primary identity changed')
         else:
             raw = primary_transcript(derived['audio_path'], child / 'prepare', episode, series, names, religious)
+            if any(raw.get('identity', {}).get(k) != v for k, v in binding['primary_producer'].items()):
+                raise ValueError('Primary producer changed during delivery transcription')
             transcript = {'binding': binding, 'primary': raw}
             write_signed(transcript_path, transcript, 'primary')
         duration_ms = (part['end_sample'] - part['start_sample']) // 16
         cues, warnings = source_cues(transcript['primary']['segments'], duration_ms)
+        cues, coverage_notes = recover_gaps(cues, transcript['primary']['segments'],
+            derived['parent_vad_regions'], derived['captions_path'], derived['audio_path'], child, binding,
+            remaining=remaining, model_name=series['whisper_model'],
+            reserve_seconds=POLICY['delivery_reserve_seconds'])
+        warnings.extend(coverage_notes)
         refined, notes = refine_cues(cues, derived['audio_path'], child / 'work/delivery-align', binding,
             remaining=remaining, budget_path=root / 'work/delivery-alignment-budget.json',
             group_seconds=POLICY['group_seconds'], total_seconds=POLICY['alignment_seconds'],
@@ -398,6 +431,9 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
         schema, overlap_notes = build_schema(refined, episode, duration_ms,
             build_production_translation_policy(series, names, religious))
         warnings += notes + overlap_notes
+        if part.get('boundary_warning'):
+            warnings.append({'reason': part['boundary_warning'], 'action': 'reported_not_blocked',
+                             'source_boundary_ms': [part['start_ms'], part['end_ms']]})
         warnings.append({'reason': 'primary_transcript_without_mandatory_manual_review',
                          'action': 'delivered_with_warning'})
         write_signed(schema_path, {'binding': binding, 'schema': schema, 'warnings': warnings}, 'schema')
@@ -409,6 +445,15 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
     else:
         create_id_translation_pack(schema, id_pack, batch_size=series['batch_size'],
                                    glossary=schema['production_policy']['glossary'])
+    if schema.get('empty_scope') is True and not schema['blocks']:
+        from .engine.id_translation import _write_zip_atomic, _pretty_json_bytes
+        if not id_output.exists():
+            _write_zip_atomic(id_output, {'translation_report.json': _pretty_json_bytes({
+                'kind': 'delivery-empty-scope', 'schema_sha256': schema['schema_sha256']})})
+        create_export(root, episode, part, derived, schema, transcript_path, schema_path,
+                      id_pack, id_output, warnings, remaining=remaining)
+        validate_partial_export(root, episode, part_id, total_timeout=max(.001, remaining()))
+        return READY_FOR_PARTIAL_ENCODE
     workspace = prepare_id_translation_workspaces(id_pack, child / 'translation_input/id-workers')
     if not id_output.exists():
         context = [derived['lineage_path'], transcript_path, schema_path, Path(workspace)]

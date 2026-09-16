@@ -147,11 +147,12 @@ def test_network_volume_usage_deduplicates_hardlinks_and_surfaces_stat_error(tmp
 
 
 def test_encode_idle_watchdog_preserves_log_and_partial(tmp_path):
+    # Stdlib-only worker: do not charge host sitecustomize imports to a 200 ms I/O test.
     partial = tmp_path / 'partial.mp4'
     log = tmp_path / 'encode.log'
     script = "from pathlib import Path; import time; Path('partial.mp4').write_bytes(b'partial'); time.sleep(5)"
     with pytest.raises(TimeoutError, match='frame progress watchdog expired'):
-        _run_encode([sys.executable, '-c', script], tmp_path, log, partial, 2, .2)
+        _run_encode([sys.executable, '-S', '-c', script], tmp_path, log, partial, 2, .2)
     assert 'frame progress watchdog expired' in log.read_text(encoding='utf-8')
     assert log.with_suffix('.failed.mp4').read_bytes() == b'partial'
 
@@ -161,7 +162,7 @@ def test_encode_marks_real_progress_and_cleans_up_on_observer_interrupt(tmp_path
     monkeypatch.setattr(burned_module, 'mark_work_progress',
                         lambda stage, **fields: marks.append((stage, fields)))
     script = "print('frame=1', flush=True); print('out_time_us=1000', flush=True)"
-    _run_encode([sys.executable, '-u', '-c', script], tmp_path, tmp_path / 'ok.log',
+    _run_encode([sys.executable, '-S', '-u', '-c', script], tmp_path, tmp_path / 'ok.log',
                 tmp_path / 'none.mp4', 2, 1)
     assert marks == [('burned_mp4', {'completed': 1}), ('burned_mp4', {'completed': 1})]
 
@@ -176,7 +177,7 @@ def test_encode_marks_real_progress_and_cleans_up_on_observer_interrupt(tmp_path
                         lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
     script = "import time; print('frame=1', flush=True); time.sleep(5)"
     with pytest.raises(KeyboardInterrupt):
-        _run_encode([sys.executable, '-u', '-c', script], tmp_path, tmp_path / 'interrupt.log',
+        _run_encode([sys.executable, '-S', '-u', '-c', script], tmp_path, tmp_path / 'interrupt.log',
                     tmp_path / 'none.mp4', 2, 1)
     assert processes[0].poll() is not None
 

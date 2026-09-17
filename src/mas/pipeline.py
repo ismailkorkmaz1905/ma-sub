@@ -1009,7 +1009,57 @@ def status(episode):
                                       metadata_status="STORED_METADATA_BOUND", path=path.relative_to(root).as_posix())
                 except (OSError, ValueError, KeyError, TypeError):
                     row[label]["metadata_status"] = "INVALID_LOCAL_METADATA"
+            if episode >= 14:
+                from .delivery_first import read_signed, quality_summary, _tag, EXPORT_MODE
+                import hmac
+                export_path = child / "work/partial-export.json"
+                if export_path.is_file():
+                    try:
+                        export = _json(export_path)
+                        body = dict(export)
+                        tag = body.pop('auth_tag', None)
+                        if (body.get('mode') != EXPORT_MODE or body.get('episode') != episode
+                                or body.get('part_id') != part_id or body.get('plan_sha256') != plan_sha
+                                or not isinstance(tag, str) or not hmac.compare_digest(tag, _tag(body, 'export'))):
+                            raise ValueError('delivery metadata authentication failed')
+                        from .delivery import verified_record
+                        report = _json(verified_record(root, export['report']))
+                        row['quality'] = {**quality_summary(report),
+                            'metadata_status': 'SIGNED_STORED_REPORT', 'artifact_revalidation': False}
+                    except Exception:
+                        row['quality'] = {'metadata_status': 'UNVERIFIED_LOCAL_METADATA'}
+                tail_path = child / 'final/local-tail-ready.json'
+                if tail_path.is_file():
+                    try:
+                        tail = read_signed(tail_path, 'local-tail-ready')
+                        if (tail.get('episode') != episode or tail.get('part_id') != part_id
+                                or tail.get('plan_sha256') != plan_sha
+                                or tail.get('status') != 'LOCAL_ENCODED_NOT_PUBLISHED'):
+                            raise ValueError('tail metadata scope changed')
+                        row['local_tail'] = {'stored_status': tail['status'],
+                            'artifact_revalidation': False, 'remote_publication': False}
+                    except Exception:
+                        row['local_tail'] = {'metadata_status': 'UNVERIFIED_LOCAL_METADATA'}
             progress["parts"].append(row)
+        if episode >= 14:
+            full_path = root / 'final/delivery-first/full-drive-receipt.json'
+            progress['full_delivery'] = {'present': full_path.is_file(), 'live_verification': False}
+            if full_path.is_file():
+                try:
+                    from .delivery_first import read_signed
+                    full = read_signed(full_path, 'full-delivery')
+                    if (full['identity']['episode'] != episode or full['identity']['plan_sha256'] != plan_sha
+                            or full['status'] != 'DELIVERED_WITH_WARNINGS'
+                            or full['quality_status'] != 'NOT_STRICT'
+                            or full['remote']['bytes'] != full['mp4']['size_bytes']
+                            or full['remote']['sha256'] != full['mp4']['sha256']):
+                        raise ValueError('full delivery metadata scope changed')
+                    progress['full_delivery'].update(stored_status=full['status'],
+                        quality_status=full['quality_status'], remote=full['remote']['remote'],
+                        bytes=full['remote']['bytes'], sha256=full['remote']['sha256'],
+                        metadata_status='SIGNED_STORED_RECEIPT', artifact_revalidation=False)
+                except Exception:
+                    progress['full_delivery']['metadata_status'] = 'UNVERIFIED_LOCAL_METADATA'
         result["progressive"] = progress
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0

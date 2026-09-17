@@ -18,7 +18,12 @@ $userEnvironmentNames = @(
     "MAS_RUNPOD_DATA_CENTER_ID",
     "MAS_RUNPOD_GPU_TYPE_ID",
     "MAS_RUNPOD_GPU_TYPE_IDS",
-    "MAS_RUNPOD_MAX_COST_PER_HR"
+    "MAS_RUNPOD_MAX_COST_PER_HR",
+    "MAS_RUNPOD_IMAGE",
+    "MAS_RUNPOD_STORAGE_QUOTE",
+    "MAS_DELIVERY_EXECUTION_PLAN",
+    "MAS_PRODUCTION_PRIORITY",
+    "MAS_EPISODE_BUDGET_SECONDS"
 )
 foreach ($name in $userEnvironmentNames) {
     if ($name -eq "RUNPOD_POD_ID") {

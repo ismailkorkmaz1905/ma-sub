@@ -13,7 +13,7 @@ from .engine.download import DownloadError, _validated_cookie_file
 from .notify import enqueue_notification, send_email
 from .pipeline import run, status
 from .runlog import RunLog
-from .runpod_controller import drain_cli_notifications, run_remote_episode
+from .runpod_controller import RunPodCleanupRequired, drain_cli_notifications, run_remote_episode
 
 
 def _runpod_preflight(*, worker_only=False):
@@ -106,10 +106,58 @@ def _runpod_preflight(*, worker_only=False):
     return 1 if failures else 0
 
 
-def doctor(strict_runpod=False, runpod_worker=False):
+def doctor_controller():
+    from . import runpod_controller as controller
+    from .engine.burned_mp4 import _qsv_hardware
+    phase = "local_configuration"
+    try:
+        for executable in ("git", "ssh", "scp", "ffmpeg", "ffprobe", "rclone"):
+            if not shutil.which(executable):
+                raise RuntimeError("controller tool missing: " + executable)
+        values = controller._required_environment()
+        commit, config = controller._local_preflight(values)
+        public_key = Path(values["MAS_RUNPOD_SSH_KEY"] + ".pub")
+        if not public_key.is_file() or not public_key.read_text(encoding="utf-8").strip():
+            raise RuntimeError("controller SSH public key is missing or empty")
+        controller._configured_runtime_image()
+        quote_path = os.getenv("MAS_RUNPOD_STORAGE_QUOTE")
+        if not quote_path:
+            raise RuntimeError("MAS_RUNPOD_STORAGE_QUOTE is missing")
+        controller.load_storage_quote(Path(quote_path))
+        controller._production_priority()
+        execution = os.getenv("MAS_DELIVERY_EXECUTION_PLAN", "local-qsv-v1")
+        if execution == "local-qsv-v1":
+            _qsv_hardware(timeout_seconds=55)
+        elif execution != "remote-nvenc-v1":
+            raise RuntimeError("unsupported MAS_DELIVERY_EXECUTION_PLAN")
+        phase = "drive_readiness"
+        readiness = controller.drive_preflight(values["MAS_DRIVE_STRICT_REMOTE"],
+            required_bytes=0, config_path=config, total_timeout=60)
+        print(f"controller_preflight: PASS; commit={commit}; execution={execution}")
+        print(f"local_disk_free_bytes: {shutil.disk_usage(controller.ROOT).free}")
+        print(f"drive_free_bytes: {readiness['free_bytes']}")
+        print("scope: read-only readiness and synthetic encoder; no Pod acquired")
+        print("not_verified: image startup, real GPU inference, episode sizing, subtitle quality, delivery speed")
+        return 0
+    except Exception as exc:
+        # OAuth/provider failures can contain credentials. Only our local
+        # validation errors are printable; never render arbitrary network errors.
+        message = (str(exc) if phase == "local_configuration"
+                   and isinstance(exc, (RuntimeError, ValueError)) else type(exc).__name__)
+        print("controller_preflight: FAIL at " + phase + ": " + message, file=sys.stderr)
+        return 1
+
+
+def doctor(strict_runpod=False, runpod_worker=False, controller=False):
     print("mas doctor")
+    if controller:
+        return doctor_controller()
+    missing = []
     for executable in ("python", "ffmpeg", "ffprobe", "git", "rclone"):
-        print(f"{executable}: {'OK' if shutil.which(executable) else 'MISSING'}")
+        available = bool(shutil.which(executable))
+        print(f"{executable}: {'OK' if available else 'MISSING'}")
+        if not available:
+            missing.append(executable)
     if strict_runpod or runpod_worker:
         required_tools = ("python", "ffmpeg", "ffprobe", "git")
         if not runpod_worker:
@@ -128,7 +176,9 @@ def doctor(strict_runpod=False, runpod_worker=False):
         print(f"torch: {torch.__version__}; cuda={torch.cuda.is_available()}")
     except Exception:
         print("torch: MISSING")
-    return 0
+        missing.append("torch")
+    print("scope: tool inventory only; not production readiness")
+    return 1 if missing else 0
 
 
 def test():
@@ -180,8 +230,10 @@ def main(argv=None):
     status_parser = commands.add_parser("status")
     status_parser.add_argument("episode", type=int)
     doctor_parser = commands.add_parser("doctor")
-    doctor_parser.add_argument("--strict-runpod", action="store_true")
-    doctor_parser.add_argument("--strict-runpod-worker", action="store_true")
+    doctor_modes = doctor_parser.add_mutually_exclusive_group()
+    doctor_modes.add_argument("--strict-runpod", action="store_true")
+    doctor_modes.add_argument("--strict-runpod-worker", action="store_true")
+    doctor_modes.add_argument("--controller", action="store_true")
     commands.add_parser("test")
     commands.add_parser("notify-test")
     pilot_parser = commands.add_parser("subtitle-pilot")
@@ -219,7 +271,9 @@ def main(argv=None):
             elif args.command == "status":
                 result = status(args.episode)
             elif args.command == "doctor":
-                if args.strict_runpod_worker:
+                if args.controller:
+                    result = doctor(controller=True)
+                elif args.strict_runpod_worker:
                     result = doctor(runpod_worker=True)
                 elif args.strict_runpod:
                     result = doctor(strict_runpod=True)
@@ -249,7 +303,10 @@ def main(argv=None):
                 details = f"Sonuç: çalıştırma tamamlanamadı.\nHata: {type(exc).__name__}: {exc}"
                 if run_log:
                     details += f"\nSon log: {run_log.directory / 'LATEST'}"
-                details += f"\nSonraki adım: logu inceleyip ./mas run {args.episode} komutuyla güvenli devam edin."
+                if isinstance(exc, RunPodCleanupRequired):
+                    details += "\nSonraki adım: owned Pod yokluğunu dışarıdan doğrulayın; doğrulamadan yeniden başlatmayın."
+                else:
+                    details += f"\nSonraki adım: logu inceleyip ./mas run {args.episode} komutuyla güvenli devam edin."
                 enqueue_notification(args.episode, "çalıştırma başarısız", details,
                                      root=run_log.directory.parent if run_log else episode_dir(args.episode),
                                      kind="terminal")
@@ -257,7 +314,9 @@ def main(argv=None):
                         and args.stop_after is None and not os.getenv("MAS_REMOTE_JOB_TOKEN")):
                     drain_cli_notifications(args.episode)
             print(f"FAILED STAGE: {args.command.upper()}\nCAUSE: {exc}\nCHECKPOINT PRESERVED: yes", file=sys.stderr)
-            if args.command == "subtitle-pilot":
+            if isinstance(exc, RunPodCleanupRequired):
+                print("DO NOT RELAUNCH: externally verify owned Pod absence first", file=sys.stderr)
+            elif args.command == "subtitle-pilot":
                 print("PILOT ONLY: no automatic full-run retry; inspect preserved evidence", file=sys.stderr)
             elif getattr(args, "episode", None):
                 print(f"SAFE RETRY:\n./mas run {args.episode}", file=sys.stderr)

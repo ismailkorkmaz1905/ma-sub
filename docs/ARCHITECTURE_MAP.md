@@ -1,4 +1,30 @@
-# Mimari harita
+# Güncel mimari: EP14+ delivery-first
+
+Son güncelleme: 18 Eylül 2026. [Hazırlık ve recovery sözleşmesi](EP14_READY_2026-09-18.md).
+Aşağıdaki eski strict şema EP14 varsayılan giriş yolu değildir.
+
+```text
+Windows controller: doctor --controller -> run 14
+  -> resmi kaynak kimliği ve değişmez video/audio
+  -> sınırlı RunPod lease, GPU primary ASR
+  -> sınırlı boşluk recovery ve isteğe bağlı CTC
+  -> gerçek Endonezce dönüşü için part handoff
+  -> export indirilir, owned Pod yokluğu dışarıdan doğrulanır
+  -> yerel QSV encode ve imzalı doğrulama
+       part-001: Drive upload + byte/SHA readback + publication ACK
+       sonraki:  LOCAL_ENCODED_NOT_PUBLISHED + ayrı local-tail ACK
+  -> bütün sample aralıklarını bir kez kapsayan full stream-copy MP4
+  -> full Drive upload + byte/SHA readback
+  -> DELIVERED_WITH_WARNINGS, NOT_STRICT, perceptual NOT_ASSERTED
+```
+
+Yeni bir kaynak edinimi veya encoding sonucu yalnızca dosya var diye kabul edilmez.
+Hata cleanup'ı yeni iş preflight'ından bağımsızdır; orijinal iş bütçesini uzatmaz.
+Sahipliği veya dış kapatması doğrulanamayan Pod için yeniden başlatma önerilmez.
+`status 14` imzalı küçük yerel kayıtları gösterir; canlı Drive/Pod doğrulaması değildir.
+Kalite uyarıları ve boş altyazı açıkça gösterilir, strict PASS'e çevrilmez.
+
+# Tarihsel strict mimari: EP11/12/13
 
 ```mermaid
 flowchart TD

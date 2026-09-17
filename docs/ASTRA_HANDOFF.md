@@ -1,5 +1,10 @@
 > DELIVERY COMPLETE, 2026-09-06: Episode 12 1080p H.264/AAC MP4 with Indonesian subtitles burned in is complete and published. Drive object 1FAkmN0Z9HWcRrbfOT8C-ftmSXXiDdA2I was fully read before and after metadata-only rename: both actual reads match 8,978,040,872 bytes and SHA-256 3069df576bcf5d9ec88b1176ed3f016c2f210e511adcd216d38bf4b021f22675. Transport PASS; subtitle/perceptual quality remains REVIEW_REQUIRED. All owned MP4 Pods are externally ABSENT, retained Pod EXITED, volume preserved. Last balance USD 2.8764311039 at 14:01 UTC. No active GPU, encoder or delivery job remains.
 
+Current EP14 launch repair: [18 September 2026 repair and operator checks](EP14_READY_2026-09-18.md).
+This supersedes older controller cleanup, all-tail publication and doctor guidance below.
+First-part Drive readback is followed by verified local tail encoding and one full MP4.
+Real acoustic quality, target runtime and the live controller environment are not certified.
+
 Current audit and repair: [16 September 2026 A-Z results](AZ_REPAIR_2026-09-16.md). Delivery-first remains the EP14+ policy; real acoustic quality and the four-to-six-hour target are not yet certified.
 >
 > Local MP4: C:/Users/Ismail/CodeBase/ma-sub-archive-20260906/deliverables/Muhtemel Ask 12.Bolum.id.BURNED.REVIEW.mp4. Evidence: mp4-final-20260906T125824Z/recovery-complete.json under that archive. Earlier var/ and EPISODES/ paths also resolve under the archive. SSH -n -T and CUDA AV1 decode are in main; last local suite 742 passed, 5 skipped in 57.59 seconds. Pip/uv installer caches and failed video intermediates were cleaned; models, venv, sources and final artifacts preserved. Native single-stream download and direct-ID readback recovered the shared Google quota failure. Episode 13 has NOT started; use the updated desktop launcher and [plain-language report](SON_DURUM_VE_BOLUM_13.md). Earlier stopped/incomplete/active-job statements below are historical.

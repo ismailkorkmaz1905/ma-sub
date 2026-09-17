@@ -73,7 +73,8 @@ def producer():
     root = Path(__file__).resolve().parents[2]
     names = ['src/mas/delivery_first.py', 'src/mas/engine/delivery_align.py',
              'src/mas/full_delivery.py', 'src/mas/engine/delivery_coverage.py',
-             'src/mas/engine/id_translation.py',
+             'src/mas/engine/id_translation.py', 'src/mas/partial_delivery.py',
+             'src/mas/engine/partial_encode.py',
              'src/mas/engine/translation_workspace.py', 'src/mas/engine/part_audio.py',
              'src/mas/engine/part_scope.py', 'requirements.lock']
     names += ['config/production/' + x for x in ('series.yaml', 'names.yaml', 'religious_terms.yaml')]
@@ -251,6 +252,17 @@ def display_text(text):
     return ' '.join(words[:middle]) + '\n' + ' '.join(words[middle:])
 
 
+def quality_summary(report):
+    warnings = report.get('warnings', [])
+    residual = [span for warning in warnings for span in warning.get('residual_intervals_ms', [])]
+    return {'subtitle_cue_count': report['block_count'],
+            'no_subtitles_warning': report['block_count'] == 0,
+            'omitted_cue_count': report['omitted_cue_count'],
+            'unresolved_hint_interval_count': len(residual),
+            'unresolved_hint_ms': sum(max(0, b - a) for a, b in residual),
+            'warning_count': len(warnings), 'quality_status': 'NOT_STRICT'}
+
+
 def create_export(root, episode, part, derived, schema, transcript_path, schema_path,
                   id_pack, id_output, warnings, *, remaining):
     from .delivery import safe_relative
@@ -295,6 +307,8 @@ def create_export(root, episode, part, derived, schema, transcript_path, schema_
               'omitted_cue_count': sum(w.get('action') == 'omitted' for w in warnings),
               'warnings': warnings, 'input_files': {k: file_record(p, root) for k, p in paths.items()},
               'outputs': {k + '_srt': file_record(p, root) for k, p in output_paths.items()}}
+    report['quality_summary'] = quality_summary(report)
+    print('[QUALITY] ' + part['part_id'] + ': ' + json.dumps(report['quality_summary']), flush=True)
     report_path = child / 'final/DELIVERY-QUALITY-REPORT.json'
     atomic_json(report_path, report)
     files = list(report['input_files'].values()) + list(report['outputs'].values()) + [file_record(report_path, root)]
@@ -327,7 +341,10 @@ def validate_export(root, episode, part_id, export, *, total_timeout):
         raise ValueError('Delivery export authentication, scope or producer changed')
     plan = load_part_plan(root, episode, verify_files=False)
     part = next(x for x in plan['parts'] if x['part_id'] == part_id)
-    derived = validate_part_audio(root, episode, part_id, total_timeout=max(.001, remaining()))
+    # This map lives for one pure validation call only. Changed inode/size/
+    # mtime/ctime forces a new byte hash; encode/upload boundaries start afresh.
+    verified = {}
+    derived = validate_part_audio(root, episode, part_id, total_timeout=max(.001, remaining()), verified=verified)
     if export['plan_sha256'] != sha256_file(root / 'work/part-plan.json'):
         raise ValueError('Delivery export plan changed')
     files = export['files']
@@ -335,7 +352,7 @@ def validate_export(root, episode, part_id, export, *, total_timeout):
         raise ValueError('Delivery evidence inventory is invalid')
     deadline = time.monotonic() + remaining()
     for record in files:
-        _verify_file(root, record, deadline)
+        _verify_file(root, record, deadline, verified=verified)
     expected_report = f'parts/{part_id}/final/DELIVERY-QUALITY-REPORT.json'
     if export['report'] not in files or export['report']['relative_path'] != expected_report:
         raise ValueError('Delivery report escaped evidence inventory')
@@ -375,13 +392,13 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
     from .engine.translation_workspace import prepare_id_translation_workspaces
     from .engine.delivery_align import refine_cues
     from .engine.episode_archive import file_record
-    from .partial_delivery import validate_worker_published_part
+    from .partial_delivery import validate_worker_completed_part
     from .progressive import write_partial_handoff
     root = Path(root).resolve()
     remaining = _clock(total_timeout)
     plan = prepare_episode_parts(root, episode, source_video, audio_path, captions_path,
                                  total_timeout=max(.001, remaining()))
-    part = next((p for p in plan['parts'] if validate_worker_published_part(
+    part = next((p for p in plan['parts'] if validate_worker_completed_part(
         root, episode, p['part_id'], total_timeout=max(.001, remaining())) is None), None)
     if part is None:
         return NEXT_PART

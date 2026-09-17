@@ -12,11 +12,23 @@ from mas.remote_job import RemoteJobError, checkpoint_manifest, poll_job, read_l
 COMMIT = "a" * 40
 
 
+@pytest.fixture(autouse=True)
+def stdlib_supervisor_without_host_site_startup(monkeypatch):
+    from mas import remote_job
+    original = remote_job.subprocess.Popen
+    def launch(command, *args, **kwargs):
+        if (isinstance(command, list) and command[:3] ==
+                [sys.executable, "-m", "mas.remote_job"]):
+            command = [sys.executable, "-S", *command[1:]]
+        return original(command, *args, **kwargs)
+    monkeypatch.setattr(remote_job.subprocess, "Popen", launch)
+
+
 def _race_start(root, gate, queue):
     gate.wait()
     try:
         result = start_job(root, 13, COMMIT,
-                           [sys.executable, "-c", "import time; time.sleep(.5)"])
+                           [sys.executable, "-S", "-c", "import time; time.sleep(.5)"])
         queue.put(("ok", result["started"]))
     except Exception as exc:
         queue.put(("error", str(exc)))
@@ -35,7 +47,7 @@ def _wait(root, expected, timeout=5, input_sha256=None):
 @pytest.mark.skipif(os.name != "posix", reason="remote detached jobs require POSIX")
 def test_detached_job_starts_once_and_records_exit(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str((__import__("pathlib").Path(__file__).parents[1] / "src").resolve()))
-    command = [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(.3)"]
+    command = [sys.executable, "-S", "-c", "import time; print('started', flush=True); time.sleep(.3)"]
     first = start_job(tmp_path, 13, COMMIT, command)
     assert first["started"] is True
     _wait(tmp_path, "RUNNING")
@@ -74,9 +86,9 @@ def test_termination_kills_stubborn_setsid_descendant(tmp_path):
              "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
              f"Path({str(child_pid)!r}).write_text(str(os.getpid())); time.sleep(60)")
     parent = ("import subprocess,sys,time; "
-              "subprocess.Popen([sys.executable,'-c',sys.argv[1]],start_new_session=True); "
+              "subprocess.Popen([sys.executable,'-S','-c',sys.argv[1]],start_new_session=True); "
               "time.sleep(60)")
-    worker = subprocess.Popen([sys.executable, "-c", parent, child], start_new_session=True)
+    worker = subprocess.Popen([sys.executable, "-S", "-c", parent, child], start_new_session=True)
     deadline = time.monotonic() + 5
     while not child_pid.is_file() and time.monotonic() < deadline:
         time.sleep(0.02)
@@ -125,7 +137,7 @@ def test_explicit_recovery_restarts_lost_job_and_preserves_evidence(tmp_path, mo
     paths["state"].write_text(json.dumps(stale_state), encoding="utf-8")
     monkeypatch.setenv("PYTHONPATH", str((__import__("pathlib").Path(__file__).parents[1] / "src").resolve()))
 
-    result = start_job(tmp_path, 13, COMMIT, [sys.executable, "-c", "pass"], "c" * 64,
+    result = start_job(tmp_path, 13, COMMIT, [sys.executable, "-S", "-c", "pass"], "c" * 64,
                        recover_lost=True)
 
     assert result["started"] is True

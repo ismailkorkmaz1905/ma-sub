@@ -90,12 +90,30 @@ def _record(root, path, deadline=None):
     return validate_file_record(record)
 
 
-def _verify_file(root, record, deadline=None):
+def _verify_file(root, record, deadline=None, *, verified=None):
+    # Python 3.11 Windows ctime is creation time, not a change counter.
+    # Retain full byte reads there rather than trusting restored mtime/size.
+    if sys.platform == "win32":
+        verified = None
     validate_file_record(record)
     path = _path(root, record["relative_path"])
     expected = {key: record[key] for key in ("relative_path", "sha256", "size_bytes")}
-    if _record(root, path, deadline) != expected:
+    def stamp():
+        value = path.stat()
+        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+    try:
+        before = stamp()
+    except OSError as exc:
+        raise PartScopeError(f"part artifact is absent or inaccessible: {record['relative_path']}") from exc
+    key = (str(path), record["sha256"], record["size_bytes"])
+    if deadline is not None:
+        _remaining(deadline)
+    if verified is not None and verified.get(key) == before:
+        return path
+    if _record(root, path, deadline) != expected or stamp() != before:
         raise PartScopeError(f"part artifact byte identity mismatch: {record['relative_path']}")
+    if verified is not None:
+        verified[key] = before
     return path
 
 
@@ -296,14 +314,14 @@ def _caption_text(records):
         f"{timestamp(item['end_ms'])}\n{html.escape(item['text'], quote=False)}\n\n" for item in records)
 
 
-def _result(root, plan, lineage, *, deadline=None, probe=False):
+def _result(root, plan, lineage, *, deadline=None, probe=False, verified=None):
     from .transcribe import load_vtt_captions
     part_id = lineage["part_id"]
     validate_part_lineage(plan, part_id, lineage)
-    audio_path = _verify_file(root, lineage["audio"], deadline)
+    audio_path = _verify_file(root, lineage["audio"], deadline, verified=verified)
     caption_path = None
     if lineage["captions"] is not None:
-        caption_path = _verify_file(root, lineage["captions"], deadline)
+        caption_path = _verify_file(root, lineage["captions"], deadline, verified=verified)
         if load_vtt_captions(caption_path) != _caption_records(plan, get_part(plan, part_id)):
             raise PartScopeError("child captions omit or alter parent text/timing")
     verification_key = _verification_key(plan, lineage)
@@ -326,17 +344,17 @@ def _result(root, plan, lineage, *, deadline=None, probe=False):
             "parent_vad_regions": project_part_vad(plan, part_id)}
 
 
-def validate_part_audio(root, episode, part_id, *, total_timeout=300):
+def validate_part_audio(root, episode, part_id, *, total_timeout=300, verified=None):
     root, deadline = Path(root).resolve(), _deadline(total_timeout)
     plan = load_part_plan(root, episode, verify_files=False)
     get_part(plan, part_id)
     for record in (plan["source"], plan["audio"], plan["captions"]):
         if record is not None:
-            _verify_file(root, record, deadline)
+            _verify_file(root, record, deadline, verified=verified)
     if _read_envelope(_path(root, "work/part-vad.json")) != plan["vad"]:
         raise PartScopeError("parent VAD receipt differs from part plan")
     lineage = _read_envelope(_path(root, f"parts/{part_id}/prepare/audio-part.done.json"))
-    return _result(root, plan, lineage, deadline=deadline, probe=True)
+    return _result(root, plan, lineage, deadline=deadline, probe=True, verified=verified)
 
 
 def extract_part_audio(root, episode, part_id, *, total_timeout):

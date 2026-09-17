@@ -1,5 +1,10 @@
 # Codex handoff
 
+Current EP14 launch repair: [18 September 2026 repair and operator checks](EP14_READY_2026-09-18.md).
+This supersedes older controller cleanup, all-tail publication and doctor guidance below.
+First-part Drive readback is followed by verified local tail encoding and one full MP4.
+Real acoustic quality, target runtime and the live controller environment are not certified.
+
 Current audit and repair: [16 September 2026 A-Z results](AZ_REPAIR_2026-09-16.md). Delivery-first remains the EP14+ policy; real acoustic quality and the four-to-six-hour target are not yet certified.
 
 ## Current architecture update - 2026-09-12

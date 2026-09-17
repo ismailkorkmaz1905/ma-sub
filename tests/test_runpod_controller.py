@@ -1290,7 +1290,7 @@ def test_session_failure_releases_owned_lease(monkeypatch, tmp_path, failure):
         pod = {"id": "owned-new"}
 
         def __init__(self, *_args, **_kwargs):
-            pass
+            self.audit, self.episode = _args[2], _args[3].episode
 
         def __enter__(self):
             events.append("acquired")
@@ -1298,6 +1298,14 @@ def test_session_failure_releases_owned_lease(monkeypatch, tmp_path, failure):
 
         def __exit__(self, *_):
             events.append("externally_absent")
+            state = {"format": "mas-capacity-lease-state-1", "episode": self.episode,
+                     "status": "RELEASED", "owned_pod_ids": [self.pod["id"]],
+                     "shutdown": [{"pod_id": self.pod["id"], "status": "ABSENT"}]}
+            runpod_controller.atomic_json(self.audit / "capacity-state.json",
+                {"data": state, "sha256": runpod_controller.digest(state)})
+            shutdown = {"state_sha256": runpod_controller.digest(state), "owned_pods": state["shutdown"]}
+            runpod_controller.atomic_json(self.audit / "capacity-shutdown.json",
+                {"data": shutdown, "sha256": runpod_controller.digest(shutdown)})
 
     monkeypatch.setattr(runpod_controller, "CapacityProvider", Provider)
     monkeypatch.setattr(runpod_controller, "CapacityLease", Lease)

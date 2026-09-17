@@ -71,7 +71,7 @@ def publish_full_episode(root, episode, remote_root, *, total_timeout):
     from .engine.part_audio import load_part_plan
     from .engine.partial_finalize import validate_partial_export
     from .engine.partial_encode import validate_partial_encoding
-    from .partial_delivery import validate_published_part
+    from .partial_delivery import validate_published_part, validate_local_tail
     from .remote import upload_verified
     from .notify import enqueue_notification
     from .source_discovery import CHANNEL_VIDEOS_URL, is_exact_episode_title
@@ -84,7 +84,10 @@ def publish_full_episode(root, episode, remote_root, *, total_timeout):
         # In particular, part-001 must have real readback before a full release.
         published = validate_published_part(root, episode, part['part_id'], total_timeout=max(.001, remaining()))
         if published is None:
-            return None
+            if part['part_id'] == plan['parts'][0]['part_id']:
+                return None
+            if validate_local_tail(root, episode, part['part_id'], total_timeout=max(.001, remaining())) is None:
+                return None
         export, report = validate_partial_export(root, episode, part['part_id'], total_timeout=max(.001, remaining()))
         if export['mode'] != EXPORT_MODE:
             raise ValueError('Full delivery-first assembly cannot mix strict or unrelated parts')

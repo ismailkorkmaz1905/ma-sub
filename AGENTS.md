@@ -19,6 +19,15 @@ A real Indonesian return is required; the delivery path uses authenticated prima
 Turkish ASR without requiring a separate manual Turkish correction/review handoff.
 No paid run is authorized merely by editing or testing this code.
 
+## EP14 launch repair, 18 September 2026
+
+See `docs/EP14_READY_2026-09-18.md`. Existing-lease failure cleanup precedes no
+new paid work and does not depend on a fresh quote or local readiness. Use
+`./mas doctor --controller` for the Windows/controller role, not a local CUDA
+worker check. EP14+ publishes part-001, keeps authenticated encoded tails locally,
+then publishes one full MP4. Local tail completion is never a Drive PASS. Stored
+status/quality metadata is not live service or perceptual certification.
+
 ## Repository boundaries
 
 - Use `main` as the sole maintained production branch. PR #1 is merged and the obsolete feature branch has been deleted.

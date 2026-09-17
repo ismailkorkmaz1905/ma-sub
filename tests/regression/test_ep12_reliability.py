@@ -114,7 +114,7 @@ def test_timeout_terminates_child_process(tmp_path):
 
 def test_process_failure_is_not_assumed_retryable(tmp_path):
     with pytest.raises(OperationFailed) as error:
-        run_command([sys.executable, '-c', 'raise SystemExit(7)'],
+        run_command([sys.executable, '-S', '-c', 'raise SystemExit(7)'],
                     stage='ASR', log_path=tmp_path/'exit.log', timeout_seconds=2)
     assert not error.value.retryable
 

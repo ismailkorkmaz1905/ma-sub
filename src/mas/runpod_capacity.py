@@ -4,6 +4,7 @@ import math
 import re
 import secrets
 import time
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -101,7 +102,9 @@ class CapacityPlan:
                  reserve_usd=0.0, billing_margin_usd=0.0,
                  storage_quote=None,
                  protected_pod_id="781ct55zv4gkle",
-                 network_volume_id="xgogcmey5o", data_center_id="EU-RO-1"):
+                 network_volume_id="xgogcmey5o", data_center_id="EU-RO-1", resume=False):
+        if type(resume) is not bool:
+            raise ValueError("resume must be boolean")
         if type(episode) is not int or episode < 1:
             raise ValueError("episode must be a positive integer")
         if (not isinstance(gpu_type_ids, (list, tuple)) or not gpu_type_ids
@@ -126,10 +129,13 @@ class CapacityPlan:
             raise ValueError("a valid storage quote observed within 24 hours is required")
         if (type(total_seconds) is not int or type(startup_seconds) is not int
                 or type(shutdown_seconds) is not int
-                or not total_seconds > startup_seconds + shutdown_seconds > 0):
+                or startup_seconds <= 0 or shutdown_seconds <= 0
+                or total_seconds <= shutdown_seconds
+                or not resume and total_seconds <= startup_seconds + shutdown_seconds):
             raise ValueError("capacity deadlines are invalid")
         if data_center_id != "EU-RO-1" or network_volume_id != "xgogcmey5o":
             raise ValueError("capacity storage scope is fixed to the retained EU-RO-1 volume")
+        self.resume_only = resume
         self.episode = episode
         self.gpu_type_ids = tuple(gpu_type_ids)
         self.maximum_rate_usd_per_hour = float(maximum_rate_usd_per_hour)
@@ -235,6 +241,8 @@ class CapacityLease:
     def acquire(self):
         if self.resume:
             return self._resume()
+        if self.plan.resume_only:
+            raise IntegrityError("resume-only plan cannot acquire new compute")
         if self.audit_dir.exists():
             self._archive_released_state()
         else:
@@ -414,8 +422,10 @@ class CapacityLease:
         if shutdown.exists():
             shutdown.replace(self.audit_dir / f"capacity-shutdown.released-{suffix}.json")
 
-    def _resume(self):
+    def _load_resume_state(self):
         state_path = self.audit_dir / "capacity-state.json"
+        if state_path.is_symlink():
+            raise IntegrityError("unsafe capacity resume state")
         try:
             saved = json.loads(state_path.read_text(encoding="utf-8"))
             state = saved["data"]
@@ -431,18 +441,47 @@ class CapacityLease:
             raise IntegrityError("capacity resume identity mismatch")
         if state.get("status") == "RELEASED":
             raise IntegrityError("released capacity state cannot be resumed")
-        self._state = state
-        self._deadline = self.clock() + self.plan.shutdown_seconds
-        self._old_ids = set(state.get("old_pod_ids") or [])
-        self._requested_epoch = _timestamp(state.get("requested_at_utc"))
-        if not math.isfinite(self._requested_epoch):
+        requested_epoch = _timestamp(state.get("requested_at_utc"))
+        if not math.isfinite(requested_epoch):
             raise IntegrityError("capacity resume request timestamp is invalid")
         attempts = state.get("attempts")
-        if not isinstance(attempts, list) or not attempts:
+        if not isinstance(attempts, list) or len(attempts) > 8:
             raise IntegrityError("capacity resume ownership journal is incomplete")
         names = {attempt.get("name") for attempt in attempts if isinstance(attempt, dict)}
-        if None in names or len(names) != len(attempts):
+        if (len(names) != len(attempts)
+                or any(not isinstance(name, str) or not re.fullmatch(
+                    rf"mas-ep{self.plan.episode}-production-[0-9a-f]{{16}}-[0-7]", name) for name in names)):
             raise IntegrityError("capacity resume ownership names are invalid")
+        old_ids, owned_ids = state.get("old_pod_ids"), state.get("owned_pod_ids")
+        for ids in (old_ids, owned_ids):
+            if (not isinstance(ids, list) or any(not isinstance(value, str) or not re.fullmatch(
+                    r"[A-Za-z0-9_-]+", value) for value in ids) or len(set(ids)) != len(ids)):
+                raise IntegrityError("capacity resume Pod identities are invalid")
+        if (self.plan.protected_pod_id not in old_ids or set(old_ids) & set(owned_ids)
+                or not attempts and (owned_ids or state.get("status") not in {
+                    "WAITING_FOR_CAPACITY", "READY_TO_CREATE", "NO_CAPACITY"})):
+            raise IntegrityError("capacity resume ownership journal is incomplete")
+        self._state = state
+        self._deadline = self.clock() + self.plan.shutdown_seconds
+        self._old_ids = set(old_ids)
+        self._requested_epoch = requested_epoch
+        return state
+
+    @classmethod
+    def cleanup_existing(cls, provider, audit_dir, episode):
+        # Cleanup needs identity and a bounded shutdown allowance, not a fresh
+        # price quote, image, SSH key or permission to acquire more compute.
+        scope = SimpleNamespace(episode=episode, protected_pod_id="781ct55zv4gkle",
+                                network_volume_id="xgogcmey5o", data_center_id="EU-RO-1",
+                                shutdown_seconds=120)
+        lease = cls(provider, {}, audit_dir, scope)
+        lease._load_resume_state()
+        lease.cleanup()
+
+    def _resume(self):
+        state = self._load_resume_state()
+        attempts = state["attempts"]
+        names = {attempt["name"] for attempt in attempts}
         inventory = self.provider.list_pods(10)
         def owned_candidates(pods):
             return [pod for pod in pods
@@ -506,7 +545,7 @@ class CapacityLease:
         affordable_seconds = math.floor(
             (balance - self.plan.reserve_usd - self.plan.billing_margin_usd) * 3600 /
             (account_rate + self.plan.maximum_rate_usd_per_hour + storage_rate))
-        self._deadline = self.clock() + min(provider_seconds, affordable_seconds)
+        self._deadline = self.clock() + min(provider_seconds, affordable_seconds, self.plan.total_seconds)
         self._startup_deadline = self.clock()
         self._validate_pod({"name": self.pod["name"]},
                            {"gpu_type_id": attempt["gpu_type_id"]})
@@ -536,17 +575,23 @@ class CapacityLease:
     def cleanup(self):
         if self._state is None:
             return
+        deadline = self.clock() + self.plan.shutdown_seconds
+        def left(cap):
+            seconds = deadline - self.clock()
+            if seconds <= 0:
+                raise TimeoutError("capacity cleanup deadline expired")
+            return min(cap, seconds)
         names = {attempt["name"] for attempt in self._state["attempts"]}
         owned = []
         inventory_ok = False
         try:
-            inventory = self.provider.list_pods(self._left(10))
+            inventory = self.provider.list_pods(left(10))
             inventory_ok = True
             owned = [pod for pod in inventory if any(self._owned(pod, name) for name in names)]
         except Exception:
             if self.pod is not None:
                 owned = [self.pod]
-        results = self._cleanup_pods(owned)
+        results = self._cleanup_pods(owned, deadline=deadline)
         unresolved = self._state.get("status") in (
             "CREATE_REQUESTED", "AMBIGUOUS_RECONCILING", "AMBIGUOUS_UNRESOLVED")
         if not owned and unresolved:
@@ -554,11 +599,16 @@ class CapacityLease:
             self._save()
             raise IntegrityError("ambiguous capacity ownership remains unresolved")
         recorded_ids = set(self._state.get("owned_pod_ids") or [])
-        recorded_ids_absent = (inventory_ok and recorded_ids and all(
-            pod.get("id") not in recorded_ids for pod in inventory))
-        if not owned and recorded_ids_absent:
-            results = [{"pod_id": pod_id, "status": "ABSENT", "error_type": None}
-                       for pod_id in sorted(recorded_ids)]
+        observed_ids = {pod.get("id") for pod in inventory} if inventory_ok else set()
+        result_ids = {item["pod_id"] for item in results}
+        for pod_id in sorted(recorded_ids - result_ids):
+            absent = inventory_ok and pod_id not in observed_ids
+            results.append({"pod_id": pod_id, "status": "ABSENT" if absent else "UNVERIFIED",
+                            "error_type": None if absent else "OwnershipOrInventoryUnavailable"})
+        self._state["owned_pod_ids"] = sorted(recorded_ids | result_ids)
+        if (not names and not recorded_ids and inventory_ok
+                and self._state.get("status") in {"WAITING_FOR_CAPACITY", "READY_TO_CREATE"}):
+            self._state["status"] = "NO_CAPACITY"
         self._state["shutdown"] = results
         self._state["status"] = "RELEASED" if results and all(
             item["status"] == "ABSENT" for item in results) else (
@@ -569,20 +619,29 @@ class CapacityLease:
         atomic_json(self.audit_dir / "capacity-shutdown.json",
                     {"data": body, "sha256": digest(body)})
         if any(item["status"] != "ABSENT" for item in results):
-            raise IntegrityError("owned temporary Pod termination was not externally verified ABSENT")
+            raise IntegrityError("owned temporary Pod absence could not be externally verified ABSENT")
         if self._state["status"] == "UNVERIFIED":
             raise IntegrityError("owned temporary Pod absence could not be externally verified")
 
-    def _cleanup_pods(self, owned):
+    def _cleanup_pods(self, owned, *, deadline=None):
+        deadline = self.clock() + self.plan.shutdown_seconds if deadline is None else deadline
+        def left(cap):
+            seconds = deadline - self.clock()
+            if seconds <= 0:
+                raise TimeoutError("capacity cleanup deadline expired")
+            return min(cap, seconds)
         results = []
         for pod in owned:
             pod_id = pod.get("id")
-            status = "UNVERIFIED"
-            error_type = None
+            status, error_type = "UNVERIFIED", None
             try:
-                self.provider.terminate(pod_id, self._left(15))
-                self.provider.wait_absent(pod_id, self._left(self.plan.shutdown_seconds))
-                status = "ABSENT"
+                self.provider.terminate(pod_id, left(15))
+            except Exception as exc:
+                error_type = type(exc).__name__
+            try:
+                # A lost DELETE response is not proof of failure or success.
+                self.provider.wait_absent(pod_id, left(self.plan.shutdown_seconds))
+                status, error_type = "ABSENT", None
             except Exception as exc:
                 error_type = type(exc).__name__
             results.append({"pod_id": pod_id, "status": status, "error_type": error_type})

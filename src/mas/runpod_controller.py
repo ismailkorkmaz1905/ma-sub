@@ -34,6 +34,42 @@ class RunPodControllerError(RuntimeError):
     pass
 
 
+class RunPodCleanupRequired(RunPodControllerError):
+    pass
+
+
+@contextmanager
+def _cleanup_on_controller_failure(local_root, episode):
+    try:
+        yield
+    except BaseException as original:
+        try:
+            reference_path = Path(local_root) / "work/controller-lease.json"
+            if reference_path.exists():
+                from .partial_delivery import _read_bound
+                reference = _read_bound(reference_path)
+                audit = safe_relative(local_root, reference["audit"])
+                if not audit.is_relative_to((Path(local_root) / "work/capacity").resolve()):
+                    raise RunPodControllerError("cleanup audit escaped capacity scope")
+                state_path = audit / "capacity-state.json"
+                state = _read_bound(state_path)
+                if state.get("episode") != episode:
+                    raise RunPodControllerError("cleanup lease belongs to another episode")
+                if state.get("status") not in {"RELEASED", "NO_CAPACITY"}:
+                    key = os.getenv("RUNPOD_API_KEY", "")
+                    if not key or "\r" in key or "\n" in key:
+                        raise RunPodControllerError("RUNPOD_API_KEY unavailable for external cleanup")
+                    provider = CapacityProvider("781ct55zv4gkle", key)
+                    CapacityLease.cleanup_existing(provider, audit, episode)
+                    print("[RUNPOD] failure recovery verified owned Pod absence", flush=True)
+        except Exception as cleanup:
+            raise RunPodCleanupRequired(
+                "EXTERNAL CLEANUP REQUIRED: owned Pod absence is unverified "
+                f"({type(cleanup).__name__}); inspect the retained ownership journal before retry"
+            ) from original
+        raise
+
+
 def _derive_raw_asr_auth_key(api_key):
     if not isinstance(api_key, str) or not api_key or "\r" in api_key or "\n" in api_key:
         raise RunPodControllerError("RUNPOD_API_KEY is missing or invalid")
@@ -1177,7 +1213,8 @@ def _production_priority():
 
 
 def _resume_partial_delivery(local_root, episode):
-    from .partial_delivery import part_directory, validate_published_part, complete_local_part, complete_parts, _read_bound
+    from .partial_delivery import (part_directory, validate_published_part, validate_local_tail,
+                                  complete_local_part, complete_parts, _read_bound)
     plan_path = local_root / 'work/part-plan.json'
     if not plan_path.is_file():
         return None
@@ -1220,6 +1257,8 @@ def _resume_partial_delivery(local_root, episode):
         part_id = part['part_id']
         folder = part_directory(local_root, part_id)
         if validate_published_part(local_root, episode, part_id, total_timeout=budget.check()) is not None:
+            continue
+        if validate_local_tail(local_root, episode, part_id, total_timeout=budget.check()) is not None:
             continue
         if (folder / 'work/gpu-released-for-encode.json').is_file():
             try:
@@ -1320,7 +1359,7 @@ def _part_resume_files(local_root, episode):
     if not (local_root / 'work/part-plan.json').is_file():
         return []
     from .engine.part_audio import load_part_plan
-    from .partial_delivery import part_directory, write_worker_delivery_ack
+    from .partial_delivery import part_directory, write_worker_delivery_ack, write_worker_tail_ack
     plan = load_part_plan(local_root, episode, verify_files=False)
     paths = []
     for part in plan['parts']:
@@ -1335,6 +1374,8 @@ def _part_resume_files(local_root, episode):
                 paths.append(path)
         if (folder / 'final/drive_readback_receipt.json').is_file():
             paths.append(write_worker_delivery_ack(local_root, episode, part['part_id']))
+        elif (folder / 'final/local-tail-ready.json').is_file():
+            paths.append(write_worker_tail_ack(local_root, episode, part['part_id']))
     return paths
 
 
@@ -1349,7 +1390,8 @@ def run_remote_episode(episode, source_url=None):
 def _run_remote_episode_once(episode, source_url=None):
     if type(episode) is not int or episode <= 0:
         raise RunPodControllerError("episode must be a positive integer")
-    with _controller_lock(ROOT / "var" / "production-controller.lock"):
+    with _controller_lock(ROOT / "var" / "production-controller.lock"), \
+            _cleanup_on_controller_failure(episode_dir(episode), episode):
         local_root = episode_dir(episode)
         partial_result = _resume_partial_delivery(local_root, episode)
         if partial_result is not None:
@@ -1483,7 +1525,7 @@ def _run_remote_episode_once(episode, source_url=None):
                                 else DEFAULT_GPU_TYPE_IDS
                             ),
                             total_seconds=int(episode_budget.check()) if episode_budget else 14400,
-                            storage_quote=storage_quote)
+                            storage_quote=storage_quote, resume=resume_lease)
 
         def ready(pod, remaining):
             remaining = min(90, remaining)

@@ -144,6 +144,84 @@ def validate_worker_published_part(root, episode, part_id, *, total_timeout=300)
     return ack
 
 
+def _tail_scope(root, episode, part_id, export):
+    from .delivery_first import EXPORT_MODE
+    from .engine.part_audio import load_part_plan
+    plan = load_part_plan(root, episode, verify_files=False)
+    if (episode < 14 or export.get('mode') != EXPORT_MODE
+            or part_id == plan['parts'][0]['part_id']):
+        raise ValueError('Local tail completion cannot replace first-part publication or strict delivery')
+
+
+def validate_local_tail(root, episode, part_id, *, total_timeout=300):
+    root = Path(root)
+    folder = part_directory(root, part_id)
+    path = folder / 'final/local-tail-ready.json'
+    if not path.is_file():
+        return None
+    deadline = _deadline(total_timeout)
+    from .delivery_first import read_signed
+    data = read_signed(path, 'local-tail-ready')
+    from .engine.partial_finalize import validate_partial_export
+    export, _ = validate_partial_export(root, episode, part_id, total_timeout=_remaining(deadline))
+    _tail_scope(root, episode, part_id, export)
+    validate_part_release(root, episode, part_id, total_timeout=_remaining(deadline))
+    from .engine.partial_encode import validate_partial_encoding
+    encoding, _ = validate_partial_encoding(root, episode, part_id, total_timeout=_remaining(deadline))
+    if (data.get('format') != 'mas-local-tail-ready-1' or data.get('status') != 'LOCAL_ENCODED_NOT_PUBLISHED'
+            or data.get('episode') != episode or data.get('part_id') != part_id
+            or data.get('plan_sha256') != sha256_file(root / 'work/part-plan.json')
+            or data.get('export_sha256') != sha256_file(folder / 'work/partial-export.json')
+            or data.get('mp4') != encoding['output']
+            or data.get('encoding_receipt') != file_record(folder / 'final/partial-encoding.json', root)
+            or data.get('release') != file_record(folder / 'work/gpu-released-for-encode.json', root)):
+        raise ValueError('Local tail completion identity changed')
+    _remaining(deadline)
+    return data
+
+
+def write_worker_tail_ack(root, episode, part_id, *, total_timeout=300):
+    root = Path(root)
+    data = validate_local_tail(root, episode, part_id, total_timeout=total_timeout)
+    if data is None:
+        raise ValueError('Cannot acknowledge a tail before verified local encoding')
+    from .delivery_first import write_signed, read_signed
+    path = part_directory(root, part_id) / 'work/controller-tail-ack.json'
+    ack = {'format': 'mas-controller-tail-ack-1', 'episode': episode, 'part_id': part_id, 'local_tail': data}
+    if path.exists() and read_signed(path, 'controller-tail-ack') != ack:
+        raise ValueError('Existing tail acknowledgement changed; preserve it')
+    write_signed(path, ack, 'controller-tail-ack')
+    return path
+
+
+def validate_worker_completed_part(root, episode, part_id, *, total_timeout=300):
+    deadline = _deadline(total_timeout)
+    published = validate_worker_published_part(root, episode, part_id, total_timeout=_remaining(deadline))
+    if published is not None:
+        return published
+    root = Path(root)
+    folder = part_directory(root, part_id)
+    path = folder / 'work/controller-tail-ack.json'
+    if not path.is_file():
+        return None
+    from .delivery_first import read_signed
+    ack = read_signed(path, 'controller-tail-ack')
+    from .engine.partial_finalize import validate_partial_export
+    export, _ = validate_partial_export(root, episode, part_id, total_timeout=_remaining(deadline))
+    _tail_scope(root, episode, part_id, export)
+    data = ack.get('local_tail', {})
+    if (ack.get('format') != 'mas-controller-tail-ack-1' or ack.get('episode') != episode
+            or ack.get('part_id') != part_id or data.get('format') != 'mas-local-tail-ready-1'
+            or data.get('episode') != episode or data.get('part_id') != part_id
+            or data.get('status') != 'LOCAL_ENCODED_NOT_PUBLISHED'
+            or data.get('plan_sha256') != sha256_file(root / 'work/part-plan.json')
+            or data.get('export_sha256') != sha256_file(folder / 'work/partial-export.json')):
+        raise ValueError('Controller tail acknowledgement binding changed')
+    # This is authenticated controller completion, not a remote publication claim.
+    _remaining(deadline)
+    return ack
+
+
 def complete_local_part(root, episode, part_id, remote_root, *, total_timeout):
     root = Path(root)
     deadline = _deadline(total_timeout)
@@ -170,6 +248,9 @@ def complete_local_part(root, episode, part_id, remote_root, *, total_timeout):
             raise ValueError('Previously published partial destination differs; preserve existing receipt')
         write_worker_delivery_ack(root, episode, part_id, total_timeout=remaining())
         return NEXT_PART
+    if validate_local_tail(root, episode, part_id, total_timeout=remaining()) is not None:
+        write_worker_tail_ack(root, episode, part_id, total_timeout=remaining())
+        return NEXT_PART
     validate_part_release(root, episode, part_id, total_timeout=remaining())
     from .engine.partial_encode import burn_partial_indonesian_mp4, validate_partial_encoding
     result = burn_partial_indonesian_mp4(root, episode, part_id, total_timeout=remaining())
@@ -177,6 +258,25 @@ def complete_local_part(root, episode, part_id, remote_root, *, total_timeout):
     if file_record(mp4, root) != result['output']:
         raise ValueError('partial encoder output identity changed')
     folder = part_directory(root, part_id)
+    from .engine.partial_finalize import validate_partial_export
+    export, report = validate_partial_export(root, episode, part_id, total_timeout=remaining())
+    from .delivery_first import EXPORT_MODE, write_signed
+    from .engine.part_audio import load_part_plan
+    plan = load_part_plan(root, episode, verify_files=False)
+    if export['mode'] == EXPORT_MODE and part_id != plan['parts'][0]['part_id']:
+        _tail_scope(root, episode, part_id, export)
+        data = {'format': 'mas-local-tail-ready-1', 'status': 'LOCAL_ENCODED_NOT_PUBLISHED',
+                'episode': episode, 'part_id': part_id,
+                'plan_sha256': sha256_file(root / 'work/part-plan.json'),
+                'export_sha256': sha256_file(folder / 'work/partial-export.json'),
+                'mp4': result['output'], 'encoding_receipt': result['receipt'],
+                'release': file_record(folder / 'work/gpu-released-for-encode.json', root)}
+        write_signed(folder / 'final/local-tail-ready.json', data, 'local-tail-ready')
+        write_worker_tail_ack(root, episode, part_id, total_timeout=remaining())
+        enqueue_notification(episode, part_id + ' yerel encode tamamlandi',
+            'LOCAL_ENCODED_NOT_PUBLISHED: full MP4 icin korunuyor; ayri Drive teslimi degil.',
+            root=root, kind='milestone')
+        return NEXT_PART
     receipt = upload_verified(mp4, target, total_timeout=remaining(),
                               preservation_receipt=folder / 'final/drive-preservation.json',
                               require_drive_preflight=True)

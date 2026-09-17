@@ -45,6 +45,12 @@ Exact part durations control offsets. Every planned source sample range must app
 once in order; a missing part cannot be called a full episode. The first part must
 have verified Drive readback before the full file can be published.
 
+From the 18 September repair, later parts need verified local encoding and a
+purpose-separated signed local-tail ACK, not separate Drive publication. Only
+part-001 requires its own remote receipt before full publication. Retained old
+tail publications remain preserved. This does not relax any full-file readback.
+See [the launch repair](EP14_READY_2026-09-18.md).
+
 Full assembly is checkpointed before upload. Upload/readback failure retains the
 assembled video and resumes from it, without another alignment or encode. Existing
 Drive filenames are preserved and byte count plus full SHA-256 readback are still

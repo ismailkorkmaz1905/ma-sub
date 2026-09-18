@@ -1942,6 +1942,9 @@ def _remote_input_binding(local_root, source_url, commit, episode):
     resume_files += _part_resume_files(local_root, episode)
     validated_returns = {path.relative_to(local_root).as_posix(): sha256_file(path)
                          for path in resume_files if path.is_file() and path.parent.name != 'review'}
+    reset_sha256 = _validated_audio_review_reset_hash(local_root, episode)
+    if reset_sha256 is not None:
+        validated_returns["review/audio_review_reset.json"] = reset_sha256
     resume_files += [local_root / "review" / "audio_review_overrides.json",
                     local_root / "review" / "audio_review_reset.json",
                     local_root / "review" / "speaker_evidence_v1.json",
@@ -1957,6 +1960,50 @@ def _remote_input_binding(local_root, source_url, commit, episode):
                    "encoder_options": os.getenv("MAS_MP4_ENCODER_OPTIONS"),
                    "target_gb": os.getenv("MAS_MP4_TARGET_GB", "3")})
     return base, evidence
+
+
+def _validated_audio_review_reset_hash(local_root, episode):
+    local_root = Path(local_root)
+    path = local_root / "review" / "audio_review_reset.json"
+    if not path.is_file():
+        return None
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    body = saved.get("data")
+    name = f"Muhtemel Ask {episode}.Bolum"
+    expected_paths = {
+        "prepare/audio_review_v2.json",
+        "prepare/audio_review_v2.recovery.json",
+        f"translation_output/{name}_TR_CORRECTED.zip",
+    }
+    artifacts = body.get("artifacts") if isinstance(body, dict) else None
+    if (
+        not isinstance(body, dict)
+        or saved.get("sha256") != digest(body)
+        or body.get("format") != "mas-audio-review-reset-1"
+        or body.get("episode") != episode
+        or not isinstance(body.get("reason"), str)
+        or not body["reason"].strip()
+        or not isinstance(artifacts, list)
+        or {item.get("relative_path") for item in artifacts if isinstance(item, dict)}
+        != expected_paths
+        or any(
+            set(item) != {"relative_path", "size_bytes", "sha256"}
+            or type(item["size_bytes"]) is not int
+            or item["size_bytes"] <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", str(item["sha256"]))
+            for item in artifacts
+        )
+    ):
+        raise RunPodControllerError("audio-review reset evidence integrity mismatch")
+    pack = local_root / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
+    provisional = local_root / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    validated = validate_tr_correction_output(pack, provisional)
+    if (
+        body.get("correction_input_sha256") != validated.input_sha256
+        or body.get("provisional_output_sha256") != validated.output_sha256
+    ):
+        raise RunPodControllerError("audio-review reset evidence input binding mismatch")
+    return sha256_file(path)
 
 
 def _changed_evidence_retry_limit(work, episode, *, now=None):

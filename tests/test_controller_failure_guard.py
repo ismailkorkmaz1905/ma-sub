@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +53,45 @@ def test_changed_validated_evidence_allows_only_bounded_attempt(tmp_path):
         base, tmp_path / "work/remote-job-request.json", tmp_path / "work/remote-job-status.json")
     assert attempt == 1
     assert identity == digest({"base_input_sha256": base, "attempt": 1})
+
+
+def test_audio_review_reset_is_validated_changed_evidence(tmp_path, monkeypatch):
+    name = "Muhtemel Ask 13.Bolum"
+    text = tmp_path / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    text.parent.mkdir(parents=True)
+    text.write_bytes(b"validated text")
+    body = {
+        "format": "mas-audio-review-reset-1",
+        "episode": 13,
+        "correction_input_sha256": "a" * 64,
+        "provisional_output_sha256": "b" * 64,
+        "reason": "preserve stale review evidence",
+        "artifacts": [
+            {"relative_path": relative, "size_bytes": 1, "sha256": "c" * 64}
+            for relative in (
+                "prepare/audio_review_v2.json",
+                "prepare/audio_review_v2.recovery.json",
+                f"translation_output/{name}_TR_CORRECTED.zip",
+            )
+        ],
+    }
+    marker = tmp_path / "review/audio_review_reset.json"
+    atomic_json(marker, {"data": body, "sha256": digest(body)})
+    monkeypatch.setattr(
+        controller,
+        "validate_tr_correction_output",
+        lambda *_: SimpleNamespace(input_sha256="a" * 64, output_sha256="b" * 64),
+    )
+
+    _, with_reset = controller._remote_input_binding(
+        tmp_path, "https://example.invalid/episode", "a" * 40, 13
+    )
+    marker.unlink()
+    _, without_reset = controller._remote_input_binding(
+        tmp_path, "https://example.invalid/episode", "a" * 40, 13
+    )
+
+    assert with_reset != without_reset
 
 
 def test_changed_commit_allows_bounded_retry_before_pipeline_checkpoint(tmp_path):

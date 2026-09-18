@@ -273,13 +273,23 @@ def _upload_resumable(source, remote, partial, expected_size, expected_sha, pref
     if credentials["credential_identity_sha256"] != preflight["credential_identity_sha256"]:
         raise RemoteVerificationError("Drive OAuth identity changed after preflight")
     parent = remote.rsplit("/", 1)[0]
-    folder = json.loads(_run_watchdog(
-        ["rclone", "lsjson", parent, "--stat", "--config", credentials["config_path"],
+    if "/" in parent:
+        container, folder_name = parent.rsplit("/", 1)
+    else:
+        remote_name, folder_name = parent.split(":", 1)
+        container = remote_name + ":"
+    folders = json.loads(_run_watchdog(
+        ["rclone", "lsjson", container, "--dirs-only", "--max-depth", "1",
+         "--config", credentials["config_path"],
          "--contimeout", "15s", "--timeout", "30s", "--retries", "1", "--low-level-retries", "2"],
         idle_timeout=min(30, idle_timeout), total_timeout=max(0.01, deadline - time.monotonic())))
-    if (not isinstance(folder, dict) or folder.get("IsDir") is not True
-            or not isinstance(folder.get("ID"), str) or not folder["ID"]):
+    matches = ([item for item in folders
+                if isinstance(item, dict) and item.get("Name") == folder_name]
+               if isinstance(folders, list) else [])
+    if (len(matches) != 1 or matches[0].get("IsDir") is not True
+            or not isinstance(matches[0].get("ID"), str) or not matches[0]["ID"]):
         raise RemoteVerificationError("Drive destination folder identity is unavailable")
+    folder = matches[0]
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise RemoteVerificationError("Drive session upload deadline expired")

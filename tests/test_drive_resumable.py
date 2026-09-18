@@ -452,8 +452,8 @@ def test_production_adapter_uses_watchdog_and_exact_folder_identity(tmp_path, mo
         commands.append(command)
         assert kwargs["total_timeout"] <= 30
         if command[0] == "rclone":
-            assert command[1:4] == ["lsjson", "drive:delivery", "--stat"]
-            return b'{"ID":"folder-id","IsDir":true}'
+            assert command[1:6] == ["lsjson", "drive:", "--dirs-only", "--max-depth", "1"]
+            return b'[{"Name":"delivery","ID":"folder-id","IsDir":true}]'
         assert command[:3] == [sys.executable, "-m", "mas.drive_resumable"]
         assert isinstance(kwargs["progress_observer"], remote._UploadProgress)
         assert "--allow-session-create" not in command

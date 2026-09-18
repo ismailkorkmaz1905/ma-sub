@@ -40,6 +40,9 @@ FORCED_ALIGNMENT_FORMAT_VERSION = "1.0"
 TIMING_SOURCE = "whisperx_ctc_forced_alignment"
 SUPPORTED_LANGUAGE = "tr"
 SUPPORTED_WHISPERX_VERSION = "3.8.6"
+ALIGNMENT_RESOLVER_PRODUCER_SHA256 = (
+    "cd9ba42397f05c7b161c9be61bb61182c42e9e77f26cb578aecdb0b4d6cd5af0"
+)
 DEFAULT_TURKISH_ALIGNMENT_MODEL = (
     "mpoyraz/wav2vec2-xls-r-300m-cv7-turkish"
 )
@@ -1811,6 +1814,11 @@ def _alignment_candidate(
         align_metadata,
         audio,
         device,
+        **(
+            {"_mas_component_uids": [str(coarse["utterance_uid"])]}
+            if getattr(align, "_mas_scope_wrapper", False)
+            else {}
+        ),
         **call_kwargs,
     )
     words, _ = _normalize_aligned_words(
@@ -2387,12 +2395,29 @@ def _resolve_alignment_overlaps(
     unbounded_align = align
 
     def align(transcript, model, metadata, audio, device, **kwargs):
+        request_uids = kwargs.pop("_mas_component_uids", None)
         key = digest({"transcript": transcript, "kwargs": kwargs})
         cached = raw_journal is not None and raw_journal.read(key) is not None
         check_work(alignment_calls=0 if cached else 1)
-        result = unbounded_align(transcript, model, metadata, audio, device, **kwargs)
+        result = unbounded_align(
+            transcript,
+            model,
+            metadata,
+            audio,
+            device,
+            **(
+                {"_mas_component_uids": request_uids, **kwargs}
+                if request_uids is not None
+                and getattr(unbounded_align, "_mas_scope_wrapper", False)
+                else kwargs
+            ),
+        )
         check_work()
         return result
+
+    align._mas_scope_wrapper = getattr(
+        unbounded_align, "_mas_scope_wrapper", False
+    )
     initial_modes = initial_modes or {}
     options: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {
         uid: [(initial_modes.get(uid, "independent"), words)]
@@ -2503,6 +2528,7 @@ def _resolve_alignment_overlaps(
                 align_metadata,
                 audio,
                 device,
+                _mas_component_uids=list(target_uids),
                 **call_kwargs,
             )
             raw_words = _raw_aligned_words(
@@ -3200,8 +3226,16 @@ def _model_state_sha256(model, metadata):
 
 def _alignment_resume_groups(scope, source, identity):
     required = {"stage", "target_uids", "context_uids", *identity}
-    if not isinstance(scope, Mapping) or set(scope) != required:
+    if not isinstance(scope, Mapping) or set(scope) not in (
+        required,
+        required | {"discovery_component_limit"},
+    ):
         raise ForcedAlignmentError("alignment resume scope fields are invalid")
+    if "discovery_component_limit" in scope and (
+        type(scope["discovery_component_limit"]) is not int
+        or not 1 <= scope["discovery_component_limit"] <= 3
+    ):
+        raise ForcedAlignmentError("alignment resume discovery limit is invalid")
     if scope["stage"] != "forced_alignment" or any(
         scope[key] != value for key, value in identity.items()
     ):
@@ -3246,6 +3280,72 @@ def _alignment_resume_groups(scope, source, identity):
                 "text": _alignment_model_text(" ".join(str(item["text"]) for item in group)),
             })
     return groups
+
+
+def _alignment_resume_context_uids(source, target_uids):
+    source_uids = [str(item["utterance_uid"]) for item in source]
+    positions = {uid: index for index, uid in enumerate(source_uids)}
+    target_positions = [positions[uid] for uid in target_uids]
+    return [
+        uid
+        for position, uid in enumerate(source_uids)
+        if any(
+            abs(position - target) <= 8
+            and all(
+                int(source[index]["coarse_start_ms"])
+                - int(source[index - 1]["coarse_end_ms"])
+                <= MAX_RECOVERY_CONTEXT_GAP_MS
+                for index in range(
+                    min(position, target) + 1, max(position, target) + 1
+                )
+            )
+            for target in target_positions
+        )
+    ]
+
+
+def _alignment_request_matches_scope(
+    transcript,
+    request_uids,
+    source,
+    scope,
+    identity,
+):
+    groups = _alignment_resume_groups(scope, source, identity)
+    if not isinstance(transcript, list) or len(transcript) != 1:
+        return False
+    request = transcript[0]
+    if not isinstance(request, Mapping):
+        return False
+    if any(
+        request.get(name) is None for name in ("start", "end", "text")
+    ):
+        return False
+    if any(
+        request["text"] == group["text"]
+        and request["start"] >= group["start"]
+        and request["end"] <= group["end"]
+        for group in groups
+    ):
+        return True
+    if (
+        not isinstance(request_uids, list)
+        or not request_uids
+        or not set(request_uids) <= set(scope["target_uids"])
+    ):
+        return False
+    by_uid = {str(item["utterance_uid"]): item for item in source}
+    context = [by_uid[uid] for uid in scope["context_uids"]]
+    if (
+        request["start"] < min(int(item["start_ms"]) for item in context) / 1000.0
+        or request["end"] > max(int(item["end_ms"]) for item in context) / 1000.0
+    ):
+        return False
+    allowed_texts = {group["text"] for group in groups}
+    allowed_texts.update(
+        _alignment_model_text(str(by_uid[uid]["text"])) for uid in request_uids
+    )
+    return request["text"] in allowed_texts
 
 
 def _archive_authorized_recovery_failure(
@@ -3446,7 +3546,7 @@ def align_corrected_segments(
         })
         component_journal = UnitJournal(Path(checkpoint_dir) / "components", {
             "raw_binding": journal.binding,
-            "resolver_sha256": _audio_sha256(Path(__file__)),
+            "resolver_sha256": ALIGNMENT_RESOLVER_PRODUCER_SHA256,
             "speaker_policy_sha256": _audio_sha256(Path(__file__).with_name("speaker.py")),
             "policy": OVERLAP_RESOLUTION_POLICY,
             "min_word_score": min_word_score,
@@ -3458,7 +3558,7 @@ def align_corrected_segments(
         model_align = align
         normalized_journal = UnitJournal(Path(checkpoint_dir) / "normalized", {
             "raw_binding": journal.binding,
-            "producer_sha256": _audio_sha256(Path(__file__)),
+            "producer_sha256": ALIGNMENT_RESOLVER_PRODUCER_SHA256,
         })
         resume_identity = {
             "audio_sha256": audio_sha256,
@@ -3481,24 +3581,94 @@ def align_corrected_segments(
                 checkpoint_dir, resume_scope, source, journal
             )
         alignment_call_count = 0
+        discovered_scope = None
+        discovery_requests = []
 
         def align(transcript, model, metadata, audio, device, **kwargs):
-            nonlocal alignment_call_count
+            nonlocal alignment_call_count, discovered_scope
+            request_uids = kwargs.pop("_mas_component_uids", None)
             key = digest({"transcript": transcript, "kwargs": kwargs})
             cached = journal.read(key)
             if cached is None:
-                if allowed_groups is not None and not (
-                    isinstance(transcript, list) and len(transcript) == 1
-                    and any(transcript[0]["text"] == group["text"]
-                            and transcript[0]["start"] >= group["start"]
-                            and transcript[0]["end"] <= group["end"]
-                            for group in allowed_groups)
-                ):
-                    raise AlignmentConflictBlocked({
+                authorized = allowed_groups is None or _alignment_request_matches_scope(
+                    transcript,
+                    request_uids,
+                    source,
+                    resume_scope,
+                    resume_identity,
+                )
+                discovery_limit = (
+                    resume_scope.get("discovery_component_limit", 0)
+                    if resume_scope is not None
+                    else 0
+                )
+                if not authorized and discovery_limit and isinstance(request_uids, list):
+                    source_uids = [str(item["utterance_uid"]) for item in source]
+                    requested = [uid for uid in source_uids if uid in request_uids]
+                    if (
+                        requested
+                        and len(requested) == len(set(request_uids))
+                        and not set(requested) <= set(resume_scope["target_uids"])
+                    ):
+                        if discovered_scope is None:
+                            discovered_targets = requested
+                        elif set(requested) <= set(discovered_scope["target_uids"]):
+                            discovered_targets = list(discovered_scope["target_uids"])
+                        elif set(requested) & set(discovered_scope["target_uids"]):
+                            discovered_targets = [
+                                uid
+                                for uid in source_uids
+                                if uid in set(requested) | set(discovered_scope["target_uids"])
+                            ]
+                        else:
+                            discovered_targets = []
+                        if 0 < len(discovered_targets) <= discovery_limit:
+                            discovered_scope = {
+                                "stage": "forced_alignment",
+                                "target_uids": discovered_targets,
+                                "context_uids": _alignment_resume_context_uids(
+                                    source, discovered_targets
+                                ),
+                                **resume_identity,
+                            }
+                            authorized = _alignment_request_matches_scope(
+                                transcript,
+                                request_uids,
+                                source,
+                                discovered_scope,
+                                resume_identity,
+                            )
+                            if authorized:
+                                discovery_requests.append({
+                                    "request_sha256": key,
+                                    "component_uids": requested,
+                                })
+                                evidence = {
+                                    "format": "mas-alignment-discovered-resume-1",
+                                    "authorized_scope_sha256": digest(dict(resume_scope)),
+                                    "discovered_scope": discovered_scope,
+                                    "requests": discovery_requests,
+                                }
+                                atomic_json(
+                                    Path(checkpoint_dir)
+                                    / "components/discovered-resume-scope.json",
+                                    {"data": evidence, "sha256": digest(evidence)},
+                                )
+                if not authorized:
+                    details = {
                         "status": "BLOCKED", "reason": "resume_scope_violation",
                         "message": "uncached CTC request is outside authorized target/context",
                         "component_uids": list(resume_scope["target_uids"]),
-                    })
+                        "requested_component_uids": request_uids,
+                        "request_sha256": key,
+                        "authorized_scope_sha256": digest(dict(resume_scope)),
+                    }
+                    atomic_json(
+                        Path(checkpoint_dir)
+                        / "components/latest-resume-scope-violation.json",
+                        {"data": details, "sha256": digest(details)},
+                    )
+                    raise AlignmentConflictBlocked(details)
                 result = _execute_alignment_call(
                     model_align,
                     transcript,
@@ -3517,6 +3687,8 @@ def align_corrected_segments(
                 "forced_alignment:ctc", completed=alignment_call_count
             )
             return result
+
+        align._mas_scope_wrapper = True
 
     aligned_segments: list[dict[str, Any]] = []
     flat_words: list[dict[str, Any]] = []
@@ -3730,6 +3902,11 @@ def align_corrected_segments(
                         align_metadata,
                         audio,
                         device,
+                        **(
+                            {"_mas_component_uids": [utterance_uid]}
+                            if getattr(align, "_mas_scope_wrapper", False)
+                            else {}
+                        ),
                         **call_kwargs,
                     )
                     check_independent_context_budget(utterance_uid, context_started)

@@ -19,15 +19,31 @@ class RetryAuthorizationError(RuntimeError):
 
 _ALIGNMENT_SCOPE_FIELDS = {"stage", "target_uids", "context_uids", "audio_sha256", "model_state_sha256",
                            "raw_alignment_binding", "source_sha256"}
+_ALIGNMENT_SCOPE_OPTIONAL_FIELDS = {"discovery_component_limit"}
 _PART_SCOPE_FIELDS = {"part_id", "part_plan_sha256", "part_audio_lineage_sha256"}
 
 
 def alignment_scope(scope):
-    if not isinstance(scope, dict) or set(scope) not in (_ALIGNMENT_SCOPE_FIELDS, _ALIGNMENT_SCOPE_FIELDS | _PART_SCOPE_FIELDS):
+    allowed = (
+        _ALIGNMENT_SCOPE_FIELDS,
+        _ALIGNMENT_SCOPE_FIELDS | _ALIGNMENT_SCOPE_OPTIONAL_FIELDS,
+        _ALIGNMENT_SCOPE_FIELDS | _PART_SCOPE_FIELDS,
+        _ALIGNMENT_SCOPE_FIELDS | _ALIGNMENT_SCOPE_OPTIONAL_FIELDS | _PART_SCOPE_FIELDS,
+    )
+    if not isinstance(scope, dict) or set(scope) not in allowed:
         raise RetryAuthorizationError("retry scope fields are invalid")
+    if "discovery_component_limit" in scope and (
+        type(scope["discovery_component_limit"]) is not int
+        or not 1 <= scope["discovery_component_limit"] <= 3
+    ):
+        raise RetryAuthorizationError("retry discovery component limit is invalid")
     if "part_id" in scope and not re.fullmatch(r"part-[0-9]{3}", str(scope["part_id"])):
         raise RetryAuthorizationError("retry part identity is invalid")
-    return {key: scope[key] for key in _ALIGNMENT_SCOPE_FIELDS}
+    return {
+        key: scope[key]
+        for key in _ALIGNMENT_SCOPE_FIELDS | _ALIGNMENT_SCOPE_OPTIONAL_FIELDS
+        if key in scope
+    }
 
 
 def retry_diagnostic_layout(episode, part_id=None):

@@ -102,6 +102,17 @@ def test_source_identity_normalizes_platform_line_endings(tmp_path):
     )
 
 
+def test_code_fix_permit_binds_bounded_discovered_component_limit(
+        tmp_path, monkeypatch):
+    _, root, arguments = _case(tmp_path, monkeypatch)
+    arguments["resume_scope"]["discovery_component_limit"] = 3
+
+    permit = retry.authorize_code_fix_retry(root, 14, "b" * 40, **arguments)
+
+    scope = retry.validate_code_fix_resume(root, 14, "b" * 40, permit)
+    assert scope["discovery_component_limit"] == 3
+
+
 @pytest.mark.parametrize("outcome", ["failure", "error", "skipped"])
 def test_failed_or_skipped_fixture_never_authorizes(tmp_path, monkeypatch, outcome):
     _, root, arguments = _case(tmp_path, monkeypatch, outcome=outcome)

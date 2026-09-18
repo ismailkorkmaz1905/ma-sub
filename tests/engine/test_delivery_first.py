@@ -51,6 +51,20 @@ def test_timed_words_split_without_losing_text():
     assert max(c['end_ms'] - c['start_ms'] for c in cues) <= 6000
 
 
+def test_delivery_cues_drop_known_credit_hallucinations_and_keep_contextual_phrases():
+    cues, warnings = df.source_cues([
+        {'start_ms': 0, 'end_ms': 500, 'text': 'Altyazı M .K.', 'words': []},
+        {'start_ms': 1000, 'end_ms': 5400, 'text': 'Bir yol var.', 'words': [
+            {'text': ' Bir', 'start_ms': 1000, 'end_ms': 1100},
+            {'text': ' yol', 'start_ms': 4000, 'end_ms': 4300},
+            {'text': ' var.', 'start_ms': 4300, 'end_ms': 5400},
+        ]},
+    ], 6000)
+    assert [cue['text'] for cue in cues] == ['Bir yol var.']
+    assert warnings == [{'uid': warnings[0]['uid'], 'start_ms': 0, 'end_ms': 500,
+                         'reason': 'known_subtitle_hallucination', 'action': 'omitted'}]
+
+
 def test_overlap_never_moves_a_cue_into_a_distant_scene(policy):
     schema, warnings = df.build_schema([
         {'uid': 'one', 'start_ms': 0, 'end_ms': 1000, 'text': 'Merhaba', 'timing_source': 'source_interval_fallback'},
@@ -60,6 +74,20 @@ def test_overlap_never_moves_a_cue_into_a_distant_scene(policy):
     assert schema['blocks'][1]['start_ms'] == 1000
     assert schema['blocks'][2]['start_ms'] == 30000
     assert warnings and schema['quality_status'] == 'NOT_STRICT'
+
+
+def test_short_display_is_extended_only_into_free_time_and_otherwise_omitted(policy):
+    schema, warnings = df.build_schema([
+        {'uid': 'one', 'start_ms': 0, 'end_ms': 100, 'text': 'Bir',
+         'timing_source': 'source_interval_fallback'},
+        {'uid': 'two', 'start_ms': 1000, 'end_ms': 1100, 'text': 'İki',
+         'timing_source': 'source_interval_fallback'},
+        {'uid': 'three', 'start_ms': 1150, 'end_ms': 1300, 'text': 'Üç',
+         'timing_source': 'source_interval_fallback'},
+    ], 14, 2000, policy[3])
+    assert [(block['tr_text'], block['start_ms'], block['end_ms']) for block in schema['blocks']] == [
+        ('Bir', 0, 400), ('Üç', 1150, 1550)]
+    assert any(warning['action'] == 'omitted' and warning['uid'] == 'two' for warning in warnings)
 
 
 class FakeSession:
@@ -195,6 +223,17 @@ def test_delivery_workspace_allows_quality_warning_not_changed_identity(tmp_path
     returns[owner][0]['tr_text'] = 'changed'
     with pytest.raises(ValueError, match='immutable'):
         collect_id_translation_workspaces(pack, workspace, returns, out_zip=out)
+
+
+def test_delivery_rejects_translated_subtitle_credit_hallucination(tmp_path, policy):
+    schema, _ = df.build_schema([{'uid': 'a', 'start_ms': 0, 'end_ms': 1000,
+        'text': 'Merhaba.', 'timing_source': 'source_interval_fallback'}], 14, 2000, policy[3])
+    records = [{**record, 'id_final': 'Takarir M.K.'}
+               for record in build_id_translation_records(schema)]
+    output = tmp_path / 'translated.zip'
+    create_id_translation_output_zip(schema, records, output)
+    with pytest.raises(ValueError, match='subtitle-credit hallucination'):
+        df.read_translations(schema, output)
 
 
 def test_key_rotation_rejects_delivery_checkpoint(tmp_path, monkeypatch):

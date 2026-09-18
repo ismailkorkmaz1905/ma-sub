@@ -15,8 +15,9 @@ from .reliability import atomic_json, digest, read_json
 MODE = 'delivery-first-v1'
 EXPORT_MODE = 'delivery-first-subtitles'
 POLICY = {'mode': MODE, 'first_episode': 14, 'group_seconds': 20,
-          'alignment_seconds': 600, 'delivery_reserve_seconds': 1800,
-          'maximum_source_cue_ms': 10000}
+           'alignment_seconds': 600, 'delivery_reserve_seconds': 1800,
+          'maximum_source_cue_ms': 10000, 'maximum_word_gap_ms': 3500,
+          'minimum_display_ms': 400}
 
 
 def enabled(episode):
@@ -134,11 +135,17 @@ def primary_transcript(audio_path, prepare, episode, series, names, religious):
 
 
 def source_cues(segments, duration_ms):
+    from .engine.raw_asr import _is_known_subtitle_hallucination
     cues, warnings = [], []
     for index, segment in enumerate(segments):
         start, end = segment.get('start_ms'), segment.get('end_ms')
         text = str(segment.get('text', '')).strip()
         uid = digest({'segment': segment, 'index': index})[:20]
+        if _is_known_subtitle_hallucination(text):
+            warnings.append({'uid': uid, 'start_ms': segment.get('start_ms'),
+                             'end_ms': segment.get('end_ms'),
+                             'reason': 'known_subtitle_hallucination', 'action': 'omitted'})
+            continue
         if not text or type(start) is not int or type(end) is not int or not 0 <= start < end <= duration_ms:
             warnings.append({'uid': uid, 'reason': 'unusable_source_interval', 'action': 'omitted'})
             continue
@@ -154,7 +161,7 @@ def source_cues(segments, duration_ms):
             for word in words:
                 if group and (word['end_ms'] - group[0]['start_ms'] > 6000
                               or len(' '.join(w['text'].strip() for w in group + [word])) > 78
-                              or word['start_ms'] - group[-1]['end_ms'] > 700):
+                              or word['start_ms'] - group[-1]['end_ms'] > POLICY['maximum_word_gap_ms']):
                     groups.append((group[0]['start_ms'], group[-1]['end_ms'],
                                    ' '.join(w['text'].strip() for w in group)))
                     group = []
@@ -178,11 +185,21 @@ def build_schema(cues, episode, duration_ms, production_policy):
     from .engine.id_translation import validate_aligned_turkish_schema
     blocks, warnings = [], []
     last_end = 0
-    for cue in sorted(cues, key=lambda x: (x['start_ms'], x['end_ms'], x['uid'])):
+    ordered = sorted(cues, key=lambda x: (x['start_ms'], x['end_ms'], x['uid']))
+    for position, cue in enumerate(ordered):
         start, end = max(last_end, cue['start_ms']), min(duration_ms, cue['end_ms'])
-        if end - start < 80:
+        next_start = ordered[position + 1]['start_ms'] if position + 1 < len(ordered) else duration_ms
+        extension_limit = min(duration_ms, max(end, next_start))
+        if end - start < POLICY['minimum_display_ms']:
+            extended = min(start + POLICY['minimum_display_ms'], extension_limit)
+            if extended > end:
+                warnings.append({'uid': cue['uid'], 'start_ms': start, 'end_ms': extended,
+                                 'reason': 'short_display_interval',
+                                 'action': 'extended_inside_free_interval'})
+                end = extended
+        if end - start < POLICY['minimum_display_ms']:
             warnings.append({'uid': cue['uid'], 'start_ms': cue['start_ms'], 'end_ms': cue['end_ms'],
-                             'reason': 'no_display_interval_after_overlap', 'action': 'omitted'})
+                             'reason': 'unreadable_display_interval', 'action': 'omitted'})
             continue
         if start != cue['start_ms']:
             warnings.append({'uid': cue['uid'], 'start_ms': cue['start_ms'], 'end_ms': end,
@@ -232,6 +249,9 @@ def read_translations(schema, translated_zip):
                 if not isinstance(text, str) or not text.strip() or any(ord(c) < 32 and c not in '\n\r\t' for c in text):
                     warnings.append({'uid': uid, 'reason': 'missing_indonesian_translation', 'action': 'omitted'})
                 else:
+                    normalized = ' '.join(''.join(c if c.isalnum() else ' ' for c in text.casefold()).split())
+                    if normalized in {'takarir m k', 'subtitle m k', 'altyazı m k', 'altyazi m k'}:
+                        raise ValueError('Known subtitle-credit hallucination in Indonesian return')
                     accepted[uid] = record
                     if record.get('review_required'):
                         warnings.append({'uid': uid, 'reason': 'translator_review_required', 'action': 'delivered_with_warning'})

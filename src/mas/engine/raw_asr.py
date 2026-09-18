@@ -912,7 +912,10 @@ def _normalized_lexical_text(text: Any) -> str:
 
 
 def _is_known_subtitle_hallucination(text: Any) -> bool:
-    return _normalized_lexical_text(text) in {"altyazı m k", "altyazı k m"}
+    return _normalized_lexical_text(text) in {
+        "altyazı m k", "altyazı k m", "altyazi m k", "altyazi k m",
+        "izlediğiniz için teşekkür ederim", "izlediginiz icin tesekkur ederim",
+    }
 
 
 def _segment_has_complete_word_inventory(segment: Mapping[str, Any]) -> bool:

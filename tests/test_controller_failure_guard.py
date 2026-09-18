@@ -254,6 +254,53 @@ def test_changed_evidence_retry_continuation_requires_reason(tmp_path, monkeypat
         controller._changed_evidence_retry_limit(tmp_path, 13)
 
 
+def test_scoped_code_fix_gets_one_attempt_beyond_extended_limit(
+        tmp_path, monkeypatch):
+    source, commit = _failed_job(tmp_path, attempt=6)
+    extension = {
+        "format": "mas-operator-retry-extension-1",
+        "episode": 13,
+        "authorized_at": datetime.now(timezone.utc).isoformat(),
+        "previous_limit": 2,
+        "extended_limit": 5,
+        "reason": "operator approved retained evidence retry",
+    }
+    atomic_json(
+        tmp_path / "work/remote-retry-extension.json",
+        {"data": extension, "sha256": digest(extension)},
+    )
+    continuation = {
+        "format": "mas-operator-retry-continuation-1",
+        "episode": 13,
+        "authorized_at": datetime.now(timezone.utc).isoformat(),
+        "previous_limit": 5,
+        "extended_limit": 6,
+        "prior_extension_sha256": digest(extension),
+        "reason": "one corrected boundary utterance remained",
+    }
+    atomic_json(
+        tmp_path / "work/remote-retry-continuation.json",
+        {"data": continuation, "sha256": digest(continuation)},
+    )
+    permit = tmp_path / "review/code-fix-resume.json"
+    permit.parent.mkdir(parents=True)
+    permit.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "mas.retry_authorization.validate_code_fix_resume", lambda *_args, **_kwargs: {}
+    )
+
+    controller._guard_failed_remote_job(tmp_path, 13, source, commit)
+
+    base, _ = controller._remote_input_binding(tmp_path, source, commit, 13)
+    identity, attempt = controller._remote_attempt_identity(
+        base,
+        tmp_path / "work/remote-job-request.json",
+        tmp_path / "work/remote-job-status.json",
+    )
+    assert attempt == 7
+    assert identity == digest({"base_input_sha256": base, "attempt": 7})
+
+
 def test_retry_authorization_rejects_changed_failure_evidence(tmp_path):
     source, commit = _failed_job(tmp_path)
     returned = tmp_path / "translation_output/Muhtemel Ask 13.Bolum_TR_TEXT_CORRECTED.zip"

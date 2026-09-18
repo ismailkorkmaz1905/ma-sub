@@ -3248,6 +3248,81 @@ def _alignment_resume_groups(scope, source, identity):
     return groups
 
 
+def _archive_authorized_recovery_failure(
+    checkpoint_dir: str | Path,
+    resume_scope: Mapping[str, Any],
+    source: Sequence[Mapping[str, Any]],
+    raw_journal: UnitJournal,
+) -> Path:
+    failure_path = (
+        Path(checkpoint_dir) / "components" / "latest-conflict-failure.json"
+    )
+    if not failure_path.is_file() or failure_path.is_symlink():
+        raise ForcedAlignmentError(
+            "bounded alignment resume requires the retained conflict failure"
+        )
+    saved = json.loads(failure_path.read_text(encoding="utf-8"))
+    details = saved.get("data")
+    targets = list(resume_scope["target_uids"])
+    targeted_source = [
+        item for item in source if str(item["utterance_uid"]) in set(targets)
+    ]
+    raw_results = details.get("raw_results") if isinstance(details, dict) else None
+    limits = details.get("limits") if isinstance(details, dict) else None
+    total_limit = (
+        limits.get("total_recovery_seconds")
+        if isinstance(limits, Mapping)
+        else None
+    )
+    if (
+        not isinstance(details, dict)
+        or saved.get("sha256") != digest(details)
+        or details.get("status") != "BLOCKED"
+        or details.get("reason") != "recovery_time_budget"
+        or details.get("component_uids") != targets
+        or details.get("source_sha256") != digest(targeted_source)
+        or not isinstance(raw_results, Mapping)
+        or not raw_results
+        or type(total_limit) not in (int, float)
+        or type(details.get("total_recovery_seconds")) not in (int, float)
+        or details["total_recovery_seconds"] < total_limit
+    ):
+        raise ForcedAlignmentError(
+            "bounded alignment resume conflict evidence does not match its scope"
+        )
+    for key, expected_sha256 in raw_results.items():
+        cached = raw_journal.read(key)
+        if cached is None or digest(cached) != expected_sha256:
+            raise ForcedAlignmentError(
+                "bounded alignment resume raw acoustic evidence is missing or changed"
+            )
+    archive = (
+        failure_path.parent
+        / "resumed-failures"
+        / f"{saved['sha256']}.json"
+    )
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    if archive.is_file():
+        if archive.read_bytes() != failure_path.read_bytes():
+            raise ForcedAlignmentError(
+                "bounded alignment resume archive evidence changed"
+            )
+        failure_path.unlink()
+    else:
+        failure_path.replace(archive)
+    authorization = {
+        "format": "mas-alignment-recovery-resume-1",
+        "failure_sha256": saved["sha256"],
+        "scope_sha256": digest(dict(resume_scope)),
+        "source_sha256": digest(source),
+    }
+    atomic_json(
+        archive.with_suffix(".authorization.json"),
+        {"data": authorization, "sha256": digest(authorization)},
+    )
+    return archive
+
+
 def align_corrected_segments(
     audio_path: str | Path,
     coarse_segments: Sequence[Mapping[str, Any]],
@@ -3401,6 +3476,10 @@ def align_corrected_segments(
         atomic_json(Path(checkpoint_dir) / "resume-identity.json", {
             "data": identity_record, "sha256": digest(identity_record),
         })
+        if resume_scope is not None:
+            _archive_authorized_recovery_failure(
+                checkpoint_dir, resume_scope, source, journal
+            )
         alignment_call_count = 0
 
         def align(transcript, model, metadata, audio, device, **kwargs):

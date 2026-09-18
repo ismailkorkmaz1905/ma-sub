@@ -229,8 +229,12 @@ def authorize_code_fix_retry(local_root, episode, commit, *, fixture_nodeids, di
     junit.parent.mkdir(parents=True, exist_ok=True)
     bindings = {"mas_retry_failure_sha256": digest(failure), "mas_retry_scope_sha256": digest(resume_scope),
                 "mas_retry_diagnostics_sha256": digest(retained)}
-    environment = dict(os.environ, MAS_RETRY_DIAGNOSTICS_JSON=json.dumps(retained),
-                       MAS_RETRY_EPISODE_ROOT=str(local_root.resolve()))
+    environment = dict(
+        os.environ,
+        MAS_RETRY_DIAGNOSTICS_JSON=json.dumps(retained),
+        MAS_RETRY_EPISODE_ROOT=str(local_root.resolve()),
+        MAS_RETRY_SCOPE_JSON=json.dumps(resume_scope),
+    )
     environment.update({name.upper(): value for name, value in bindings.items()})
     result = subprocess.run([sys.executable, "-m", "pytest", "-q", f"--junitxml={junit}", *fixture_nodeids],
                             cwd=ROOT, capture_output=True, timeout=min(300, budget.check()), check=False,

@@ -5,6 +5,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import random
 import tempfile
 import unittest
@@ -690,6 +691,65 @@ class ForcedAlignmentTests(unittest.TestCase):
         self.assertEqual(failed.exception.details["reason"], "conflict_time_budget")
         self.assertEqual(failed.exception.details["work"]["alignment_calls"], 0)
 
+    def test_scoped_recovery_budget_resume_preserves_failure_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "units"
+            journal = forced_align.UnitJournal(checkpoint, {"raw": "fixture"})
+            raw_key = forced_align.digest({"call": "cached"})
+            raw_result = {"segments": [], "word_segments": []}
+            journal.write(raw_key, raw_result)
+            source = [
+                {
+                    "utterance_uid": uid,
+                    "start_ms": index * 1000,
+                    "end_ms": index * 1000 + 900,
+                    "coarse_start_ms": index * 1000,
+                    "coarse_end_ms": index * 1000 + 900,
+                    "text": uid,
+                }
+                for index, uid in enumerate(("a", "b", "c"), 1)
+            ]
+            scope = {
+                "stage": "forced_alignment",
+                "target_uids": ["b"],
+                "context_uids": ["a", "b", "c"],
+                "audio_sha256": "a" * 64,
+                "model_state_sha256": "b" * 64,
+                "raw_alignment_binding": journal.binding,
+                "source_sha256": forced_align.digest(source),
+            }
+            details = {
+                "status": "BLOCKED",
+                "reason": "recovery_time_budget",
+                "component_uids": ["b"],
+                "source_sha256": forced_align.digest([source[1]]),
+                "raw_results": {raw_key: forced_align.digest(raw_result)},
+                "total_recovery_seconds": 900.1,
+                "limits": {"total_recovery_seconds": 900},
+            }
+            failure = checkpoint / "components/latest-conflict-failure.json"
+            forced_align.atomic_json(
+                failure,
+                {"data": details, "sha256": forced_align.digest(details)},
+            )
+
+            archive = forced_align._archive_authorized_recovery_failure(
+                checkpoint, scope, source, journal
+            )
+
+            self.assertFalse(failure.exists())
+            saved = json.loads(archive.read_text(encoding="utf-8"))
+            self.assertEqual(saved["sha256"], forced_align.digest(details))
+            authorization = json.loads(
+                archive.with_suffix(".authorization.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                authorization["sha256"],
+                forced_align.digest(authorization["data"]),
+            )
+
     @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
     def test_independent_context_timeout_is_persisted_and_not_retried(self, _model):
         clock = {"now": 0.0}
@@ -763,6 +823,29 @@ class ForcedAlignmentTests(unittest.TestCase):
                         break
                 else:
                     self.fail(f"missing raw fixture {missing_text}")
+                for raw_path in checkpoint.glob("*/*.json"):
+                    raw_record = json.loads(raw_path.read_text(encoding="utf-8"))
+                    raw_result = raw_record.get("data", {}).get("result")
+                    if isinstance(raw_result, dict):
+                        break
+                else:
+                    self.fail("missing retained raw alignment fixture")
+                source = identity["data"]["source"]
+                details = {
+                    "status": "BLOCKED",
+                    "reason": "recovery_time_budget",
+                    "component_uids": ["utt-alpha"],
+                    "source_sha256": forced_align.digest([source[0]]),
+                    "raw_results": {
+                        raw_record["data"]["uid"]: forced_align.digest(raw_result),
+                    },
+                    "total_recovery_seconds": 900.1,
+                    "limits": {"total_recovery_seconds": 900},
+                }
+                forced_align.atomic_json(
+                    checkpoint / "components/latest-conflict-failure.json",
+                    {"data": details, "sha256": forced_align.digest(details)},
+                )
                 fake = _TwoPairOverlapWhisperX()
                 if allowed:
                     warm = align_corrected_segments(audio, coarse, whisperx_module=fake,
@@ -3331,6 +3414,33 @@ def test_component_selection_cache_binds_objective_and_preserves_first_tie(tmp_p
         assert forced_align._strict_existing_option_selection(
             ["a"], options, {"a": [word]}, {"a": 0}, checkpoint_journal=journal, objective="joint",
         ) == first
+
+
+def test_scoped_recovery_budget_resume_bound_fixture(record_property):
+    ForcedAlignmentTests(
+        "test_scoped_recovery_budget_resume_preserves_failure_evidence"
+    ).test_scoped_recovery_budget_resume_preserves_failure_evidence()
+    diagnostics_json = os.getenv("MAS_RETRY_DIAGNOSTICS_JSON")
+    if diagnostics_json:
+        records = json.loads(diagnostics_json)
+        scope = json.loads(os.environ["MAS_RETRY_SCOPE_JSON"])
+        root = Path(os.environ["MAS_RETRY_EPISODE_ROOT"])
+        paths = {Path(record["relative_path"]).name: record for record in records}
+        assert set(paths) == {"resume-identity.json", "latest-conflict-failure.json"}
+        failure = json.loads(
+            (root / paths["latest-conflict-failure.json"]["relative_path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert failure["sha256"] == forced_align.digest(failure["data"])
+        assert failure["data"]["reason"] == "recovery_time_budget"
+        assert failure["data"]["component_uids"] == scope["target_uids"]
+        for name in (
+            "mas_retry_failure_sha256",
+            "mas_retry_scope_sha256",
+            "mas_retry_diagnostics_sha256",
+        ):
+            record_property(name, os.environ[name.upper()])
 
 
 if __name__ == "__main__":

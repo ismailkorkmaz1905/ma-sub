@@ -1930,6 +1930,8 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
         raise RunPodControllerError("remote job attempt evidence is invalid")
     attempt += 1
     retry_limit = _changed_evidence_retry_limit(status_path.parent, data.get("episode"))
+    if authorization.get("qualified_code_fix") is True:
+        retry_limit += 1
     if attempt > retry_limit:
         raise RunPodControllerError("BLOCKED: changed-evidence retry budget exhausted")
     return digest({"base_input_sha256": base_input_sha, "attempt": attempt}), attempt
@@ -2208,10 +2210,13 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
         raise RunPodControllerError("BLOCKED: unchanged failed evidence; code or option changes alone do not authorize another GPU run")
     attempt = data.get("attempt", 0)
     retry_limit = _changed_evidence_retry_limit(work, episode)
+    if qualified_code_fix:
+        retry_limit += 1
     if type(attempt) is not int or not 0 <= attempt < retry_limit:
         raise RunPodControllerError("BLOCKED: changed-evidence retry budget exhausted")
     authorization = {"request_sha256": request["sha256"], "base_input_sha256": base,
                      "evidence_input_sha256": evidence, "failure_sha256": digest(failure),
+                     "qualified_code_fix": qualified_code_fix,
                      "pre_pipeline_code_fix": pre_pipeline_code_fix,
                      "checkpointed_raw_asr_code_fix": checkpointed_raw_asr_code_fix}
     atomic_json(work / "remote-retry-authorization.json", {"data": authorization, "sha256": digest(authorization)})

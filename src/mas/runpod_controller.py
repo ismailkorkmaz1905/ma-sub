@@ -126,6 +126,7 @@ def _episode_budget(local_root, episode, *, now=None):
     starts = []
     excluded_wait = 0.0
     prior_limit = None
+    operator_extensions = []
     if budget_path.exists():
         saved = json.loads(budget_path.read_text(encoding="utf-8"))
         body = saved.get("data")
@@ -139,6 +140,23 @@ def _episode_budget(local_root, episode, *, now=None):
         excluded_wait = body.get("excluded_wait_seconds", 0.0)
         if not isinstance(excluded_wait, (int, float)) or not math.isfinite(excluded_wait) or excluded_wait < 0:
             raise RunPodControllerError("invalid excluded wait duration")
+        operator_extensions = body.get("operator_extensions", [])
+        if not isinstance(operator_extensions, list) or len(operator_extensions) > 1:
+            raise RunPodControllerError("invalid operator budget extension ledger")
+        for extension in operator_extensions:
+            if (not isinstance(extension, dict)
+                    or set(extension) != {"authorized_at", "previous_started_at", "reason"}
+                    or not isinstance(extension.get("reason"), str)
+                    or not extension["reason"].strip()
+                    or len(extension["reason"]) > 500):
+                raise RunPodControllerError("invalid operator budget extension ledger")
+            authorized_at = datetime.fromisoformat(extension["authorized_at"])
+            previous_started_at = datetime.fromisoformat(extension["previous_started_at"])
+            if (authorized_at.tzinfo is None or previous_started_at.tzinfo is None
+                    or previous_started_at > authorized_at):
+                raise RunPodControllerError("invalid operator budget extension timestamps")
+        if operator_extensions and body["started_at"] != operator_extensions[-1]["authorized_at"]:
+            raise RunPodControllerError("operator budget extension identity mismatch")
         wait = body.get("wait")
         if wait:
             for key in ("evidence", "shutdown"):
@@ -170,7 +188,10 @@ def _episode_budget(local_root, episode, *, now=None):
             raise RunPodControllerError(f"cannot establish episode budget from {log_path.name}") from exc
     if any(start.tzinfo is None for start in starts):
         raise RunPodControllerError("episode budget timestamps must include timezone")
-    started_at = min(starts) if starts else now
+    started_at = (
+        datetime.fromisoformat(operator_extensions[-1]["authorized_at"])
+        if operator_extensions else min(starts) if starts else now
+    )
     try:
         policy = _runtime_policy()
         limit = float(os.getenv("MAS_EPISODE_BUDGET_SECONDS", str(policy["max_wall_seconds"])))
@@ -181,9 +202,25 @@ def _episode_budget(local_root, episode, *, now=None):
         budget = RunBudget(started_at.isoformat(), limit_seconds=limit)
     except ValueError as exc:
         raise RunPodControllerError("MAS_EPISODE_BUDGET_SECONDS must be positive and at most 21600 seconds") from exc
+    if budget.remaining(now) <= 0 and os.getenv("MAS_EPISODE_BUDGET_EXTENSION_APPROVED") == "1":
+        reason = os.getenv("MAS_EPISODE_BUDGET_EXTENSION_REASON", "").strip()
+        if operator_extensions:
+            raise RunPodControllerError("the single operator budget extension is already consumed")
+        if not reason or len(reason) > 500:
+            raise RunPodControllerError(
+                "MAS_EPISODE_BUDGET_EXTENSION_REASON must record the operator approval"
+            )
+        operator_extensions = [{
+            "authorized_at": now.isoformat(),
+            "previous_started_at": started_at.isoformat(),
+            "reason": reason,
+        }]
+        started_at = now
+        budget = RunBudget(started_at.isoformat(), limit_seconds=limit)
     body = {"episode": episode, "started_at": started_at.isoformat(),
             "limit_seconds": budget.limit_seconds, "excluded_wait_seconds": excluded_wait,
-            "clock_policy": "all-wall-time-v2", "target_seconds": policy["target_wall_seconds"]}
+            "clock_policy": "all-wall-time-v2", "target_seconds": policy["target_wall_seconds"],
+            "operator_extensions": operator_extensions}
     atomic_json(budget_path, {"data": body, "sha256": digest(body)})
     budget.check(now)
     return budget

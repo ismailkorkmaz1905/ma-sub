@@ -130,3 +130,48 @@ def test_resume_cannot_increase_original_lower_episode_allowance(tmp_path, monke
     saved = json.loads((tmp_path / 'work/controller_budget.json').read_text())['data']
     assert saved['limit_seconds'] == 400
     assert saved['started_at'] == started.isoformat()
+
+
+def test_expired_budget_accepts_one_explicit_operator_extension(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "400")
+    started = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "run-original.log").write_text(json.dumps({
+        "event": "run_started", "episode": 14, "timestamp": started.isoformat()
+    }) + "\n", encoding="utf-8")
+    runpod_controller._episode_budget(tmp_path, 14, now=started)
+
+    extended_at = started + timedelta(seconds=401)
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_EXTENSION_APPROVED", "1")
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_EXTENSION_REASON", "operator approved completion")
+    budget = runpod_controller._episode_budget(tmp_path, 14, now=extended_at)
+    assert budget.remaining(extended_at) == pytest.approx(400)
+
+    monkeypatch.delenv("MAS_EPISODE_BUDGET_EXTENSION_APPROVED")
+    monkeypatch.delenv("MAS_EPISODE_BUDGET_EXTENSION_REASON")
+    resumed = runpod_controller._episode_budget(
+        tmp_path, 14, now=extended_at + timedelta(seconds=100)
+    )
+    assert resumed.remaining(extended_at + timedelta(seconds=100)) == pytest.approx(300)
+    ledger = json.loads(
+        (tmp_path / "work/controller_budget.json").read_text(encoding="utf-8")
+    )["data"]
+    assert ledger["started_at"] == extended_at.isoformat()
+    assert ledger["operator_extensions"] == [{
+        "authorized_at": extended_at.isoformat(),
+        "previous_started_at": started.isoformat(),
+        "reason": "operator approved completion",
+    }]
+
+
+def test_expired_budget_extension_requires_reason(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "400")
+    started = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    runpod_controller._episode_budget(tmp_path, 14, now=started)
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_EXTENSION_APPROVED", "1")
+
+    with pytest.raises(runpod_controller.RunPodControllerError, match="REASON"):
+        runpod_controller._episode_budget(
+            tmp_path, 14, now=started + timedelta(seconds=401)
+        )

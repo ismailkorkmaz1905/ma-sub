@@ -375,6 +375,7 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
             "prepare/audio_review_v2.json", "prepare/audio_review_v2.recovery.json",
             "prepare/forced_alignment_units/resume-identity.json",
             "prepare/forced_alignment_units/components/latest-conflict-failure.json",
+            "prepare/forced_alignment_units/components/latest-resume-scope-violation.json",
             "source/download.done.json", "prepare/audio.done.json", "prepare/raw_asr_v2.done.json",
             f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
             f"translation_output/{name}_TR_CORRECTED.zip",
@@ -384,7 +385,8 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
             layout = retry_diagnostic_layout(episode, part_id)
             candidates = [episode_root / relative for relative in layout['files']]
             candidates += [episode_root / prefix / relative for prefix in layout['prefixes'] for relative in (
-                'resume-identity.json', 'components/latest-conflict-failure.json')]
+                'resume-identity.json', 'components/latest-conflict-failure.json',
+                'components/latest-resume-scope-violation.json')]
             candidates.append(episode_root / f'parts/{part_id}/prepare/audio_review_v2.recovery.json')
     missing = [path.relative_to(episode_root).as_posix() for path in candidates if not path.is_file()]
     files = []

@@ -2406,8 +2406,13 @@ def _resolve_alignment_overlaps(
             audio,
             device,
             **(
-                {"_mas_component_uids": request_uids, **kwargs}
-                if request_uids is not None
+                {
+                    "_mas_component_uids": sorted(
+                        active_budget["uids"], key=order.__getitem__
+                    ) if active_budget is not None else request_uids,
+                    **kwargs,
+                }
+                if (active_budget is not None or request_uids is not None)
                 and getattr(unbounded_align, "_mas_scope_wrapper", False)
                 else kwargs
             ),
@@ -3321,6 +3326,12 @@ def _alignment_request_matches_scope(
         request.get(name) is None for name in ("start", "end", "text")
     ):
         return False
+    if (
+        not isinstance(request_uids, list)
+        or not request_uids
+        or not set(request_uids) <= set(scope["target_uids"])
+    ):
+        return False
     if any(
         request["text"] == group["text"]
         and request["start"] >= group["start"]
@@ -3328,12 +3339,6 @@ def _alignment_request_matches_scope(
         for group in groups
     ):
         return True
-    if (
-        not isinstance(request_uids, list)
-        or not request_uids
-        or not set(request_uids) <= set(scope["target_uids"])
-    ):
-        return False
     by_uid = {str(item["utterance_uid"]): item for item in source}
     context = [by_uid[uid] for uid in scope["context_uids"]]
     if (
@@ -3341,11 +3346,34 @@ def _alignment_request_matches_scope(
         or request["end"] > max(int(item["end_ms"]) for item in context) / 1000.0
     ):
         return False
-    allowed_texts = {group["text"] for group in groups}
-    allowed_texts.update(
+    context_positions = {
+        index for index, item in enumerate(source)
+        if str(item["utterance_uid"]) in set(scope["context_uids"])
+    }
+    for start in sorted(context_positions):
+        for end in range(start + 1, min(len(source), start + 17) + 1):
+            if end - 1 not in context_positions:
+                break
+            if end - start > 1 and (
+                int(source[end - 1]["coarse_start_ms"])
+                - int(source[end - 2]["coarse_end_ms"])
+                > MAX_RECOVERY_CONTEXT_GAP_MS
+            ):
+                break
+            group = source[start:end]
+            if (
+                request["text"] == _alignment_model_text(
+                    " ".join(str(item["text"]) for item in group)
+                )
+                and request["start"]
+                >= min(int(item["start_ms"]) for item in group) / 1000.0
+                and request["end"]
+                <= max(int(item["end_ms"]) for item in group) / 1000.0
+            ):
+                return True
+    return request["text"] in {
         _alignment_model_text(str(by_uid[uid]["text"])) for uid in request_uids
-    )
-    return request["text"] in allowed_texts
+    }
 
 
 def _archive_authorized_recovery_failure(
@@ -3597,6 +3625,14 @@ def align_corrected_segments(
                     resume_scope,
                     resume_identity,
                 )
+                if not authorized and discovered_scope is not None:
+                    authorized = _alignment_request_matches_scope(
+                        transcript,
+                        request_uids,
+                        source,
+                        discovered_scope,
+                        resume_identity,
+                    )
                 discovery_limit = (
                     resume_scope.get("discovery_component_limit", 0)
                     if resume_scope is not None
@@ -3660,6 +3696,7 @@ def align_corrected_segments(
                         "message": "uncached CTC request is outside authorized target/context",
                         "component_uids": list(resume_scope["target_uids"]),
                         "requested_component_uids": request_uids,
+                        "requested_transcript": transcript,
                         "request_sha256": key,
                         "authorized_scope_sha256": digest(dict(resume_scope)),
                     }
@@ -3714,6 +3751,11 @@ def align_corrected_segments(
                 align_metadata,
                 audio,
                 device,
+                **(
+                    {"_mas_component_uids": [str(coarse["utterance_uid"])]}
+                    if getattr(align, "_mas_scope_wrapper", False)
+                    else {}
+                ),
                 **call_kwargs,
             )
         except AlignmentConflictBlocked:

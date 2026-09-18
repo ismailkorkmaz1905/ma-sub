@@ -105,7 +105,7 @@ def test_remote_diagnostic_manifest_snapshots_only_bounded_failure_set(tmp_path)
     manifest = remote_job.checkpoint_manifest(tmp_path, 14, "a" * 40, diagnostics=True)
     assert manifest["kind"] == "diagnostics"
     assert [record["relative_path"] for record in manifest["files"]] == ["prepare/audio_review_v2.json"]
-    assert len(manifest["missing"]) == 9
+    assert len(manifest["missing"]) == 10
     diagnostic.write_bytes(b"changed after snapshot")
     from pathlib import Path
     assert Path(manifest["files"][0]["snapshot_path"]).read_bytes() == b"review"

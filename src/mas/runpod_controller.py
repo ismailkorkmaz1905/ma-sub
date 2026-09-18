@@ -2402,6 +2402,7 @@ def _collect_diagnostics(episode, local_root, remote_root, ssh, scp, host, retri
     allowed = {f"translation_input/{name}_TR_CORRECTION_PACK.zip", "prepare/audio_review_v2.json",
                "prepare/forced_alignment_units/resume-identity.json",
                "prepare/forced_alignment_units/components/latest-conflict-failure.json",
+               "prepare/forced_alignment_units/components/latest-resume-scope-violation.json",
                "source/download.done.json", "prepare/audio.done.json", "prepare/raw_asr_v2.done.json",
                "prepare/audio_review_v2.recovery.json", f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
                f"translation_output/{name}_TR_CORRECTED.zip"}
@@ -2410,7 +2411,8 @@ def _collect_diagnostics(episode, local_root, remote_root, ssh, scp, host, retri
         layout = retry_diagnostic_layout(episode, manifest['part_id'])
         allowed = set(layout['files'])
         allowed.update(prefix + relative for prefix in layout['prefixes'] for relative in (
-            'resume-identity.json', 'components/latest-conflict-failure.json'))
+            'resume-identity.json', 'components/latest-conflict-failure.json',
+            'components/latest-resume-scope-violation.json'))
         allowed.add(f"parts/{manifest['part_id']}/prepare/audio_review_v2.recovery.json")
     records = manifest.get("files")
     if (not isinstance(records, list) or len(records) > len(allowed)

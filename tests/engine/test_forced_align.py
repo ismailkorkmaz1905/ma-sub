@@ -960,6 +960,34 @@ class ForcedAlignmentTests(unittest.TestCase):
                      "context_uids": ["a", "b"], **identity}, source, identity,
                 )
 
+    def test_resume_scope_allows_active_target_to_realign_exact_context_cue(self):
+        source = forced_align.validate_coarse_segments([
+            {"utterance_uid": uid, "start_ms": start, "end_ms": end,
+             "text": text, "asr_text": text, "deletion_audio_reviewed": False}
+            for uid, text, start, end in (
+                ("before", "Once", 1000, 1400),
+                ("target", "Hedef", 1500, 1900),
+                ("after", "Sonra", 2000, 2400),
+            )
+        ])
+        identity = {key: "a" * 64 for key in (
+            "audio_sha256", "model_state_sha256", "raw_alignment_binding", "source_sha256",
+        )}
+        scope = {
+            "stage": "forced_alignment",
+            "target_uids": ["target"],
+            "context_uids": ["before", "target", "after"],
+            **identity,
+        }
+        request = [{"start": 1.0, "end": 1.4, "text": "Once"}]
+
+        self.assertTrue(forced_align._alignment_request_matches_scope(
+            request, ["target"], source, scope, identity,
+        ))
+        self.assertFalse(forced_align._alignment_request_matches_scope(
+            request, ["before"], source, scope, identity,
+        ))
+
     def test_resume_request_metadata_allows_only_bounded_component_windows(self):
         source = forced_align.validate_coarse_segments(self._two_pair_coarse())
         identity = {

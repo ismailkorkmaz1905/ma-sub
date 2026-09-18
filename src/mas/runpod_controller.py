@@ -1298,8 +1298,6 @@ def _resume_partial_delivery(local_root, episode):
                     return WAIT_PART_RETURN
         export_path = folder / 'work/partial-export.json'
         if export_path.is_file():
-            if _pending_partial_collection_retry(local_root, episode):
-                return None
             released = _released_partial_audit(local_root, episode, READY_FOR_PARTIAL_ENCODE)
             if released is not None:
                 from .partial_delivery import write_part_release
@@ -1717,37 +1715,6 @@ def _record_result_collection_failure(local_root, exit_code, record=None):
     }
     atomic_json(work / "remote-result-collection-failure.json",
                 {"data": failure, "sha256": digest(failure)})
-
-
-def _pending_partial_collection_retry(local_root, episode):
-    from .remote_job import _identity
-    work = Path(local_root) / 'work'
-    failure_path = work / 'remote-result-collection-failure.json'
-    if not failure_path.is_file():
-        return False
-    request_path = work / 'remote-job-request.json'
-    status_path = work / 'remote-job-status.json'
-    if not request_path.is_file() or not status_path.is_file():
-        raise RunPodControllerError('remote result collection retry evidence is incomplete')
-    request = json.loads(request_path.read_text(encoding='utf-8'))
-    data = request.get('data')
-    status = json.loads(status_path.read_text(encoding='utf-8'))
-    saved = json.loads(failure_path.read_text(encoding='utf-8'))
-    failure = saved.get('data')
-    if (not isinstance(data, dict) or request.get('sha256') != digest(data)
-            or data.get('episode') != episode
-            or status.get('status') != 'EXITED' or status.get('exit_code') != READY_FOR_PARTIAL_ENCODE
-            or status.get('identity') != _identity(episode, data.get('commit'), data.get('input_sha256'))
-            or not isinstance(failure, dict) or saved.get('sha256') != digest(failure)):
-        raise RunPodControllerError('remote result collection retry evidence is invalid')
-    expected = {'format': 'mas-remote-result-collection-failure-1', 'episode': episode,
-                'base_input_sha256': data.get('base_input_sha256', data.get('input_sha256')),
-                'input_sha256': data.get('input_sha256'), 'attempt': data.get('attempt', 0),
-                'exit_code': READY_FOR_PARTIAL_ENCODE, 'request_sha256': request['sha256']}
-    if any(failure.get(key) != value for key, value in expected.items()) \
-            or not _collection_failure_paths_match(failure, data, status_path):
-        raise RunPodControllerError('remote result collection retry binding mismatch')
-    return True
 
 
 def _collection_failure_paths_match(failure, data, status_path):
@@ -2240,6 +2207,21 @@ def _collect_partial_results(exit_code, episode, local_root, remote_root, ssh, s
                 continue
             record = {'relative_path': relative, 'storage_path': item.get('storage_path')}
             _download_record(item, local_root, remote_root, scp, host, budget)
+        if exit_code == READY_FOR_PARTIAL_ENCODE:
+            from .engine.part_audio import load_part_plan
+            captions = load_part_plan(local_root, episode, verify_files=False).get('captions')
+            if captions is not None and captions['relative_path'] not in relatives:
+                if not captions['relative_path'].startswith('source/'):
+                    raise RunPodControllerError('partial caption dependency escaped source evidence')
+                _download_record(captions, local_root, remote_root, scp, host, budget)
+            lineage_path = folder / 'prepare/audio-part.done.json'
+            if lineage_path.is_file():
+                lineage = _read_bound(lineage_path)
+                derived_captions = lineage.get('captions')
+                if derived_captions is not None and derived_captions['relative_path'] not in relatives:
+                    if not derived_captions['relative_path'].startswith(f'parts/{part_id}/prepare/'):
+                        raise RunPodControllerError('partial derived caption dependency escaped its part')
+                    _download_record(derived_captions, local_root, remote_root, scp, host, budget)
         alias = folder / 'work' / filename
         if alias.is_file() and sha256_file(alias) != sha256_file(current):
             from .engine.download import atomic_write_bytes

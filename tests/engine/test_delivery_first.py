@@ -10,7 +10,6 @@ import pytest
 
 from mas import delivery_first as df
 from mas.engine import delivery_align as align
-from mas.engine.episode_archive import file_record
 from mas.engine.id_translation import (build_production_translation_policy, build_id_translation_records,
                                        create_id_translation_output_zip, validate_id_translation_pack)
 from mas.engine.part_audio import extract_part_audio, prepare_episode_parts
@@ -162,14 +161,13 @@ def test_handoff_to_real_authenticated_delivery_export(synthetic_parents, monkey
     export, report = validate_partial_export(root, 14, 'part-001')
     assert report['quality_status'] == 'NOT_STRICT'
     assert report['status'] == 'READY_WITH_WARNINGS' and report['warnings']
-    assert report['input_files']['source_captions'] == file_record(captions, root)
-    assert report['input_files']['source_captions'] in export['files']
     assert primary_calls == [1]
     assert not (child / 'prepare/forced_alignment_v2.json').exists()
     assert not list(child.glob('final/*PARTIAL_FINALIZATION_REPORT*'))
     # Changing a subtitle and all public checksums cannot forge the export.
     srt = root / report['outputs']['id_srt']['relative_path']
     srt.write_text('1\n00:00:00,500 --> 00:00:01,000\nchanged\n\n', encoding='utf-8')
+    from mas.engine.episode_archive import file_record
     replacement = file_record(srt, root)
     export['files'] = [replacement if r['relative_path'] == replacement['relative_path'] else r for r in export['files']]
     atomic_json(child / 'work/partial-export.json', export)

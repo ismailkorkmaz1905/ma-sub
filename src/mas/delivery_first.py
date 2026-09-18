@@ -300,8 +300,6 @@ def create_export(root, episode, part, derived, schema, transcript_path, schema_
              'part_plan': root / 'work/part-plan.json', 'parent_vad': root / 'work/part-vad.json',
              'derived_audio': derived['audio_path'], 'derived_audio_marker': derived['lineage_path'],
              'transcript': transcript_path, 'schema': schema_path, 'id_pack': id_pack, 'id_output': id_output}
-    if plan.get('captions') is not None:
-        paths['source_captions'] = root / plan['captions']['relative_path']
     report = {'format': 'mas-delivery-first-part-1', 'mode': MODE, 'status': 'READY_WITH_WARNINGS',
               'quality_status': 'NOT_STRICT', 'perceptual_acceptance': 'NOT_ASSERTED',
               'episode': episode, 'part_id': part['part_id'], 'scope': part, 'full_episode_complete': False,
@@ -359,18 +357,13 @@ def validate_export(root, episode, part_id, export, *, total_timeout):
     if export['report'] not in files or export['report']['relative_path'] != expected_report:
         raise ValueError('Delivery report escaped evidence inventory')
     report = read_json(verified_record(root, export['report']))
-    required_inputs = set(REQUIRED_INPUTS)
-    if plan.get('captions') is not None:
-        required_inputs.add('source_captions')
     if (report.get('mode') != MODE or report.get('status') != 'READY_WITH_WARNINGS'
             or report.get('quality_status') != 'NOT_STRICT' or report.get('scope') != part
             or report.get('episode') != episode or report.get('part_id') != part_id
-            or set(report.get('input_files', {})) != required_inputs
+            or set(report.get('input_files', {})) != REQUIRED_INPUTS
             or set(report.get('outputs', {})) != {'tr_srt', 'id_srt'}
             or report.get('lineage_sha256') != sha256_file(derived['lineage_path'])
             or report['input_files']['source_video'] != {k: plan['source'][k] for k in ('relative_path', 'sha256', 'size_bytes')}
-            or plan.get('captions') is not None and report['input_files']['source_captions'] != {
-                k: plan['captions'][k] for k in ('relative_path', 'sha256', 'size_bytes')}
             or report['input_files']['derived_audio'] != derived['lineage']['audio']):
         raise ValueError('Delivery report contract changed')
     inventory = list(report['input_files'].values()) + list(report['outputs'].values()) + [export['report']]

@@ -25,7 +25,7 @@ def _bound(path, data):
     atomic_json(path, {'data': data, 'sha256': digest(data)})
 
 
-def _plan(root):
+def _plan(root, captions=None):
     source = {'relative_path': 'source/movie.mp4', 'size_bytes': 10, 'sha256': '1' * 64}
     audio = {'relative_path': 'prepare/audio.flac', 'size_bytes': 10, 'sha256': '2' * 64,
              'sample_rate_hz': 16000, 'channels': 1, 'sample_count': 7200000 * 16}
@@ -35,7 +35,7 @@ def _plan(root):
     plan = build_part_plan(episode=14, source=source, audio=audio,
         vad={'independent_vad': True, 'audio_sha256': audio['sha256'], 'sample_count': audio['sample_count'],
              'config': {'policy': 'canonical'}, 'model': {'name': 'silero'},
-             'producer_sha256': '3' * 64, 'regions': regions})
+             'producer_sha256': '3' * 64, 'regions': regions}, captions=captions)
     _bound(root / 'work/part-plan.json', plan)
     controller._episode_budget(root, 14)
     return plan
@@ -119,6 +119,32 @@ def test_partial_export_transport_uses_plain_manifest_and_parent_vad(tmp_path, m
     controller._collect_remote_results(READY_FOR_PARTIAL_ENCODE, 14, local, '/episode', [], ['scp'],
                                        'host', Budget(), staging)
     assert checks == [600]
+
+
+def test_partial_export_transport_restores_caption_dependency_from_signed_plan(tmp_path, monkeypatch):
+    remote, local, staging = (tmp_path / x for x in ('remote', 'local', 'staging'))
+    staging.mkdir()
+    caption = remote / 'source/youtube.tr.vtt'
+    caption.parent.mkdir(parents=True)
+    caption.write_text('WEBVTT\n', encoding='utf-8')
+    _plan(remote, captions={**file_record(caption, remote), 'records': []})
+    atomic_json(remote / 'work/part-vad.json', {'independent_vad': True})
+    derived_caption = remote / 'parts/part-001/prepare/captions.vtt'
+    derived_caption.parent.mkdir(parents=True)
+    derived_caption.write_text('WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n', encoding='utf-8')
+    lineage_path = remote / 'parts/part-001/prepare/audio-part.done.json'
+    _bound(lineage_path, {'captions': file_record(derived_caption, remote)})
+    export = {'episode': 14, 'part_id': 'part-001', 'mode': 'strict-partial-subtitles',
+              'files': [file_record(remote / 'work/part-plan.json', remote),
+                        file_record(remote / 'work/part-vad.json', remote), file_record(lineage_path, remote)]}
+    atomic_json(remote / 'work/partial-export.json', export)
+    calls = _transport(monkeypatch, remote)
+    monkeypatch.setattr(partial_finalize, 'validate_partial_export', lambda *a, **k: None)
+    controller._collect_remote_results(READY_FOR_PARTIAL_ENCODE, 14, local, '/episode', [], ['scp'],
+                                       'host', Budget(), staging)
+    assert (local / 'source/youtube.tr.vtt').read_bytes() == caption.read_bytes()
+    assert (local / 'parts/part-001/prepare/captions.vtt').read_bytes() == derived_caption.read_bytes()
+    assert calls[-2:] == ['source/youtube.tr.vtt', 'parts/part-001/prepare/captions.vtt']
 
 
 def test_partial_transfer_rejects_crosspart_inventory(tmp_path, monkeypatch):
@@ -255,27 +281,6 @@ def test_partial_collection_retry_matches_plain_export(tmp_path):
                                                      'files': [{'relative_path': relative}]})
     failure = {'exit_code': READY_FOR_PARTIAL_ENCODE, 'relative_path': relative, 'storage_path': None}
     assert controller._collection_failure_paths_match(failure, {'episode': 14}, tmp_path / 'work/remote-job-status.json')
-
-
-def test_pending_partial_collection_retry_skips_stale_local_export(tmp_path, monkeypatch):
-    _plan(tmp_path)
-    audit = _release(tmp_path, READY_FOR_PARTIAL_ENCODE)
-    export = tmp_path / 'parts/part-001/work/partial-export.json'
-    atomic_json(export, {'episode': 14, 'mode': 'delivery-first-subtitles', 'files': []})
-    request = json.loads((tmp_path / 'work/remote-job-request.json').read_text(encoding='utf-8'))
-    data = request['data']
-    failure = {'format': 'mas-remote-result-collection-failure-1', 'episode': 14,
-               'base_input_sha256': data['input_sha256'], 'input_sha256': data['input_sha256'],
-               'attempt': 0, 'exit_code': READY_FOR_PARTIAL_ENCODE,
-               'request_sha256': request['sha256'], 'relative_path': 'work/partial-export.json',
-               'storage_path': '/workspace/ma-sub/EPISODES/Muhtemel Ask 14.Bolum/work/partial-export.json'}
-    _bound(tmp_path / 'work/remote-result-collection-failure.json', failure)
-    monkeypatch.setattr(partial_delivery, 'validate_published_part', lambda *a, **k: None)
-    monkeypatch.setattr(partial_delivery, 'validate_local_tail', lambda *a, **k: None)
-    monkeypatch.setattr(controller, '_released_partial_audit',
-                        lambda *a, **k: pytest.fail('stale export was released'))
-    assert controller._resume_partial_delivery(tmp_path, 14) is None
-    assert audit.is_dir()
 
 
 def test_part_review_uploads_keep_namespace_and_do_not_authorize_unvalidated_retry(tmp_path):

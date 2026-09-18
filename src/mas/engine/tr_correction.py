@@ -174,9 +174,9 @@ MIN_RATIO_CHECK_BYTES = 1024 * 1024
 MAX_SPEECH_HOLE_AUDIO_FILES = 192
 MAX_SPEECH_HOLE_AUDIO_BYTES = 16 * 1024 * 1024
 MAX_SPEECH_HOLE_AUDIO_TOTAL_BYTES = 128 * 1024 * 1024
-# Keep automatically discovered candidates at the original conservative bound.
-# An already inspected text correction may explicitly request a larger bounded
-# review set. This does not expand the automatic detector budget.
+# Keep heuristic detector candidates at the original conservative bound.
+# Mandatory structural reviews and explicit requests remain governed by the
+# aggregate file and byte bounds without expanding the detector budget.
 MAX_AUTOMATIC_ASR_HALLUCINATION_AUDIO_FILES = 192
 MAX_EXPLICIT_ASR_HALLUCINATION_AUDIO_FILES = 832
 MAX_ASR_HALLUCINATION_AUDIO_FILES = (

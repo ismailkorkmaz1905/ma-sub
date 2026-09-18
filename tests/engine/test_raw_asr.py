@@ -253,8 +253,8 @@ class RawASRV2Tests(unittest.TestCase):
                 self.assertTrue(all("manual_audio_review_required" in item["risk_flags"] for item in updated))
 
     def test_serious_gap_threshold_and_only_adjacent_fragments_are_flagged(self) -> None:
-        # With incomplete owners excluded, the 5 s internal/edge policy yields
-        # 190 EP13 candidates and stays below the unchanged 192-candidate cap.
+        # The 5 s internal/edge policy preserves adjacent fragments for
+        # mandatory audio review without treating them as detector output.
         flag = "provisional_word_gap_requires_audio_review"
         for gap, expected in ((4999, [False, False, False]), (5000, [True, True, False])):
             with self.subTest(gap=gap):
@@ -388,6 +388,7 @@ class RawASRV2Tests(unittest.TestCase):
     def test_explicit_review_budget_does_not_relax_automatic_detector_bound(self) -> None:
         raw_asr_v2_module._require_asr_hallucination_candidate_budget(
             automatic_count=192,
+            structural_count=0,
             explicit_only_count=832,
             total_count=1024,
             reviewable_count=900,
@@ -396,6 +397,7 @@ class RawASRV2Tests(unittest.TestCase):
         with self.assertRaisesRegex(TranscriptionError, "automatic_candidates=193"):
             raw_asr_v2_module._require_asr_hallucination_candidate_budget(
                 automatic_count=193,
+                structural_count=0,
                 explicit_only_count=0,
                 total_count=193,
                 reviewable_count=500,
@@ -406,11 +408,25 @@ class RawASRV2Tests(unittest.TestCase):
         ):
             raw_asr_v2_module._require_asr_hallucination_candidate_budget(
                 automatic_count=0,
+                structural_count=0,
                 explicit_only_count=833,
                 total_count=833,
                 reviewable_count=900,
                 candidate_reason_counts={},
             )
+
+    def test_mandatory_structural_reviews_do_not_consume_detector_budget(self) -> None:
+        raw_asr_v2_module._require_asr_hallucination_candidate_budget(
+            automatic_count=126,
+            structural_count=215,
+            explicit_only_count=0,
+            total_count=313,
+            reviewable_count=2972,
+            candidate_reason_counts={
+                "provisional_word_gap_requires_audio_review": 157,
+                "orphan_youtube_caption_without_asr_or_vad_overlap": 58,
+            },
+        )
 
     def test_rescue_budget_adapts_only_for_healthy_long_episode(self) -> None:
         config = RawASRV2Config()

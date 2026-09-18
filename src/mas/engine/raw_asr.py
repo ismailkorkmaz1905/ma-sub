@@ -1387,12 +1387,13 @@ def build_speech_hole_records(
 def _require_asr_hallucination_candidate_budget(
     *,
     automatic_count: int,
+    structural_count: int,
     explicit_only_count: int,
     total_count: int,
     reviewable_count: int,
     candidate_reason_counts: Mapping[str, int],
 ) -> None:
-    """Keep detector runaways separate from bounded explicit review repair."""
+    """Keep detector runaways separate from mandatory and explicit review."""
 
     if automatic_count > MAX_AUTOMATIC_ASR_HALLUCINATION_AUDIO_FILES:
         raise TranscriptionError(
@@ -1417,6 +1418,7 @@ def _require_asr_hallucination_candidate_budget(
             "Suspected ASR hallucination count exceeds the bounded WAV limit; "
             f"candidates={total_count}, "
             f"limit={MAX_ASR_HALLUCINATION_AUDIO_FILES}, "
+            f"structural_candidates={structural_count}, "
             f"reviewable_utterances={reviewable_count}, "
             f"reasons={reason_summary or 'none'}"
         )
@@ -1533,7 +1535,8 @@ def build_asr_hallucination_records(
         )
     candidate_reasons: dict[str, list[str]] = {}
     candidate_reason_counts: dict[str, int] = {}
-    automatic_candidate_uids: set[str] = set()
+    automatic_detector_candidate_uids: set[str] = set()
+    mandatory_structural_candidate_uids: set[str] = set()
     for utterance_uid, utterance in reviewable_by_uid.items():
         start_ms = int(utterance["coarse_start_ms"])
         end_ms = int(utterance["coarse_end_ms"])
@@ -1542,21 +1545,30 @@ def build_asr_hallucination_records(
             for vad_start, vad_end in trusted_vad
         )
         overlap_ratio = overlap_ms / (end_ms - start_ms)
-        structural_reasons: list[str] = []
+        mandatory_structural_reasons: list[str] = []
+        detector_structural_reasons: list[str] = []
         confidence_reasons: list[str] = []
         is_orphan_caption = "orphan_youtube_caption" in utterance["risk_flags"]
         if "provisional_word_gap_requires_audio_review" in utterance["risk_flags"]:
-            structural_reasons.append("provisional_word_gap_requires_audio_review")
+            mandatory_structural_reasons.append(
+                "provisional_word_gap_requires_audio_review"
+            )
         if "incomplete_provisional_word_timing" in utterance["risk_flags"]:
-            structural_reasons.append("incomplete_provisional_word_timing")
+            mandatory_structural_reasons.append(
+                "incomplete_provisional_word_timing"
+            )
         if is_orphan_caption:
-            structural_reasons.append(
+            mandatory_structural_reasons.append(
                 "orphan_youtube_caption_without_asr_or_vad_overlap"
             )
         elif overlap_ms == 0:
-            structural_reasons.append("zero_unpadded_independent_vad_overlap")
+            detector_structural_reasons.append(
+                "zero_unpadded_independent_vad_overlap"
+            )
         elif overlap_ratio <= settings.hallucination_max_vad_overlap_ratio:
-            structural_reasons.append("low_unpadded_independent_vad_overlap")
+            detector_structural_reasons.append(
+                "low_unpadded_independent_vad_overlap"
+            )
         audit = utterance["asr_audit"]
         avg_logprob = audit["avg_logprob"]
         no_speech_prob = audit["no_speech_prob"]
@@ -1602,19 +1614,30 @@ def build_asr_hallucination_records(
         # or at least two independent weak signals. This keeps the detector
         # sensitive to speech-in-silence hallucinations without turning every
         # low-confidence but audible line into a false candidate.
-        automatic_candidate = (
+        automatic_detector_candidate = (
             known_subtitle_hallucination
-            or bool(structural_reasons)
+            or bool(detector_structural_reasons)
             or "high_asr_compression_ratio" in confidence_reasons
             or len(confidence_reasons) >= 2
         )
-        reasons = structural_reasons + confidence_reasons
+        mandatory_structural_candidate = bool(mandatory_structural_reasons)
+        reasons = (
+            mandatory_structural_reasons
+            + detector_structural_reasons
+            + confidence_reasons
+        )
         if explicitly_requested:
             reasons.append("explicit_uid_review_request")
-        if automatic_candidate or explicitly_requested:
+        if (
+            mandatory_structural_candidate
+            or automatic_detector_candidate
+            or explicitly_requested
+        ):
             candidate_reasons[utterance_uid] = reasons
-            if automatic_candidate:
-                automatic_candidate_uids.add(utterance_uid)
+            if mandatory_structural_candidate:
+                mandatory_structural_candidate_uids.add(utterance_uid)
+            if automatic_detector_candidate:
+                automatic_detector_candidate_uids.add(utterance_uid)
             for reason in reasons:
                 candidate_reason_counts[reason] = (
                     candidate_reason_counts.get(reason, 0) + 1
@@ -1624,9 +1647,13 @@ def build_asr_hallucination_records(
         for utterance in trusted_utterances
         if str(utterance["utterance_uid"]) in candidate_reasons
     ]
-    explicit_only_uids = set(candidate_reasons).difference(automatic_candidate_uids)
+    explicit_only_uids = set(candidate_reasons).difference(
+        mandatory_structural_candidate_uids,
+        automatic_detector_candidate_uids,
+    )
     _require_asr_hallucination_candidate_budget(
-        automatic_count=len(automatic_candidate_uids),
+        automatic_count=len(automatic_detector_candidate_uids),
+        structural_count=len(mandatory_structural_candidate_uids),
         explicit_only_count=len(explicit_only_uids),
         total_count=len(candidates),
         reviewable_count=len(reviewable_by_uid),

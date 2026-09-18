@@ -111,6 +111,20 @@ def test_runtime_image_accepts_configured_not_invented_digest(monkeypatch):
     assert controller._configured_runtime_image() == image
 
 
+@pytest.mark.parametrize("value", ["bad value", "bad/value", "bad.value", "bad:value"])
+def test_registry_auth_id_rejects_invalid_values(monkeypatch, value):
+    monkeypatch.setenv("MAS_RUNPOD_REGISTRY_AUTH_ID", value)
+    with pytest.raises(controller.RunPodControllerError, match="REGISTRY_AUTH_ID"):
+        controller._configured_registry_auth_id()
+
+
+def test_registry_auth_id_is_optional_and_validated(monkeypatch):
+    monkeypatch.delenv("MAS_RUNPOD_REGISTRY_AUTH_ID", raising=False)
+    assert controller._configured_registry_auth_id() is None
+    monkeypatch.setenv("MAS_RUNPOD_REGISTRY_AUTH_ID", "auth_123-ABC")
+    assert controller._configured_registry_auth_id() == "auth_123-ABC"
+
+
 def test_historical_excluded_wait_is_retained_but_not_added_to_wall_time(tmp_path, monkeypatch):
     monkeypatch.delenv("MAS_EPISODE_BUDGET_SECONDS", raising=False)
     start = datetime(2026, 9, 14, tzinfo=timezone.utc)

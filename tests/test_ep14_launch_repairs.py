@@ -191,6 +191,7 @@ def test_windows_launcher_refreshes_new_required_settings():
     source = (Path(rc.__file__).resolve().parents[2] / 'mas.ps1').read_text()
     names = source.split('$userEnvironmentNames = @(', 1)[1].split(')', 1)[0]
     assert '"MAS_RUNPOD_IMAGE"' in names
+    assert '"MAS_RUNPOD_REGISTRY_AUTH_ID"' in names
     assert '"MAS_RUNPOD_STORAGE_QUOTE"' in names
     assert 'elseif (-not [Environment]::GetEnvironmentVariable($name, "Process"))' in source
 

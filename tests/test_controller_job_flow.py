@@ -232,7 +232,9 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
     episode_root, _ = _patch_local_preflight(monkeypatch, tmp_path)
     events = []
     plan_args = {}
+    lease_payload = {}
     monkeypatch.setenv("MAS_DRIVE_STRICT_REMOTE", "drive:folder")
+    monkeypatch.setenv("MAS_RUNPOD_REGISTRY_AUTH_ID", "registry-auth-123")
     monkeypatch.setattr(controller, "_prepare_official_source",
                         lambda *args: "https://example.invalid/episode")
     monkeypatch.setattr(controller, "_episode_budget", lambda *args: Budget())
@@ -248,6 +250,7 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
         pod = {"id": "owned"}
         def __init__(self, *args, **kwargs):
             self.audit = args[2]
+            lease_payload.update(args[1])
         def __enter__(self):
             events.append("capacity-enter")
             return self
@@ -290,6 +293,7 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
         controller.run_remote_episode(13)
     assert events == ["capacity-enter", "capacity-exit", "validate", "publish"]
     assert plan_args["gpu_type_ids"] == ["NVIDIA L4", "NVIDIA RTX PRO 4000 Blackwell"]
+    assert lease_payload["containerRegistryAuthId"] == "registry-auth-123"
     release_path = episode_root / "work" / "gpu-released-for-delivery.json"
     release = json.loads(release_path.read_text(encoding="utf-8"))
     assert release["sha256"] == digest(release["data"])

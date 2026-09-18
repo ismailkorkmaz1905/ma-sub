@@ -91,6 +91,15 @@ def _configured_runtime_image():
     return image
 
 
+def _configured_registry_auth_id():
+    value = os.getenv("MAS_RUNPOD_REGISTRY_AUTH_ID", "").strip()
+    if not value:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise RunPodControllerError("MAS_RUNPOD_REGISTRY_AUTH_ID is invalid")
+    return value
+
+
 def _local_encoder_preflight(local_root, episode, budget):
     _production_priority()
     execution = os.getenv("MAS_DELIVERY_EXECUTION_PLAN", "local-qsv-v1")
@@ -1246,7 +1255,7 @@ def _resume_partial_delivery(local_root, episode):
                 seconds = remaining()
                 if seconds <= 0:
                     raise BudgetExceeded('Local delivery retry allowance expired; artifacts retained')
-                return seconds
+                return min(3600, seconds)
         budget = LocalDeliveryBudget()
         delivery_late = True
         atomic_json(local_root / 'work/delivery-deadline-missed.json', {
@@ -1495,10 +1504,11 @@ def _run_remote_episode_once(episode, source_url=None):
         runtime_error = None
         try:
             runtime_image = _configured_runtime_image()
+            registry_auth_id = _configured_registry_auth_id()
         except RunPodControllerError as exc:
             if not resume_lease:
                 raise
-            runtime_image, runtime_error = None, exc
+            runtime_image, registry_auth_id, runtime_error = None, None, exc
         if not resume_lease:
             _local_encoder_preflight(local_root, episode, episode_budget)
             drive_readiness = drive_preflight(values["MAS_DRIVE_STRICT_REMOTE"], required_bytes=0,
@@ -1517,6 +1527,8 @@ def _run_remote_episode_once(episode, source_url=None):
                    "ports": "22/tcp", "volumeMountPath": "/workspace",
                    "env": [{"key": "PUBLIC_KEY", "value": public_key}],
                    "supportPublicIp": True, "startSsh": True}
+        if registry_auth_id:
+            payload["containerRegistryAuthId"] = registry_auth_id
         plan = CapacityPlan(episode=episode,
                             maximum_rate_usd_per_hour=float(os.getenv("MAS_RUNPOD_MAX_COST_PER_HR", "0.75")),
                             gpu_type_ids=(

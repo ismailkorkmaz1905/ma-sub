@@ -151,6 +151,7 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert "timeout 300 apt-get -o Acquire::Retries=3 update" in script
     assert "timeout 600 apt-get -o Acquire::Retries=3 install" in script
     assert 'RUNTIME_MARKER="$VENV/.mas-runtime-abi.json"' in script
+    assert 'read_bytes().replace(b"\\r\\n", b"\\n")' in script
     assert '"format": "mas-runtime-abi-marker-1"' in script
     for binding in (
         '"requirements_sha256"',
@@ -184,7 +185,7 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert '"$REQUIREMENTS_SHA256" != "$C0E3_REQUIREMENTS_SHA256"' in script
     assert 'c0e3c8e40def2d7672a5dd201cd5d65fde086d6f' in script
     expected_requirements_sha = (
-        "b93b36910aade9a06120b6d772c561637da426ec6949c6199f7abdbc85834c65"
+        "1a47075cdac4e504a915ac23badeb0524baaede883fb0608c874acab5206918f"
     )
     assert expected_requirements_sha in script
     assert 'uv pip install --python "$VENV/bin/python"' not in script

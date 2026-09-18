@@ -1350,6 +1350,8 @@ def _released_partial_audit(local_root, episode, exit_code):
 
 
 def _preflight_part_return(local_root, episode):
+    if _production_priority() != 'first-hour-v1':
+        return
     if not (local_root / 'work/partial-handoff.json').is_file():
         return
     from .progressive import validate_partial_handoff
@@ -1367,6 +1369,8 @@ def _preflight_part_return(local_root, episode):
 
 
 def _part_resume_files(local_root, episode):
+    if _production_priority() != 'first-hour-v1':
+        return []
     if not (local_root / 'work/part-plan.json').is_file():
         return []
     from .engine.part_audio import load_part_plan

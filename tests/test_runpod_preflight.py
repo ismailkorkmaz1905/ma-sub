@@ -239,6 +239,7 @@ def test_immutable_image_runtime_and_entrypoint_do_not_depend_on_volume_code():
     assert "WORKDIR /opt/ma-sub" in docker
     assert "MAS_VENV_DIR=/opt/venv" in docker
     assert "openssh-server" in docker
+    assert "uv pip install --no-cache" in docker
     assert "MAS_RUNTIME_MODE=image-build MAS_BIN_DIR=/usr/local/bin" in docker
     assert 'ENTRYPOINT ["/opt/ma-sub/runpod/container-start.sh"]' in docker
     script = (ROOT / "runpod/bootstrap.sh").read_text(encoding="utf-8")

@@ -16,7 +16,7 @@ RUN apt-get update \
     && uv venv --python 3.11 /opt/venv
 WORKDIR /opt/ma-sub
 COPY requirements.lock ./
-RUN uv pip install --python /opt/venv/bin/python --index-strategy unsafe-best-match --requirements requirements.lock
+RUN uv pip install --no-cache --python /opt/venv/bin/python --index-strategy unsafe-best-match --requirements requirements.lock
 COPY . ./
 RUN chmod +x mas runpod/*.sh
 RUN MAS_RUNTIME_MODE=image-build MAS_BIN_DIR=/usr/local/bin ./runpod/bootstrap.sh

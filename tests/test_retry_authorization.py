@@ -27,6 +27,15 @@ def _case(tmp_path, monkeypatch, *, outcome="pass", bound=True):
     for relative in ("source/download.done.json", "prepare/audio.done.json", "prepare/raw_asr_v2.done.json",
                      "prepare/audio_review_v2.json"):
         atomic_json(root / relative, {"test_checkpoint": True})
+    for relative in (
+        "prepare/raw_asr_v2.json",
+        "translation_input/Muhtemel Ask 14.Bolum_TR_CORRECTION_PACK.zip",
+        "translation_output/Muhtemel Ask 14.Bolum_TR_TEXT_CORRECTED.zip",
+        "translation_output/Muhtemel Ask 14.Bolum_TR_CORRECTED.zip",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"retained checkpoint")
     identity = {name: value * 64 for name, value in (
         ("audio_sha256", "a"), ("model_state_sha256", "b"),
         ("raw_alignment_binding", "c"), ("source_sha256", "d"))}
@@ -68,6 +77,14 @@ def test_code_fix_authorization_requires_actual_bound_fixture_pass(tmp_path, mon
     assert retry.validate_code_fix_resume(root, 14, "b" * 40, permit) == arguments["resume_scope"]
     saved = json.loads(permit.read_text())
     assert saved["data"]["fixture_passed_count"] == 1
+    predecessor_paths = {
+        item["relative_path"] for item in saved["data"]["predecessors"]
+    }
+    assert "prepare/raw_asr_v2.json" in predecessor_paths
+    assert (
+        "translation_output/Muhtemel Ask 14.Bolum_TR_CORRECTED.zip"
+        in predecessor_paths
+    )
 
 
 def test_source_identity_normalizes_platform_line_endings(tmp_path):

@@ -36,14 +36,15 @@ def retry_diagnostic_layout(episode, part_id=None):
     prefix = f"parts/{part_id}/" if part_id is not None else ""
     name = f"Muhtemel Ask {episode}.Bolum"
     files = ["source/download.done.json", "prepare/audio.done.json",
-             prefix + "prepare/raw_asr_v2.done.json", prefix + "prepare/audio_review_v2.json"]
+             prefix + "prepare/raw_asr_v2.done.json",
+             prefix + "prepare/raw_asr_v2.json",
+             prefix + "prepare/audio_review_v2.json",
+             prefix + f"translation_input/{name}_TR_CORRECTION_PACK.zip",
+             prefix + f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
+             prefix + f"translation_output/{name}_TR_CORRECTED.zip"]
     if part_id is not None:
         files.extend(["work/part-plan.json", "work/part-vad.json", "work/current-part.json",
                       prefix + "work/state.json", prefix + "prepare/audio-part.done.json",
-                      prefix + "prepare/raw_asr_v2.json",
-                      prefix + f"translation_input/{name}_TR_CORRECTION_PACK.zip",
-                      prefix + f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
-                      prefix + f"translation_output/{name}_TR_CORRECTED.zip",
                       prefix + "review/audio_review_overrides.json", prefix + "review/speaker_evidence_v1.json"])
     return {"files": tuple(files), "prefixes": (prefix + "prepare/forced_alignment_units/",)}
 

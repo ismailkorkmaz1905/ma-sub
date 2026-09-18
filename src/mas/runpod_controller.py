@@ -141,7 +141,7 @@ def _episode_budget(local_root, episode, *, now=None):
         if not isinstance(excluded_wait, (int, float)) or not math.isfinite(excluded_wait) or excluded_wait < 0:
             raise RunPodControllerError("invalid excluded wait duration")
         operator_extensions = body.get("operator_extensions", [])
-        if not isinstance(operator_extensions, list) or len(operator_extensions) > 1:
+        if not isinstance(operator_extensions, list) or len(operator_extensions) > 2:
             raise RunPodControllerError("invalid operator budget extension ledger")
         for extension in operator_extensions:
             if (not isinstance(extension, dict)
@@ -202,15 +202,17 @@ def _episode_budget(local_root, episode, *, now=None):
         budget = RunBudget(started_at.isoformat(), limit_seconds=limit)
     except ValueError as exc:
         raise RunPodControllerError("MAS_EPISODE_BUDGET_SECONDS must be positive and at most 21600 seconds") from exc
-    if budget.remaining(now) <= 0 and os.getenv("MAS_EPISODE_BUDGET_EXTENSION_APPROVED") == "1":
+    extension_approved = os.getenv("MAS_EPISODE_BUDGET_EXTENSION_APPROVED") == "1"
+    early_extension = os.getenv("MAS_EPISODE_BUDGET_EXTENSION_EARLY") == "1"
+    if extension_approved and (budget.remaining(now) <= 0 or early_extension):
         reason = os.getenv("MAS_EPISODE_BUDGET_EXTENSION_REASON", "").strip()
-        if operator_extensions:
-            raise RunPodControllerError("the single operator budget extension is already consumed")
+        if len(operator_extensions) >= 2:
+            raise RunPodControllerError("the two operator budget extensions are already consumed")
         if not reason or len(reason) > 500:
             raise RunPodControllerError(
                 "MAS_EPISODE_BUDGET_EXTENSION_REASON must record the operator approval"
             )
-        operator_extensions = [{
+        operator_extensions = [*operator_extensions, {
             "authorized_at": now.isoformat(),
             "previous_started_at": started_at.isoformat(),
             "reason": reason,

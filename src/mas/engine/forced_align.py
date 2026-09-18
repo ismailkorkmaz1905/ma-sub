@@ -2274,6 +2274,7 @@ def _resolve_alignment_overlaps(
     raw_journal: UnitJournal | None = None,
     raw_call_keys: list[str] | None = None,
     prior_conflict_seconds: Mapping[str, float] | None = None,
+    max_recovery_seconds: int = MAX_RECOVERY_SECONDS,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str], dict[str, Any]]:
     by_uid = {str(item["utterance_uid"]): item for item in source}
     order = {str(item["utterance_uid"]): index for index, item in enumerate(source)}
@@ -2286,7 +2287,7 @@ def _resolve_alignment_overlaps(
         "source": source, "independent": independent,
         "journal_binding": component_journal.binding if component_journal else None,
         "limits": [MAX_CONFLICT_ALIGNMENT_CALLS, MAX_CONFLICT_SEARCH_CHECKS,
-                   MAX_CONFLICT_SECONDS, MAX_RECOVERY_SECONDS],
+                   MAX_CONFLICT_SECONDS, max_recovery_seconds],
     })
     if component_journal is not None:
         failure_path = component_journal.root.parent / "latest-conflict-failure.json"
@@ -2334,7 +2335,7 @@ def _resolve_alignment_overlaps(
             "limits": {"seconds": MAX_CONFLICT_SECONDS,
                        "alignment_calls": MAX_CONFLICT_ALIGNMENT_CALLS,
                        "search_checks": MAX_CONFLICT_SEARCH_CHECKS,
-                       "total_recovery_seconds": MAX_RECOVERY_SECONDS},
+                       "total_recovery_seconds": max_recovery_seconds},
             "source_sha256": digest([by_uid[uid] for uid in component_uids]),
             "candidate_state_sha256": digest({uid: selected[uid] for uid in component_uids}),
             "failure_basis": failure_basis,
@@ -2389,7 +2390,7 @@ def _resolve_alignment_overlaps(
         elapsed = time.monotonic() - active_started if active_started is not None else 0.0
         if active_budget["seconds"] + elapsed >= MAX_CONFLICT_SECONDS:
             block_conflict("conflict_time_budget", "acoustic conflict time limit reached")
-        if total_recovery_seconds + elapsed >= MAX_RECOVERY_SECONDS:
+        if total_recovery_seconds + elapsed >= max_recovery_seconds:
             block_conflict("recovery_time_budget", "episode acoustic recovery limit reached")
 
     unbounded_align = align
@@ -3231,9 +3232,15 @@ def _model_state_sha256(model, metadata):
 
 def _alignment_resume_groups(scope, source, identity):
     required = {"stage", "target_uids", "context_uids", *identity}
-    if not isinstance(scope, Mapping) or set(scope) not in (
-        required,
-        required | {"discovery_component_limit"},
+    optional = {
+        "continuation_component_limit",
+        "discovery_component_limit",
+        "recovery_seconds_limit",
+    }
+    if (
+        not isinstance(scope, Mapping)
+        or not required <= set(scope)
+        or not set(scope) <= required | optional
     ):
         raise ForcedAlignmentError("alignment resume scope fields are invalid")
     if "discovery_component_limit" in scope and (
@@ -3241,6 +3248,16 @@ def _alignment_resume_groups(scope, source, identity):
         or not 1 <= scope["discovery_component_limit"] <= 3
     ):
         raise ForcedAlignmentError("alignment resume discovery limit is invalid")
+    if "continuation_component_limit" in scope and (
+        type(scope["continuation_component_limit"]) is not int
+        or not 1 <= scope["continuation_component_limit"] <= 256
+    ):
+        raise ForcedAlignmentError("alignment resume continuation limit is invalid")
+    if "recovery_seconds_limit" in scope and (
+        type(scope["recovery_seconds_limit"]) is not int
+        or not MAX_RECOVERY_SECONDS <= scope["recovery_seconds_limit"] <= 10800
+    ):
+        raise ForcedAlignmentError("alignment resume recovery seconds limit is invalid")
     if scope["stage"] != "forced_alignment" or any(
         scope[key] != value for key, value in identity.items()
     ):
@@ -3604,13 +3621,42 @@ def align_corrected_segments(
         atomic_json(Path(checkpoint_dir) / "resume-identity.json", {
             "data": identity_record, "sha256": digest(identity_record),
         })
+        continuation_scopes = []
+        continuation_failure_sha256 = None
         if resume_scope is not None:
-            _archive_authorized_recovery_failure(
+            archived_failure = _archive_authorized_recovery_failure(
                 checkpoint_dir, resume_scope, source, journal
             )
+            continuation_limit = resume_scope.get("continuation_component_limit", 0)
+            if continuation_limit:
+                saved_failure = json.loads(archived_failure.read_text(encoding="utf-8"))
+                failure_details = saved_failure["data"]
+                unresolved = failure_details.get("unresolved_components")
+                targets = list(resume_scope["target_uids"])
+                if (
+                    not isinstance(unresolved, list)
+                    or sum(component == targets for component in unresolved) != 1
+                ):
+                    raise ForcedAlignmentError(
+                        "bounded continuation requires the exact retained unresolved queue"
+                    )
+                current_index = unresolved.index(targets)
+                continuation_failure_sha256 = saved_failure["sha256"]
+                for component in unresolved[
+                    current_index + 1 : current_index + 1 + continuation_limit
+                ]:
+                    scope = {
+                        "stage": "forced_alignment",
+                        "target_uids": component,
+                        "context_uids": _alignment_resume_context_uids(source, component),
+                        **resume_identity,
+                    }
+                    _alignment_resume_groups(scope, source, resume_identity)
+                    continuation_scopes.append(scope)
         alignment_call_count = 0
         discovered_scope = None
         discovery_requests = []
+        continuation_requests = []
 
         def align(transcript, model, metadata, audio, device, **kwargs):
             nonlocal alignment_call_count, discovered_scope
@@ -3633,6 +3679,35 @@ def align_corrected_segments(
                         discovered_scope,
                         resume_identity,
                     )
+                if not authorized:
+                    for continuation_scope in continuation_scopes:
+                        if not _alignment_request_matches_scope(
+                            transcript,
+                            request_uids,
+                            source,
+                            continuation_scope,
+                            resume_identity,
+                        ):
+                            continue
+                        authorized = True
+                        continuation_requests.append({
+                            "request_sha256": key,
+                            "component_uids": list(
+                                continuation_scope["target_uids"]
+                            ),
+                        })
+                        evidence = {
+                            "format": "mas-alignment-authorized-continuation-1",
+                            "failure_sha256": continuation_failure_sha256,
+                            "authorized_scope_sha256": digest(dict(resume_scope)),
+                            "requests": continuation_requests,
+                        }
+                        atomic_json(
+                            Path(checkpoint_dir)
+                            / "components/authorized-continuation.json",
+                            {"data": evidence, "sha256": digest(evidence)},
+                        )
+                        break
                 discovery_limit = (
                     resume_scope.get("discovery_component_limit", 0)
                     if resume_scope is not None
@@ -3849,12 +3924,17 @@ def align_corrected_segments(
 
     initial_modes = {uid: "independent" for uid in independent_by_uid}
     prior_conflict_seconds = {}
+    recovery_seconds_limit = (
+        resume_scope.get("recovery_seconds_limit", MAX_RECOVERY_SECONDS)
+        if resume_scope is not None
+        else MAX_RECOVERY_SECONDS
+    )
     if 0 < len(recoverable_issues) <= MAX_INDEPENDENT_CONTEXT_RECOVERIES:
         recovery_started = time.monotonic()
         failure_basis = digest({
             "phase": "independent-context", "source": source,
             "journal_binding": component_journal.binding if component_journal else None,
-            "limits": [MAX_CONFLICT_SECONDS, MAX_RECOVERY_SECONDS],
+            "limits": [MAX_CONFLICT_SECONDS, recovery_seconds_limit],
         })
         if component_journal is not None:
             failure_path = component_journal.root.parent / "latest-conflict-failure.json"
@@ -3874,7 +3954,7 @@ def align_corrected_segments(
         def check_independent_context_budget(uid, started):
             elapsed = time.monotonic() - started
             total_elapsed = time.monotonic() - recovery_started
-            if elapsed < MAX_CONFLICT_SECONDS and total_elapsed < MAX_RECOVERY_SECONDS:
+            if elapsed < MAX_CONFLICT_SECONDS and total_elapsed < recovery_seconds_limit:
                 return
             details = {
                 "status": "BLOCKED", "phase": "independent-context",
@@ -4035,6 +4115,7 @@ def align_corrected_segments(
             raw_call_keys=raw_call_keys,
             normalized_journal=normalized_journal,
             prior_conflict_seconds=prior_conflict_seconds,
+            max_recovery_seconds=recovery_seconds_limit,
         )
     )
     aligned_segments = []

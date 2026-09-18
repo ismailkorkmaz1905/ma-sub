@@ -859,7 +859,7 @@ class ForcedAlignmentTests(unittest.TestCase):
                     self.assertEqual(fake.align_calls, [])
 
     @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
-    def test_resume_scope_allows_one_bounded_discovered_component(self, _model):
+    def test_resume_scope_allows_signed_bounded_continuation_component(self, _model):
         with tempfile.TemporaryDirectory() as directory:
             audio = self._audio(directory)
             checkpoint = Path(directory) / "units"
@@ -886,7 +886,8 @@ class ForcedAlignmentTests(unittest.TestCase):
             scope.update(
                 target_uids=["utt-alpha"],
                 context_uids=["utt-alpha", "utt-bravo"],
-                discovery_component_limit=2,
+                continuation_component_limit=1,
+                recovery_seconds_limit=1800,
             )
             retained = None
             for path in checkpoint.glob("*/*.json"):
@@ -903,6 +904,10 @@ class ForcedAlignmentTests(unittest.TestCase):
                 "status": "BLOCKED",
                 "reason": "recovery_time_budget",
                 "component_uids": ["utt-alpha"],
+                "unresolved_components": [
+                    ["utt-alpha"],
+                    ["utt-charlie", "utt-delta"],
+                ],
                 "source_sha256": forced_align.digest([source[0]]),
                 "raw_results": {retained[0]: forced_align.digest(retained[1])},
                 "total_recovery_seconds": 900.1,
@@ -925,7 +930,7 @@ class ForcedAlignmentTests(unittest.TestCase):
             self.assertEqual(warm, cold)
             self.assertEqual(fake.align_calls, [{"text": "Charlie Delta"}])
             receipt = json.loads(
-                (checkpoint / "components/discovered-resume-scope.json").read_text(
+                (checkpoint / "components/authorized-continuation.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -933,7 +938,7 @@ class ForcedAlignmentTests(unittest.TestCase):
                 receipt["sha256"], forced_align.digest(receipt["data"])
             )
             self.assertEqual(
-                receipt["data"]["discovered_scope"]["target_uids"],
+                receipt["data"]["requests"][0]["component_uids"],
                 ["utt-charlie", "utt-delta"],
             )
 

@@ -19,24 +19,39 @@ class RetryAuthorizationError(RuntimeError):
 
 _ALIGNMENT_SCOPE_FIELDS = {"stage", "target_uids", "context_uids", "audio_sha256", "model_state_sha256",
                            "raw_alignment_binding", "source_sha256"}
-_ALIGNMENT_SCOPE_OPTIONAL_FIELDS = {"discovery_component_limit"}
+_ALIGNMENT_SCOPE_OPTIONAL_FIELDS = {
+    "continuation_component_limit",
+    "discovery_component_limit",
+    "recovery_seconds_limit",
+}
 _PART_SCOPE_FIELDS = {"part_id", "part_plan_sha256", "part_audio_lineage_sha256"}
 
 
 def alignment_scope(scope):
-    allowed = (
-        _ALIGNMENT_SCOPE_FIELDS,
-        _ALIGNMENT_SCOPE_FIELDS | _ALIGNMENT_SCOPE_OPTIONAL_FIELDS,
-        _ALIGNMENT_SCOPE_FIELDS | _PART_SCOPE_FIELDS,
-        _ALIGNMENT_SCOPE_FIELDS | _ALIGNMENT_SCOPE_OPTIONAL_FIELDS | _PART_SCOPE_FIELDS,
-    )
-    if not isinstance(scope, dict) or set(scope) not in allowed:
+    keys = set(scope) if isinstance(scope, dict) else set()
+    part_fields = _PART_SCOPE_FIELDS if keys & _PART_SCOPE_FIELDS else set()
+    required = _ALIGNMENT_SCOPE_FIELDS | part_fields
+    if (
+        not isinstance(scope, dict)
+        or not required <= keys
+        or not keys <= required | _ALIGNMENT_SCOPE_OPTIONAL_FIELDS
+    ):
         raise RetryAuthorizationError("retry scope fields are invalid")
     if "discovery_component_limit" in scope and (
         type(scope["discovery_component_limit"]) is not int
         or not 1 <= scope["discovery_component_limit"] <= 3
     ):
         raise RetryAuthorizationError("retry discovery component limit is invalid")
+    if "continuation_component_limit" in scope and (
+        type(scope["continuation_component_limit"]) is not int
+        or not 1 <= scope["continuation_component_limit"] <= 256
+    ):
+        raise RetryAuthorizationError("retry continuation component limit is invalid")
+    if "recovery_seconds_limit" in scope and (
+        type(scope["recovery_seconds_limit"]) is not int
+        or not 900 <= scope["recovery_seconds_limit"] <= 10800
+    ):
+        raise RetryAuthorizationError("retry recovery seconds limit is invalid")
     if "part_id" in scope and not re.fullmatch(r"part-[0-9]{3}", str(scope["part_id"])):
         raise RetryAuthorizationError("retry part identity is invalid")
     return {

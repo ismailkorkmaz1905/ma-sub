@@ -113,6 +113,21 @@ def test_code_fix_permit_binds_bounded_discovered_component_limit(
     assert scope["discovery_component_limit"] == 3
 
 
+def test_code_fix_permit_binds_signed_continuation_and_recovery_limits(
+        tmp_path, monkeypatch):
+    _, root, arguments = _case(tmp_path, monkeypatch)
+    arguments["resume_scope"].update(
+        continuation_component_limit=256,
+        recovery_seconds_limit=10800,
+    )
+
+    permit = retry.authorize_code_fix_retry(root, 14, "b" * 40, **arguments)
+
+    scope = retry.validate_code_fix_resume(root, 14, "b" * 40, permit)
+    assert scope["continuation_component_limit"] == 256
+    assert scope["recovery_seconds_limit"] == 10800
+
+
 @pytest.mark.parametrize("outcome", ["failure", "error", "skipped"])
 def test_failed_or_skipped_fixture_never_authorizes(tmp_path, monkeypatch, outcome):
     _, root, arguments = _case(tmp_path, monkeypatch, outcome=outcome)

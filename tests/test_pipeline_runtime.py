@@ -40,6 +40,62 @@ def test_external_controller_requires_external_delivery_without_pod_env(monkeypa
     assert pipeline._requires_external_delivery() is True
 
 
+def test_audio_review_reset_preserves_bound_stale_artifacts(tmp_path, monkeypatch):
+    name = "Muhtemel Ask 14.Bolum"
+    artifacts = []
+    for relative, payload in (
+        ("prepare/audio_review_v2.json", b"report"),
+        ("prepare/audio_review_v2.recovery.json", b"recovery"),
+        (f"translation_output/{name}_TR_CORRECTED.zip", b"final"),
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        artifacts.append({
+            "relative_path": relative,
+            "size_bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        })
+    body = {
+        "format": "mas-audio-review-reset-1",
+        "episode": 14,
+        "correction_input_sha256": "a" * 64,
+        "provisional_output_sha256": "b" * 64,
+        "reason": "validated correction evidence changed",
+        "artifacts": artifacts,
+    }
+    marker = {"data": body, "sha256": pipeline.sha256_json(body)}
+    marker_path = tmp_path / "review/audio_review_reset.json"
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    monkeypatch.setattr(
+        pipeline,
+        "read_tr_correction_pack",
+        lambda _: SimpleNamespace(manifest={"input_sha256": "a" * 64}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "validate_tr_correction_output",
+        lambda *_: SimpleNamespace(output_sha256="b" * 64),
+    )
+
+    receipt = pipeline._apply_audio_review_reset(
+        tmp_path, 14, name, tmp_path / "pack.zip", tmp_path / "output.zip"
+    )
+
+    archive = tmp_path / "review/superseded-audio-review" / marker["sha256"]
+    assert receipt["artifacts"] == artifacts
+    for item in artifacts:
+        assert not (tmp_path / item["relative_path"]).exists()
+        assert (archive / item["relative_path"]).is_file()
+    replacement = tmp_path / f"translation_output/{name}_TR_CORRECTED.zip"
+    replacement.write_bytes(b"new-final")
+    pipeline._apply_audio_review_reset(
+        tmp_path, 14, name, tmp_path / "pack.zip", tmp_path / "output.zip"
+    )
+    assert replacement.read_bytes() == b"new-final"
+
+
 def test_strict_finalize_input_binding_covers_inputs_and_producer(tmp_path, monkeypatch):
     producer = tmp_path / "producer.py"
     input_path = tmp_path / "input.json"

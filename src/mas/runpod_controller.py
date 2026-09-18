@@ -933,6 +933,20 @@ def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host, b
     )
 
 
+def _upload_audio_review_reset(local_root, remote_root, *, ssh, scp, host, budget=None):
+    source = Path(local_root) / "review" / "audio_review_reset.json"
+    if not source.is_file():
+        return None
+    return _upload_episode_file_verified(
+        source,
+        f"{remote_root}/review/audio_review_reset.json",
+        ssh=ssh,
+        scp=scp,
+        host=host,
+        budget=budget,
+    )
+
+
 def _upload_speaker_evidence(local_root, remote_root, *, ssh, scp, host, budget=None):
     source = Path(local_root) / "review" / "speaker_evidence_v1.json"
     if not source.is_file():
@@ -1929,6 +1943,7 @@ def _remote_input_binding(local_root, source_url, commit, episode):
     validated_returns = {path.relative_to(local_root).as_posix(): sha256_file(path)
                          for path in resume_files if path.is_file() and path.parent.name != 'review'}
     resume_files += [local_root / "review" / "audio_review_overrides.json",
+                    local_root / "review" / "audio_review_reset.json",
                     local_root / "review" / "speaker_evidence_v1.json",
                     local_root / "review" / "mp4-sample-approval.json",
                     local_root / "review" / "code-fix-resume.json"]
@@ -2603,6 +2618,14 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                 host=host,
                 budget=budget,
             )
+            reset_receipt = _upload_audio_review_reset(
+                local_root,
+                remote_root,
+                ssh=ssh,
+                scp=scp,
+                host=host,
+                budget=budget,
+            )
             speaker_receipt = _upload_speaker_evidence(
                 local_root,
                 remote_root,
@@ -2631,6 +2654,12 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                     "[RUNPOD] audio review overrides upload verified: "
                     f"bytes={override_receipt['bytes']} "
                     f"sha256={override_receipt['sha256']}"
+                )
+            if reset_receipt is not None:
+                print(
+                    "[RUNPOD] audio review reset upload verified: "
+                    f"bytes={reset_receipt['bytes']} "
+                    f"sha256={reset_receipt['sha256']}"
                 )
             if speaker_receipt is not None:
                 print(

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import stat
 import threading
 import time
@@ -106,6 +107,90 @@ def _paths(episode):
 def _json(path):
     with Path(path).open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _apply_audio_review_reset(root, episode, name, tr_pack, tr_text):
+    marker_path = Path(root) / "review" / "audio_review_reset.json"
+    if not marker_path.is_file():
+        return None
+    saved = _json(marker_path)
+    body = saved.get("data")
+    marker_sha256 = saved.get("sha256")
+    if (
+        not isinstance(body, dict)
+        or marker_sha256 != sha256_json(body)
+        or body.get("format") != "mas-audio-review-reset-1"
+        or body.get("episode") != episode
+        or not isinstance(body.get("reason"), str)
+        or not body["reason"].strip()
+    ):
+        raise RuntimeError("audio-review reset marker integrity mismatch")
+    pack = read_tr_correction_pack(tr_pack)
+    provisional = validate_tr_correction_output(tr_pack, tr_text)
+    if (
+        body.get("correction_input_sha256") != pack.manifest["input_sha256"]
+        or body.get("provisional_output_sha256") != provisional.output_sha256
+    ):
+        raise RuntimeError("audio-review reset marker input binding mismatch")
+    expected_paths = {
+        "prepare/audio_review_v2.json",
+        "prepare/audio_review_v2.recovery.json",
+        f"translation_output/{name}_TR_CORRECTED.zip",
+    }
+    artifacts = body.get("artifacts")
+    if (
+        not isinstance(artifacts, list)
+        or {item.get("relative_path") for item in artifacts if isinstance(item, dict)}
+        != expected_paths
+    ):
+        raise RuntimeError("audio-review reset artifact inventory mismatch")
+    archive = Path(root) / "review" / "superseded-audio-review" / marker_sha256
+    receipt_path = archive / "receipt.json"
+    if receipt_path.is_file():
+        receipt = _json(receipt_path)
+        receipt_body = receipt.get("data")
+        if (
+            not isinstance(receipt_body, dict)
+            or receipt.get("sha256") != sha256_json(receipt_body)
+            or receipt_body.get("reset_marker_sha256") != marker_sha256
+            or receipt_body.get("artifacts") != artifacts
+        ):
+            raise RuntimeError("audio-review reset receipt integrity mismatch")
+        return receipt_body
+    for item in artifacts:
+        if (
+            set(item) != {"relative_path", "size_bytes", "sha256"}
+            or type(item["size_bytes"]) is not int
+            or item["size_bytes"] <= 0
+            or not isinstance(item["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+        ):
+            raise RuntimeError("audio-review reset artifact record is invalid")
+        source = Path(root) / item["relative_path"]
+        destination = archive / item["relative_path"]
+        if destination.is_file():
+            candidate = destination
+        elif source.is_file() and not source.is_symlink():
+            if source.stat().st_size != item["size_bytes"] or sha256_file(source) != item["sha256"]:
+                raise RuntimeError("audio-review reset source artifact changed")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, destination)
+            candidate = destination
+        else:
+            raise RuntimeError("audio-review reset source artifact is missing")
+        if candidate.stat().st_size != item["size_bytes"] or sha256_file(candidate) != item["sha256"]:
+            raise RuntimeError("audio-review reset archive readback mismatch")
+    receipt_body = {
+        "format": "mas-audio-review-reset-receipt-1",
+        "episode": episode,
+        "reset_marker_sha256": marker_sha256,
+        "artifacts": artifacts,
+    }
+    atomic_write_json(
+        receipt_path,
+        {"data": receipt_body, "sha256": sha256_json(receipt_body)},
+    )
+    return receipt_body
 
 
 def _source_guard(state, source_path):
@@ -660,6 +745,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
 
     tr_output = dirs["translation_output"] / f"{name}_TR_CORRECTED.zip"
     review_path = dirs["prepare"] / "audio_review_v2.json"
+    _apply_audio_review_reset(root, episode, name, tr_pack, tr_text)
     overrides_path = dirs["review"] / "audio_review_overrides.json"
     speaker_evidence_path = dirs["review"] / "speaker_evidence_v1.json"
     overrides = _json(overrides_path) if overrides_path.is_file() else None

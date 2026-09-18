@@ -198,7 +198,8 @@ def test_windows_launcher_refreshes_new_required_settings():
 
 def test_large_immutable_image_gets_full_bounded_startup_window():
     source = Path(rc.__file__).read_text(encoding='utf-8')
-    assert 'remaining = min(300, remaining)' in source
+    assert 'startup_seconds=900' in source
+    assert 'remaining = min(900, remaining)' in source
     assert 'remaining = min(90, remaining)' not in source
 
 

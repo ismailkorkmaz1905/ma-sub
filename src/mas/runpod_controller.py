@@ -1537,10 +1537,11 @@ def _run_remote_episode_once(episode, source_url=None):
                                 else DEFAULT_GPU_TYPE_IDS
                             ),
                             total_seconds=int(episode_budget.check()) if episode_budget else 14400,
+                            startup_seconds=900,
                             storage_quote=storage_quote, resume=resume_lease)
 
         def ready(pod, remaining):
-            remaining = min(300, remaining)
+            remaining = min(900, remaining)
             readiness = time.monotonic() + remaining
             candidate = RunPodClient(pod["id"], values["RUNPOD_API_KEY"], attempts=1)
             try:

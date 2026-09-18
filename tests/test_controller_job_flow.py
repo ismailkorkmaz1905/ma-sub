@@ -293,6 +293,7 @@ def test_capacity_cleanup_finishes_before_publish(monkeypatch, tmp_path):
         controller.run_remote_episode(13)
     assert events == ["capacity-enter", "capacity-exit", "validate", "publish"]
     assert plan_args["gpu_type_ids"] == ["NVIDIA L4", "NVIDIA RTX PRO 4000 Blackwell"]
+    assert plan_args["startup_seconds"] == 900
     assert lease_payload["containerRegistryAuthId"] == "registry-auth-123"
     release_path = episode_root / "work" / "gpu-released-for-delivery.json"
     release = json.loads(release_path.read_text(encoding="utf-8"))

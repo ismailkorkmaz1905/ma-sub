@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -135,11 +136,28 @@ def _record(root, relative):
     return {"relative_path": relative, "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
 
 
+def _source_record(root, relative):
+    path = safe_relative(root, relative)
+    if not path.is_file() or path.is_symlink():
+        raise RetryAuthorizationError("retry source must be a regular retained file")
+    content = path.read_bytes().replace(b"\r\n", b"\n")
+    return {
+        "relative_path": relative,
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
 def _code_identity():
     paths = sorted((ROOT / "src/mas").rglob("*.py"))
     paths += sorted((ROOT / "config/production").glob("*.yaml"))
     paths += [ROOT / "requirements.lock", ROOT / "config/runtime_policy.json"]
-    return {path.relative_to(ROOT).as_posix(): sha256_file(path) for path in paths}
+    return {
+        path.relative_to(ROOT).as_posix(): _source_record(
+            ROOT, path.relative_to(ROOT).as_posix()
+        )["sha256"]
+        for path in paths
+    }
 
 
 def _budget(root, episode):
@@ -221,7 +239,7 @@ def authorize_code_fix_retry(local_root, episode, commit, *, fixture_nodeids, di
         relative, separator, test_name = nodeid.partition("::")
         if not relative.startswith("tests/") or not relative.endswith(".py") or not separator or not test_name:
             raise RetryAuthorizationError("fixture must be an explicit repository test node ID")
-        fixture_files[relative] = _record(ROOT, relative)
+        fixture_files[relative] = _source_record(ROOT, relative)
     code = _code_identity()
     run_key = digest({"failure": digest(failure), "code": code, "tests": fixture_files, "scope": resume_scope})
     junit_relative = f"work/retry-fixtures/{run_key}/pytest.xml"
@@ -248,7 +266,7 @@ def authorize_code_fix_retry(local_root, episode, commit, *, fixture_nodeids, di
     if not any({item.get("name"): item.get("value") for item in case.findall("properties/property")}.items()
                >= bindings.items() for case in cases):
         raise RetryAuthorizationError("fixture PASS must attest the exact retained failure, diagnostics and resume scope")
-    if code != _code_identity() or any(_record(ROOT, name) != value for name, value in fixture_files.items()):
+    if code != _code_identity() or any(_source_record(ROOT, name) != value for name, value in fixture_files.items()):
         raise RetryAuthorizationError("code or fixture changed during qualification")
     permit = {"format": "mas-code-fix-resume-1", "episode": episode, "commit": commit,
               "started_at": started_at, "failure_sha256": digest(failure),
@@ -283,7 +301,7 @@ def validate_code_fix_resume(local_root, episode, commit, permit_path=None):
         if _record(local_root, record["relative_path"]) != record:
             raise RetryAuthorizationError("retry diagnostic or fixture result changed")
     for relative, record in permit["fixture_files"].items():
-        if _record(ROOT, relative) != record:
+        if _source_record(ROOT, relative) != record:
             raise RetryAuthorizationError("retry fixture implementation changed")
     identities = [record for record in permit["diagnostics"] if Path(record["relative_path"]).name == "resume-identity.json"]
     components = [record for record in permit["diagnostics"] if Path(record["relative_path"]).name == "latest-conflict-failure.json"]

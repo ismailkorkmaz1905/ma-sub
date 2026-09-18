@@ -70,6 +70,21 @@ def test_code_fix_authorization_requires_actual_bound_fixture_pass(tmp_path, mon
     assert saved["data"]["fixture_passed_count"] == 1
 
 
+def test_source_identity_normalizes_platform_line_endings(tmp_path):
+    windows = tmp_path / "windows"
+    linux = tmp_path / "linux"
+    relative = "tests/test_retained.py"
+    for root, content in ((windows, b"first\r\nsecond\r\n"),
+                          (linux, b"first\nsecond\n")):
+        path = root / relative
+        path.parent.mkdir(parents=True)
+        path.write_bytes(content)
+
+    assert retry._source_record(windows, relative) == retry._source_record(
+        linux, relative
+    )
+
+
 @pytest.mark.parametrize("outcome", ["failure", "error", "skipped"])
 def test_failed_or_skipped_fixture_never_authorizes(tmp_path, monkeypatch, outcome):
     _, root, arguments = _case(tmp_path, monkeypatch, outcome=outcome)

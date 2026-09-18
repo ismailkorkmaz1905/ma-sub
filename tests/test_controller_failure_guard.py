@@ -256,7 +256,7 @@ def test_changed_evidence_retry_continuation_requires_reason(tmp_path, monkeypat
 
 def test_scoped_code_fix_gets_one_attempt_beyond_extended_limit(
         tmp_path, monkeypatch):
-    source, commit = _failed_job(tmp_path, attempt=6)
+    source, commit = _failed_job(tmp_path, attempt=7)
     extension = {
         "format": "mas-operator-retry-extension-1",
         "episode": 13,
@@ -297,8 +297,8 @@ def test_scoped_code_fix_gets_one_attempt_beyond_extended_limit(
         tmp_path / "work/remote-job-request.json",
         tmp_path / "work/remote-job-status.json",
     )
-    assert attempt == 7
-    assert identity == digest({"base_input_sha256": base, "attempt": 7})
+    assert attempt == 8
+    assert identity == digest({"base_input_sha256": base, "attempt": 8})
 
 
 def test_retry_authorization_rejects_changed_failure_evidence(tmp_path):

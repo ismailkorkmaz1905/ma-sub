@@ -259,6 +259,13 @@ def test_expired_partial_worker_is_left_to_existing_lease_cleanup(tmp_path):
     assert controller._resume_partial_delivery(tmp_path, 14) is None
 
 
+def test_whole_episode_mode_ignores_retained_partial_delivery(tmp_path, monkeypatch):
+    (tmp_path / 'work').mkdir()
+    (tmp_path / 'work/part-plan.json').write_text('not a reusable partial plan', encoding='utf-8')
+    monkeypatch.setenv('MAS_PRODUCTION_PRIORITY', 'whole-episode-v1')
+    assert controller._resume_partial_delivery(tmp_path, 14) is None
+
+
 def test_complete_part_advances_loop_but_wait_does_not(tmp_path, monkeypatch):
     calls = []
     def once(*args):

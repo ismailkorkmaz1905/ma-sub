@@ -1222,6 +1222,8 @@ def _production_priority():
 
 
 def _resume_partial_delivery(local_root, episode):
+    if _production_priority() != 'first-hour-v1':
+        return None
     from .partial_delivery import (part_directory, validate_published_part, validate_local_tail,
                                   complete_local_part, complete_parts, _read_bound)
     plan_path = local_root / 'work/part-plan.json'

@@ -1,6 +1,11 @@
 name: Audit source snapshot
 on:
   workflow_dispatch:
+    inputs:
+      revision:
+        description: 'Commit or ref to inspect; blank uses the triggering commit'
+        required: false
+        type: string
   push:
     branches: [main]
     paths: ['.github/workflows/audit-snapshot.yml']
@@ -14,6 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.revision || github.sha }}
       - name: Archive exact checked-out source
         run: |
           mkdir -p "$RUNNER_TEMP/mas-snapshot"

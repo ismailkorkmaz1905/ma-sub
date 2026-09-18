@@ -678,7 +678,17 @@ def test_verified_local_source_uploads_outputs_then_rewritten_marker(monkeypatch
     (source_dir / "download.done.json").write_text(json.dumps(marker), encoding="utf-8")
     calls = []
 
-    monkeypatch.setattr(runpod_controller, "validate_download", lambda *args, **kwargs: True)
+    def validate(marker_path, **kwargs):
+        rebased = json.loads(Path(marker_path).read_text(encoding="utf-8"))
+        assert Path(rebased["outputs"]["video"]["path"]) == video.resolve()
+        assert Path(rebased["outputs"]["metadata"]["path"]) == metadata.resolve()
+        assert Path(kwargs["allowed_root"]) == source_dir
+        return True
+
+    marker["outputs"]["video"]["path"] = "/workspace/episode/source/source.mkv"
+    marker["outputs"]["metadata"]["path"] = "/workspace/episode/source/source.metadata.json"
+    (source_dir / "download.done.json").write_text(json.dumps(marker), encoding="utf-8")
+    monkeypatch.setattr(runpod_controller, "validate_download", validate)
 
     def upload(source, remote_path, **kwargs):
         calls.append((Path(source), remote_path, kwargs, Path(source).read_bytes()))
@@ -732,6 +742,25 @@ def test_verified_local_source_rejects_path_outside_source(monkeypatch, tmp_path
             host="host",
             temporary=tmp_path,
         )
+
+
+def test_portable_source_checkpoint_with_missing_output_is_not_partially_seeded(monkeypatch, tmp_path):
+    local_root = tmp_path / "episode"
+    source_dir = local_root / "source"
+    source_dir.mkdir(parents=True)
+    (source_dir / "source.mkv").write_bytes(b"video")
+    marker = {"outputs": {
+        "video": {"path": "/workspace/episode/source/source.mkv"},
+        "metadata": {"path": "/workspace/episode/source/source.metadata.json"},
+    }}
+    (source_dir / "download.done.json").write_text(json.dumps(marker), encoding="utf-8")
+    monkeypatch.setattr(runpod_controller, "validate_download",
+                        lambda *args, **kwargs: pytest.fail("validated incomplete seed"))
+    monkeypatch.setattr(runpod_controller, "_upload_episode_file_verified",
+                        lambda *args, **kwargs: pytest.fail("uploaded incomplete seed"))
+    assert runpod_controller._upload_verified_local_source(
+        local_root, "/workspace/episode", "https://www.youtube.com/watch?v=episode",
+        ssh=["ssh"], scp=["scp"], host="host", temporary=tmp_path) is None
 
 
 def test_missing_local_source_marker_does_not_touch_remote(monkeypatch, tmp_path):

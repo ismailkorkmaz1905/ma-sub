@@ -800,20 +800,51 @@ def _upload_verified_local_source(
     marker_path = source_dir / "download.done.json"
     if not marker_path.is_file():
         return None
-    if not validate_download(marker_path, url=source_url):
-        raise RunPodControllerError("local source checkpoint is invalid; refusing remote seed")
-
-    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise RunPodControllerError("local source checkpoint is invalid; refusing remote seed") from None
     outputs = marker.get("outputs")
     if not isinstance(outputs, dict) or set(outputs) - {"video", "metadata", "captions"}:
         raise RunPodControllerError("local source checkpoint has unexpected outputs")
 
     local_source_root = source_dir.resolve()
-    remote_outputs = {}
-    receipts = {}
+    local_outputs = {}
+    names = set()
+    portable_incomplete = False
     for key, record in outputs.items():
         if not isinstance(record, dict):
             raise RunPodControllerError("local source checkpoint output is invalid")
+        recorded_path = str(record.get("path", ""))
+        name = Path(recorded_path).name
+        if not name or name in names:
+            raise RunPodControllerError("local source checkpoint output name is invalid")
+        names.add(name)
+        recorded = Path(recorded_path)
+        portable_remote = recorded_path.replace("\\", "/").rsplit("/", 1)[0] == remote_root + "/source"
+        if recorded.resolve().parent == local_source_root:
+            source = recorded
+        elif portable_remote:
+            source = source_dir / name
+            if not source.is_file():
+                portable_incomplete = True
+        else:
+            raise RunPodControllerError("local source checkpoint path is outside the source directory")
+        local_record = dict(record)
+        local_record["path"] = str(source.resolve())
+        local_outputs[key] = local_record
+    if portable_incomplete:
+        return None
+    local_marker = dict(marker)
+    local_marker["outputs"] = local_outputs
+    seed_marker = Path(temporary) / "download.done.json"
+    seed_marker.write_text(json.dumps(local_marker, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not validate_download(seed_marker, url=source_url, allowed_root=source_dir):
+        raise RunPodControllerError("local source checkpoint is invalid; refusing remote seed")
+
+    remote_outputs = {}
+    receipts = {}
+    for key, record in local_outputs.items():
         source = Path(str(record.get("path", "")))
         if source.is_symlink() or source.resolve().parent != local_source_root:
             raise RunPodControllerError("local source checkpoint path is outside the source directory")
@@ -835,7 +866,6 @@ def _upload_verified_local_source(
 
     remote_marker = dict(marker)
     remote_marker["outputs"] = remote_outputs
-    seed_marker = Path(temporary) / "download.done.json"
     seed_marker.write_text(
         json.dumps(remote_marker, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",

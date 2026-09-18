@@ -1302,6 +1302,7 @@ def validate_download(
     language: str = "tr",
     format_selector: str = "bestvideo[protocol=https]+bestaudio[protocol=https]/best[protocol=https]/best",
     merge_output_format: str = "mkv",
+    allowed_root: str | Path | None = None,
 ) -> bool:
     """Validate a download marker against the requested URL and settings."""
 
@@ -1321,7 +1322,7 @@ def validate_download(
         input_sha256=input_hash,
         required_output_keys=("video", "metadata"),
         optional_output_keys=("captions",),
-        allowed_root=marker_file.parent,
+        allowed_root=marker_file.parent if allowed_root is None else allowed_root,
     )
     if marker is None or not _marker_has_read_validation(marker):
         return False

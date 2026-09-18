@@ -175,6 +175,10 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
     assert 'ffmpeg_path="$(readlink -f -- "$(command -v ffmpeg)")"' in script
     assert 'FFMPEG_SHA256="$(sha256sum "$ffmpeg_path"' in script
     assert 'cmp -s -- "$RUNTIME_MARKER" "$observed_marker"' in script
+    assert 'runtime ABI difference: {path}' in script
+    assert script.index('runtime ABI difference: {path}') < script.index(
+        'immutable runtime ABI mismatch;'
+    )
     assert 'MAS_ALLOW_C0E3_VENV_ADOPTION:-}" == "1"' in script
     assert '"$VENV" != "/workspace/ma-sub/.venv"' in script
     assert '"$REQUIREMENTS_SHA256" != "$C0E3_REQUIREMENTS_SHA256"' in script

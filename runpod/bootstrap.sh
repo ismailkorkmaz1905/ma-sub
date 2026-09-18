@@ -266,10 +266,39 @@ if [[ -x "$VENV/bin/python" && -f "$RUNTIME_MARKER" ]] \
     && cmp -s -- "$RUNTIME_MARKER" "$observed_marker"; then
   runtime_reusable=1
 fi
-rm -f -- "$observed_marker"
 
 if [[ "$runtime_reusable" -ne 1 ]]; then
   if [[ "$RUNTIME_MODE" == "immutable" ]]; then
+    if [[ -s "$RUNTIME_MARKER" && -s "$observed_marker" ]]; then
+      "$VENV/bin/python" - "$RUNTIME_MARKER" "$observed_marker" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+expected = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["data"]
+observed = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))["data"]
+
+
+def report(path, left, right):
+    if isinstance(left, dict) and isinstance(right, dict):
+        for key in sorted(set(left) | set(right)):
+            report(f"{path}.{key}" if path else key, left.get(key), right.get(key))
+        return
+    if path == "installed_distributions" and isinstance(left, list) and isinstance(right, list):
+        left = {item["name"]: item["version"] for item in left}
+        right = {item["name"]: item["version"] for item in right}
+        for name in sorted(set(left) | set(right), key=str.casefold):
+            if left.get(name) != right.get(name):
+                print(f"runtime ABI difference: {path}.{name}: expected={left.get(name)!r} observed={right.get(name)!r}", file=sys.stderr)
+        return
+    if left != right:
+        print(f"runtime ABI difference: {path}: expected={left!r} observed={right!r}", file=sys.stderr)
+
+
+report("", expected, observed)
+PY
+    fi
+    rm -f -- "$observed_marker"
     echo "immutable runtime ABI mismatch; refusing package installation or checkpoint reuse" >&2
     exit 1
   fi
@@ -349,6 +378,7 @@ if [[ "$runtime_reusable" -ne 1 ]]; then
     [[ -z "$backup" ]] || remove_rebuild_tree "$backup"
   fi
 fi
+rm -f -- "$observed_marker"
 if [[ "$RUNTIME_MODE" == "recovery" ]]; then
   timeout 120 uv cache clean
 fi

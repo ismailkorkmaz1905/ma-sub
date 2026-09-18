@@ -2009,6 +2009,7 @@ def _validated_audio_review_reset_hash(local_root, episode):
 def _changed_evidence_retry_limit(work, episode, *, now=None):
     policy_limit = _runtime_policy()["max_changed_evidence_retries"]
     path = Path(work) / "remote-retry-extension.json"
+    extension_sha256 = None
     if path.is_file():
         saved = json.loads(path.read_text(encoding="utf-8"))
         body = saved.get("data")
@@ -2027,24 +2028,68 @@ def _changed_evidence_retry_limit(work, episode, *, now=None):
         authorized_at = datetime.fromisoformat(body["authorized_at"])
         if authorized_at.tzinfo is None:
             raise RunPodControllerError("operator retry extension timestamp is invalid")
-        return body["extended_limit"]
-    if os.getenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_APPROVED") != "1":
+        extension_sha256 = saved["sha256"]
+        extended_limit = body["extended_limit"]
+    elif os.getenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_APPROVED") == "1":
+        reason = os.getenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON", "").strip()
+        if not reason or len(reason) > 500:
+            raise RunPodControllerError(
+                "MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON must record the operator approval"
+            )
+        now = now or datetime.now(timezone.utc)
+        body = {
+            "format": "mas-operator-retry-extension-1",
+            "episode": episode,
+            "authorized_at": now.isoformat(),
+            "previous_limit": policy_limit,
+            "extended_limit": policy_limit + 3,
+            "reason": reason,
+        }
+        extension_sha256 = digest(body)
+        atomic_json(path, {"data": body, "sha256": extension_sha256})
+        extended_limit = body["extended_limit"]
+    else:
         return policy_limit
-    reason = os.getenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON", "").strip()
+
+    continuation_path = Path(work) / "remote-retry-continuation.json"
+    if continuation_path.is_file():
+        saved = json.loads(continuation_path.read_text(encoding="utf-8"))
+        body = saved.get("data")
+        if (
+            not isinstance(body, dict)
+            or saved.get("sha256") != digest(body)
+            or body.get("format") != "mas-operator-retry-continuation-1"
+            or body.get("episode") != episode
+            or body.get("previous_limit") != extended_limit
+            or body.get("extended_limit") != extended_limit + 1
+            or body.get("prior_extension_sha256") != extension_sha256
+            or not isinstance(body.get("reason"), str)
+            or not body["reason"].strip()
+            or len(body["reason"]) > 500
+        ):
+            raise RunPodControllerError("operator retry continuation integrity mismatch")
+        authorized_at = datetime.fromisoformat(body["authorized_at"])
+        if authorized_at.tzinfo is None:
+            raise RunPodControllerError("operator retry continuation timestamp is invalid")
+        return body["extended_limit"]
+    if os.getenv("MAS_CHANGED_EVIDENCE_RETRY_CONTINUATION_APPROVED") != "1":
+        return extended_limit
+    reason = os.getenv("MAS_CHANGED_EVIDENCE_RETRY_CONTINUATION_REASON", "").strip()
     if not reason or len(reason) > 500:
         raise RunPodControllerError(
-            "MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON must record the operator approval"
+            "MAS_CHANGED_EVIDENCE_RETRY_CONTINUATION_REASON must record the operator approval"
         )
     now = now or datetime.now(timezone.utc)
     body = {
-        "format": "mas-operator-retry-extension-1",
+        "format": "mas-operator-retry-continuation-1",
         "episode": episode,
         "authorized_at": now.isoformat(),
-        "previous_limit": policy_limit,
-        "extended_limit": policy_limit + 3,
+        "previous_limit": extended_limit,
+        "extended_limit": extended_limit + 1,
+        "prior_extension_sha256": extension_sha256,
         "reason": reason,
     }
-    atomic_json(path, {"data": body, "sha256": digest(body)})
+    atomic_json(continuation_path, {"data": body, "sha256": digest(body)})
     return body["extended_limit"]
 
 

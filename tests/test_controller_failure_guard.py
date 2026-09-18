@@ -207,6 +207,53 @@ def test_changed_evidence_retry_extension_requires_reason(tmp_path, monkeypatch)
         controller._guard_failed_remote_job(tmp_path, 13, source, commit)
 
 
+def test_changed_evidence_retry_continuation_adds_exactly_one_attempt(
+        tmp_path, monkeypatch):
+    source, commit = _failed_job(tmp_path, attempt=5)
+    returned = tmp_path / "translation_output/Muhtemel Ask 13.Bolum_TR_TEXT_CORRECTED.zip"
+    returned.parent.mkdir()
+    returned.write_bytes(b"changed")
+    monkeypatch.setenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_APPROVED", "1")
+    monkeypatch.setenv(
+        "MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON",
+        "operator approved completion after retained alignment evidence",
+    )
+    assert controller._changed_evidence_retry_limit(tmp_path / "work", 13) == 5
+    monkeypatch.setenv("MAS_CHANGED_EVIDENCE_RETRY_CONTINUATION_APPROVED", "1")
+    monkeypatch.setenv(
+        "MAS_CHANGED_EVIDENCE_RETRY_CONTINUATION_REASON",
+        "one corrected boundary utterance remains after strict alignment",
+    )
+
+    controller._guard_failed_remote_job(tmp_path, 13, source, commit)
+
+    ledger = json.loads(
+        (tmp_path / "work/remote-retry-continuation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    prior = json.loads(
+        (tmp_path / "work/remote-retry-extension.json").read_text(encoding="utf-8")
+    )
+    assert ledger["sha256"] == digest(ledger["data"])
+    assert ledger["data"]["previous_limit"] == 5
+    assert ledger["data"]["extended_limit"] == 6
+    assert ledger["data"]["prior_extension_sha256"] == prior["sha256"]
+
+
+def test_changed_evidence_retry_continuation_requires_reason(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_APPROVED", "1")
+    monkeypatch.setenv(
+        "MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON",
+        "operator approved completion after retained alignment evidence",
+    )
+    assert controller._changed_evidence_retry_limit(tmp_path, 13) == 5
+    monkeypatch.setenv("MAS_CHANGED_EVIDENCE_RETRY_CONTINUATION_APPROVED", "1")
+
+    with pytest.raises(controller.RunPodControllerError, match="CONTINUATION_REASON"):
+        controller._changed_evidence_retry_limit(tmp_path, 13)
+
+
 def test_retry_authorization_rejects_changed_failure_evidence(tmp_path):
     source, commit = _failed_job(tmp_path)
     returned = tmp_path / "translation_output/Muhtemel Ask 13.Bolum_TR_TEXT_CORRECTED.zip"

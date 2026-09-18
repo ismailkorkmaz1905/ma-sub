@@ -257,6 +257,27 @@ def test_partial_collection_retry_matches_plain_export(tmp_path):
     assert controller._collection_failure_paths_match(failure, {'episode': 14}, tmp_path / 'work/remote-job-status.json')
 
 
+def test_pending_partial_collection_retry_skips_stale_local_export(tmp_path, monkeypatch):
+    _plan(tmp_path)
+    audit = _release(tmp_path, READY_FOR_PARTIAL_ENCODE)
+    export = tmp_path / 'parts/part-001/work/partial-export.json'
+    atomic_json(export, {'episode': 14, 'mode': 'delivery-first-subtitles', 'files': []})
+    request = json.loads((tmp_path / 'work/remote-job-request.json').read_text(encoding='utf-8'))
+    data = request['data']
+    failure = {'format': 'mas-remote-result-collection-failure-1', 'episode': 14,
+               'base_input_sha256': data['input_sha256'], 'input_sha256': data['input_sha256'],
+               'attempt': 0, 'exit_code': READY_FOR_PARTIAL_ENCODE,
+               'request_sha256': request['sha256'], 'relative_path': 'work/partial-export.json',
+               'storage_path': '/workspace/ma-sub/EPISODES/Muhtemel Ask 14.Bolum/work/partial-export.json'}
+    _bound(tmp_path / 'work/remote-result-collection-failure.json', failure)
+    monkeypatch.setattr(partial_delivery, 'validate_published_part', lambda *a, **k: None)
+    monkeypatch.setattr(partial_delivery, 'validate_local_tail', lambda *a, **k: None)
+    monkeypatch.setattr(controller, '_released_partial_audit',
+                        lambda *a, **k: pytest.fail('stale export was released'))
+    assert controller._resume_partial_delivery(tmp_path, 14) is None
+    assert audit.is_dir()
+
+
 def test_part_review_uploads_keep_namespace_and_do_not_authorize_unvalidated_retry(tmp_path):
     _plan(tmp_path)
     before, evidence_before = controller._remote_input_binding(tmp_path, 'source', 'a' * 40, 14)

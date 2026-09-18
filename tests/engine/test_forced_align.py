@@ -1124,6 +1124,37 @@ class ForcedAlignmentTests(unittest.TestCase):
             ["a", "b", "c", "outside"], scope, source,
         ))
 
+    def test_signed_discovery_allows_at_most_three_bounded_components(self):
+        source = forced_align.validate_coarse_segments([
+            {"utterance_uid": f"u{index}", "start_ms": index * 500,
+             "end_ms": index * 500 + 400, "text": f"Soz{index}",
+             "asr_text": f"Soz{index}", "deletion_audio_reviewed": False}
+            for index in range(9)
+        ])
+        scope = {
+            "stage": "forced_alignment",
+            "target_uids": ["u0"],
+            "context_uids": ["u0", "u1"],
+            **{key: "a" * 64 for key in (
+                "audio_sha256", "model_state_sha256", "raw_alignment_binding", "source_sha256",
+            )},
+        }
+        scopes = []
+        for requested in (["u1", "u2"], ["u3", "u4"], ["u5", "u6"]):
+            expanded = forced_align._expanded_discovery_scope(
+                requested, scopes, 3, scope, source,
+            )
+            self.assertIsNotNone(expanded)
+            self.assertIsNone(expanded["index"])
+            scopes.append(expanded["scope"])
+
+        self.assertIsNone(forced_align._expanded_discovery_scope(
+            ["u7", "u8"], scopes, 3, scope, source,
+        ))
+        self.assertIsNone(forced_align._expanded_discovery_scope(
+            ["u1", "u2", "u3", "u4"], scopes, 3, scope, source,
+        ))
+
     def test_resume_request_metadata_allows_only_bounded_component_windows(self):
         source = forced_align.validate_coarse_segments(self._two_pair_coarse())
         identity = {

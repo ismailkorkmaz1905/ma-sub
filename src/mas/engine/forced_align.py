@@ -3408,6 +3408,54 @@ def _expanded_continuation_scope(request_uids, scope, source):
     return {**scope, "target_uids": requested}
 
 
+def _expanded_discovery_scope(request_uids, scopes, limit, scope, source):
+    if not isinstance(request_uids, list) or not request_uids:
+        return None
+    source_uids = [str(item["utterance_uid"]) for item in source]
+    requested = [uid for uid in source_uids if uid in request_uids]
+    if (
+        len(requested) != len(set(request_uids))
+        or not 0 < len(requested) <= limit
+        or set(requested) <= set(scope["target_uids"])
+    ):
+        return None
+    overlaps = [
+        index
+        for index, discovered in enumerate(scopes)
+        if set(requested) & set(discovered["target_uids"])
+    ]
+    if len(overlaps) > 1:
+        return None
+    if overlaps:
+        index = overlaps[0]
+        targets = [
+            uid
+            for uid in source_uids
+            if uid in set(requested) | set(scopes[index]["target_uids"])
+        ]
+        if len(targets) > limit:
+            return None
+    else:
+        if len(scopes) >= limit:
+            return None
+        index = None
+        targets = requested
+    return {
+        "scope": {
+            "stage": "forced_alignment",
+            "target_uids": targets,
+            "context_uids": _alignment_resume_context_uids(source, targets),
+            **{key: scope[key] for key in (
+                "audio_sha256",
+                "model_state_sha256",
+                "raw_alignment_binding",
+                "source_sha256",
+            )},
+        },
+        "index": index,
+    }
+
+
 def _archive_authorized_recovery_failure(
     checkpoint_dir: str | Path,
     resume_scope: Mapping[str, Any],
@@ -3669,12 +3717,12 @@ def align_corrected_segments(
                     _alignment_resume_groups(scope, source, resume_identity)
                     continuation_scopes.append(scope)
         alignment_call_count = 0
-        discovered_scope = None
+        discovered_scopes = []
         discovery_requests = []
         continuation_requests = []
 
         def align(transcript, model, metadata, audio, device, **kwargs):
-            nonlocal alignment_call_count, discovered_scope
+            nonlocal alignment_call_count
             request_uids = kwargs.pop("_mas_component_uids", None)
             key = digest({"transcript": transcript, "kwargs": kwargs})
             cached = journal.read(key)
@@ -3686,13 +3734,16 @@ def align_corrected_segments(
                     resume_scope,
                     resume_identity,
                 )
-                if not authorized and discovered_scope is not None:
-                    authorized = _alignment_request_matches_scope(
-                        transcript,
-                        request_uids,
-                        source,
-                        discovered_scope,
-                        resume_identity,
+                if not authorized:
+                    authorized = any(
+                        _alignment_request_matches_scope(
+                            transcript,
+                            request_uids,
+                            source,
+                            discovered_scope,
+                            resume_identity,
+                        )
+                        for discovered_scope in discovered_scopes
                     )
                 if not authorized:
                     for continuation_scope in continuation_scopes:
@@ -3732,57 +3783,43 @@ def align_corrected_segments(
                     else 0
                 )
                 if not authorized and discovery_limit and isinstance(request_uids, list):
-                    source_uids = [str(item["utterance_uid"]) for item in source]
-                    requested = [uid for uid in source_uids if uid in request_uids]
-                    if (
-                        requested
-                        and len(requested) == len(set(request_uids))
-                        and not set(requested) <= set(resume_scope["target_uids"])
-                    ):
-                        if discovered_scope is None:
-                            discovered_targets = requested
-                        elif set(requested) <= set(discovered_scope["target_uids"]):
-                            discovered_targets = list(discovered_scope["target_uids"])
-                        elif set(requested) & set(discovered_scope["target_uids"]):
-                            discovered_targets = [
-                                uid
-                                for uid in source_uids
-                                if uid in set(requested) | set(discovered_scope["target_uids"])
-                            ]
-                        else:
-                            discovered_targets = []
-                        if 0 < len(discovered_targets) <= discovery_limit:
-                            discovered_scope = {
-                                "stage": "forced_alignment",
-                                "target_uids": discovered_targets,
-                                "context_uids": _alignment_resume_context_uids(
-                                    source, discovered_targets
-                                ),
-                                **resume_identity,
+                    expanded = _expanded_discovery_scope(
+                        request_uids,
+                        discovered_scopes,
+                        discovery_limit,
+                        resume_scope,
+                        source,
+                    )
+                    if expanded is not None:
+                        discovered_scope = expanded["scope"]
+                        authorized = _alignment_request_matches_scope(
+                            transcript,
+                            request_uids,
+                            source,
+                            discovered_scope,
+                            resume_identity,
+                        )
+                        if authorized:
+                            if expanded["index"] is None:
+                                discovered_scopes.append(discovered_scope)
+                            else:
+                                discovered_scopes[expanded["index"]] = discovered_scope
+                            discovery_requests.append({
+                                "request_sha256": key,
+                                "component_uids": list(discovered_scope["target_uids"]),
+                            })
+                            evidence = {
+                                "format": "mas-alignment-discovered-resume-1",
+                                "authorized_scope_sha256": digest(dict(resume_scope)),
+                                "discovered_scope": discovered_scope,
+                                "discovered_scopes": discovered_scopes,
+                                "requests": discovery_requests,
                             }
-                            authorized = _alignment_request_matches_scope(
-                                transcript,
-                                request_uids,
-                                source,
-                                discovered_scope,
-                                resume_identity,
+                            atomic_json(
+                                Path(checkpoint_dir)
+                                / "components/discovered-resume-scope.json",
+                                {"data": evidence, "sha256": digest(evidence)},
                             )
-                            if authorized:
-                                discovery_requests.append({
-                                    "request_sha256": key,
-                                    "component_uids": requested,
-                                })
-                                evidence = {
-                                    "format": "mas-alignment-discovered-resume-1",
-                                    "authorized_scope_sha256": digest(dict(resume_scope)),
-                                    "discovered_scope": discovered_scope,
-                                    "requests": discovery_requests,
-                                }
-                                atomic_json(
-                                    Path(checkpoint_dir)
-                                    / "components/discovered-resume-scope.json",
-                                    {"data": evidence, "sha256": digest(evidence)},
-                                )
                 if not authorized:
                     details = {
                         "status": "BLOCKED", "reason": "resume_scope_violation",

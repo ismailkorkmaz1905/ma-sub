@@ -5,6 +5,7 @@ import pytest
 
 from mas.emergency_segment import (
     EmergencySegmentError,
+    _schedule,
     _translation_quality_issues,
     finalize_emergency_segment,
     prepare_emergency_segment,
@@ -166,3 +167,27 @@ def test_translation_quality_checks_numbers_names_and_religious_terms():
     )
     assert not _translation_quality_issues("Vallahi geleceğim.", "Sumpah, aku akan datang.")
     assert "Allah was not preserved" in _translation_quality_issues("Allah", "Ya...")
+
+
+def test_schedule_splits_long_utterance_without_changing_text():
+    text = (
+        "Anam, şimdi bir dakika. Yani bak, bu insanlar hani Ali için kalktılar "
+        "buraya kadar geldiler, bir şey yapıyorlar. Tamam, biz yaptığınız şey için "
+        "hakikaten minnettarız bu arada."
+    )
+    scheduled, _ = _schedule([
+        {
+            "utterance_uid": "u-long",
+            "coarse_start_ms": 1000,
+            "coarse_end_ms": 11000,
+            "tr_corrected": text,
+        }
+    ])
+
+    records = [record for record, _ in scheduled]
+    assert len(records) > 1
+    assert " ".join(record["tr_corrected"] for record in records) == text
+    assert {record["source_utterance_uid"] for record in records} == {"u-long"}
+    assert [record["part_index"] for record in records] == list(range(1, len(records) + 1))
+    assert {record["part_count"] for record in records} == {len(records)}
+    assert all(len(entry.text.splitlines()) <= 2 for _, entry in scheduled)

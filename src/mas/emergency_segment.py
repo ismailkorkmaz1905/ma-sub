@@ -16,6 +16,9 @@ EPISODE_13_CORRECTED_SHA256 = (
 )
 WORK_FIELDS = {
     "utterance_uid",
+    "source_utterance_uid",
+    "part_index",
+    "part_count",
     "original_coarse_start_ms",
     "original_coarse_end_ms",
     "start_ms",
@@ -105,6 +108,32 @@ def _layout(text):
     return laid_out, required_ms, characters
 
 
+def _split_for_layout(text):
+    try:
+        _layout(text)
+        return [text]
+    except EmergencySegmentError:
+        pass
+    words = text.split()
+    parts = []
+    while words:
+        valid = []
+        for end in range(1, len(words) + 1):
+            candidate = " ".join(words[:end])
+            try:
+                _layout(candidate)
+            except EmergencySegmentError:
+                break
+            valid.append(end)
+        if not valid:
+            raise EmergencySegmentError("Subtitle contains an unsplittable word")
+        boundaries = [end for end in valid if re.search(r"[.!?…]$", words[end - 1])]
+        selected = boundaries[-1] if boundaries else valid[-1]
+        parts.append(" ".join(words[:selected]))
+        words = words[selected:]
+    return parts
+
+
 def _fold(text):
     value = str(text).casefold().replace("ı", "i").replace("'", "").replace("’", "")
     return "".join(
@@ -137,45 +166,64 @@ def _schedule(records):
     scheduled = []
     adjustments = []
     previous_end = 0
-    for position, record in enumerate(records, start=1):
+    for record in records:
         uid = str(record["utterance_uid"])
         original_start = int(record["coarse_start_ms"])
         original_end = int(record["coarse_end_ms"])
         if original_start < 0 or original_end <= original_start:
             raise EmergencySegmentError(f"Invalid coarse timing for {uid}")
         text = str(record["tr_corrected"])
-        laid_out, required_ms, _ = _layout(text)
-        start_ms = max(original_start, previous_end)
-        end_ms = max(original_end, start_ms + required_ms)
-        reasons = []
-        if start_ms != original_start:
-            reasons.append("overlap_shift")
-        if end_ms != original_end:
-            reasons.append("readability_extension")
-        item = {
-            "utterance_uid": uid,
-            "original_coarse_start_ms": original_start,
-            "original_coarse_end_ms": original_end,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "tr_corrected": text,
-            "id_translation": "",
-        }
-        scheduled.append((item, SubtitleEntry(position, start_ms, end_ms, laid_out)))
-        if reasons:
-            adjustments.append(
-                {
-                    "utterance_uid": uid,
-                    "original_coarse_start_ms": original_start,
-                    "original_coarse_end_ms": original_end,
-                    "start_ms": start_ms,
-                    "end_ms": end_ms,
-                    "start_delta_ms": start_ms - original_start,
-                    "end_delta_ms": end_ms - original_end,
-                    "reasons": reasons,
-                }
+        parts = _split_for_layout(text)
+        weights = [visible_length(part) for part in parts]
+        weight_total = sum(weights)
+        elapsed_weight = 0
+        part_start = original_start
+        for part_index, (part, weight) in enumerate(zip(parts, weights), start=1):
+            elapsed_weight += weight
+            part_end = (
+                original_end
+                if part_index == len(parts)
+                else original_start
+                + round((original_end - original_start) * elapsed_weight / weight_total)
             )
-        previous_end = end_ms
+            part_uid = uid if len(parts) == 1 else f"{uid}:part-{part_index:02d}-of-{len(parts):02d}"
+            laid_out, required_ms, _ = _layout(part)
+            start_ms = max(part_start, previous_end)
+            end_ms = max(part_end, start_ms + required_ms)
+            reasons = []
+            if start_ms != part_start:
+                reasons.append("overlap_shift")
+            if end_ms != part_end:
+                reasons.append("readability_extension")
+            item = {
+                "utterance_uid": part_uid,
+                "source_utterance_uid": uid,
+                "part_index": part_index,
+                "part_count": len(parts),
+                "original_coarse_start_ms": part_start,
+                "original_coarse_end_ms": part_end,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "tr_corrected": part,
+                "id_translation": "",
+            }
+            scheduled.append((item, SubtitleEntry(len(scheduled) + 1, start_ms, end_ms, laid_out)))
+            if reasons:
+                adjustments.append(
+                    {
+                        "utterance_uid": part_uid,
+                        "source_utterance_uid": uid,
+                        "original_coarse_start_ms": part_start,
+                        "original_coarse_end_ms": part_end,
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                        "start_delta_ms": start_ms - part_start,
+                        "end_delta_ms": end_ms - part_end,
+                        "reasons": reasons,
+                    }
+                )
+            previous_end = end_ms
+            part_start = part_end
     return scheduled, adjustments
 
 

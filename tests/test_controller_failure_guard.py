@@ -54,6 +54,26 @@ def test_changed_validated_evidence_allows_only_bounded_attempt(tmp_path):
     assert identity == digest({"base_input_sha256": base, "attempt": 1})
 
 
+def test_changed_commit_allows_bounded_retry_before_pipeline_checkpoint(tmp_path):
+    source, prior_commit = _failed_job(tmp_path)
+    request = json.loads((tmp_path / "work/remote-job-request.json").read_text())["data"]
+    identity = {"episode": 13, "commit": prior_commit, "input_sha256": request["input_sha256"],
+                "token": hashlib.sha256(
+                    f"13\n{prior_commit}\n{request['input_sha256']}\n".encode()
+                ).hexdigest()}
+    checkpoint = {"identity": identity, "files": [{"relative_path": "source/source.url"}],
+                  "unstable": []}
+    atomic_json(tmp_path / "work/remote-checkpoint-manifest.json", checkpoint)
+    controller._record_failed_remote_evidence(1, tmp_path, source, prior_commit)
+
+    controller._guard_failed_remote_job(tmp_path, 13, source, "b" * 40)
+
+    authorization = json.loads(
+        (tmp_path / "work/remote-retry-authorization.json").read_text()
+    )["data"]
+    assert authorization["pre_pipeline_code_fix"] is True
+
+
 def test_changed_evidence_retry_limit_cannot_reset_with_commit(tmp_path):
     source, _ = _failed_job(tmp_path, attempt=2)
     returned = tmp_path / "translation_output/Muhtemel Ask 13.Bolum_TR_TEXT_CORRECTED.zip"

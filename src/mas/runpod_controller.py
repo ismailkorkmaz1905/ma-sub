@@ -1921,13 +1921,30 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
         if failure.get("evidence_input_sha256") != evidence:
             raise RunPodControllerError("code-fix retry cannot also change validated text inputs")
         qualified_code_fix = True
-    if not qualified_code_fix and (not failure.get("evidence_input_sha256") or failure["evidence_input_sha256"] == evidence):
+    pre_pipeline_code_fix = False
+    checkpoint_path = work / "remote-checkpoint-manifest.json"
+    checkpoint_sha = failure.get("diagnostics", {}).get("remote-checkpoint-manifest.json")
+    if data.get("commit") != commit and checkpoint_sha and checkpoint_path.is_file() \
+            and sha256_file(checkpoint_path) == checkpoint_sha:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        files = checkpoint.get("files")
+        pre_pipeline_code_fix = (
+            checkpoint.get("identity") == identity
+            and isinstance(files, list)
+            and all(isinstance(item, dict) for item in files)
+            and {item.get("relative_path") for item in files} <= {"source/source.url"}
+            and len(files) <= 1
+            and checkpoint.get("unstable") == []
+        )
+    if not qualified_code_fix and not pre_pipeline_code_fix \
+            and (not failure.get("evidence_input_sha256") or failure["evidence_input_sha256"] == evidence):
         raise RunPodControllerError("BLOCKED: unchanged failed evidence; code or option changes alone do not authorize another GPU run")
     attempt = data.get("attempt", 0)
     if type(attempt) is not int or not 0 <= attempt < _runtime_policy()["max_changed_evidence_retries"]:
         raise RunPodControllerError("BLOCKED: changed-evidence retry budget exhausted")
     authorization = {"request_sha256": request["sha256"], "base_input_sha256": base,
-                     "evidence_input_sha256": evidence, "failure_sha256": digest(failure)}
+                     "evidence_input_sha256": evidence, "failure_sha256": digest(failure),
+                     "pre_pipeline_code_fix": pre_pipeline_code_fix}
     atomic_json(work / "remote-retry-authorization.json", {"data": authorization, "sha256": digest(authorization)})
 
 

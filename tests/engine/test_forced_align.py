@@ -993,6 +993,34 @@ class ForcedAlignmentTests(unittest.TestCase):
             request, ["before"], source, scope, identity,
         ))
 
+    def test_resume_scope_allows_full_signed_context_for_adjacent_targets(self):
+        source = forced_align.validate_coarse_segments([
+            {"utterance_uid": f"u{index:02d}", "start_ms": index * 500,
+             "end_ms": index * 500 + 400, "text": f"Soz{index}",
+             "asr_text": f"Soz{index}", "deletion_audio_reviewed": False}
+            for index in range(18)
+        ])
+        identity = {key: "a" * 64 for key in (
+            "audio_sha256", "model_state_sha256", "raw_alignment_binding", "source_sha256",
+        )}
+        scope = {
+            "stage": "forced_alignment",
+            "target_uids": ["u08", "u09"],
+            "context_uids": [f"u{index:02d}" for index in range(18)],
+            **identity,
+        }
+        request = [{
+            "start": 0.0,
+            "end": 8.9,
+            "text": forced_align._alignment_model_text(
+                " ".join(item["text"] for item in source)
+            ),
+        }]
+
+        self.assertTrue(forced_align._alignment_request_matches_scope(
+            request, ["u08", "u09"], source, scope, identity,
+        ))
+
     def test_resume_request_metadata_allows_only_bounded_component_windows(self):
         source = forced_align.validate_coarse_segments(self._two_pair_coarse())
         identity = {

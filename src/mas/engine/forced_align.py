@@ -3285,7 +3285,7 @@ def _alignment_resume_groups(scope, source, identity):
     groups = []
     context_positions = {positions[uid] for uid in scope["context_uids"]}
     for start in sorted(context_positions):
-        for end in range(start + 1, min(len(source), start + 17) + 1):
+        for end in range(start + 1, len(source) + 1):
             if end - 1 not in context_positions:
                 break
             if end - start > 1 and (
@@ -3368,7 +3368,7 @@ def _alignment_request_matches_scope(
         if str(item["utterance_uid"]) in set(scope["context_uids"])
     }
     for start in sorted(context_positions):
-        for end in range(start + 1, min(len(source), start + 17) + 1):
+        for end in range(start + 1, len(source) + 1):
             if end - 1 not in context_positions:
                 break
             if end - start > 1 and (

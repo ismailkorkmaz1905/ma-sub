@@ -236,7 +236,8 @@ def test_bootstrap_reuses_persistent_environment_and_installs_dependencies():
         assert diagnostic in opt_in_branch
 
     runner = (ROOT / "runpod" / "run-episode.sh").read_text(encoding="utf-8")
-    assert 'export PATH="${MAS_BIN_DIR:-/workspace/.local/bin}:$PATH"' in runner
+    assert 'export PATH="${MAS_VENV_DIR:-$ROOT/.venv}/bin:' in runner
+    assert '${MAS_BIN_DIR:-/workspace/.local/bin}:$PATH"' in runner
 
 
 def test_immutable_image_runtime_and_entrypoint_do_not_depend_on_volume_code():

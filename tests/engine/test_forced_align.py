@@ -1021,6 +1021,32 @@ class ForcedAlignmentTests(unittest.TestCase):
             request, ["u08", "u09"], source, scope, identity,
         ))
 
+    def test_signed_continuation_can_merge_only_uids_from_its_exact_context(self):
+        source = forced_align.validate_coarse_segments([
+            {"utterance_uid": uid, "start_ms": index * 500,
+             "end_ms": index * 500 + 400, "text": uid,
+             "asr_text": uid, "deletion_audio_reviewed": False}
+            for index, uid in enumerate(("before", "a", "b", "c", "outside"))
+        ])
+        scope = {
+            "stage": "forced_alignment",
+            "target_uids": ["a", "b", "c"],
+            "context_uids": ["before", "a", "b", "c"],
+            **{key: "a" * 64 for key in (
+                "audio_sha256", "model_state_sha256", "raw_alignment_binding",
+                "source_sha256",
+            )},
+        }
+
+        expanded = forced_align._expanded_continuation_scope(
+            ["before", "a", "b", "c"], scope, source,
+        )
+
+        self.assertEqual(expanded["target_uids"], ["before", "a", "b", "c"])
+        self.assertIsNone(forced_align._expanded_continuation_scope(
+            ["a", "b", "c", "outside"], scope, source,
+        ))
+
     def test_resume_request_metadata_allows_only_bounded_component_windows(self):
         source = forced_align.validate_coarse_segments(self._two_pair_coarse())
         identity = {

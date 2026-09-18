@@ -3393,6 +3393,21 @@ def _alignment_request_matches_scope(
     }
 
 
+def _expanded_continuation_scope(request_uids, scope, source):
+    if not isinstance(request_uids, list) or not request_uids:
+        return None
+    source_uids = [str(item["utterance_uid"]) for item in source]
+    requested = [uid for uid in source_uids if uid in request_uids]
+    requested_set = set(requested)
+    if (
+        len(requested) != len(request_uids)
+        or not set(scope["target_uids"]) <= requested_set
+        or not requested_set <= set(scope["context_uids"])
+    ):
+        return None
+    return {**scope, "target_uids": requested}
+
+
 def _archive_authorized_recovery_failure(
     checkpoint_dir: str | Path,
     resume_scope: Mapping[str, Any],
@@ -3681,20 +3696,23 @@ def align_corrected_segments(
                     )
                 if not authorized:
                     for continuation_scope in continuation_scopes:
+                        request_scope = _expanded_continuation_scope(
+                            request_uids, continuation_scope, source
+                        )
+                        if request_scope is None:
+                            continue
                         if not _alignment_request_matches_scope(
                             transcript,
                             request_uids,
                             source,
-                            continuation_scope,
+                            request_scope,
                             resume_identity,
                         ):
                             continue
                         authorized = True
                         continuation_requests.append({
                             "request_sha256": key,
-                            "component_uids": list(
-                                continuation_scope["target_uids"]
-                            ),
+                            "component_uids": list(request_scope["target_uids"]),
                         })
                         evidence = {
                             "format": "mas-alignment-authorized-continuation-1",

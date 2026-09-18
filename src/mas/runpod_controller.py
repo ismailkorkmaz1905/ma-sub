@@ -1540,7 +1540,7 @@ def _run_remote_episode_once(episode, source_url=None):
                             storage_quote=storage_quote, resume=resume_lease)
 
         def ready(pod, remaining):
-            remaining = min(90, remaining)
+            remaining = min(300, remaining)
             readiness = time.monotonic() + remaining
             candidate = RunPodClient(pod["id"], values["RUNPOD_API_KEY"], attempts=1)
             try:

@@ -196,6 +196,12 @@ def test_windows_launcher_refreshes_new_required_settings():
     assert 'elseif (-not [Environment]::GetEnvironmentVariable($name, "Process"))' in source
 
 
+def test_large_immutable_image_gets_full_bounded_startup_window():
+    source = Path(rc.__file__).read_text(encoding='utf-8')
+    assert 'remaining = min(300, remaining)' in source
+    assert 'remaining = min(90, remaining)' not in source
+
+
 def test_controller_doctor_is_no_compute_and_does_not_require_local_cuda(active, monkeypatch, capsys):
     root, _, provider, *_ = active
     monkeypatch.setattr(cli.shutil, 'which', lambda name: name)

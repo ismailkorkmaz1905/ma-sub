@@ -231,7 +231,11 @@ def test_delivery_rejects_translated_subtitle_credit_hallucination(tmp_path, pol
     records = [{**record, 'id_final': 'Takarir M.K.'}
                for record in build_id_translation_records(schema)]
     output = tmp_path / 'translated.zip'
-    create_id_translation_output_zip(schema, records, output)
+    # An external translator can supply an unvalidated return. The trusted
+    # output writer now rejects this contamination even earlier.
+    import zipfile
+    with zipfile.ZipFile(output, 'w') as archive:
+        archive.writestr('translated_batch_001.jsonl', '\n'.join(json.dumps(record) for record in records))
     with pytest.raises(ValueError, match='subtitle-credit hallucination'):
         df.read_translations(schema, output)
 

@@ -256,6 +256,10 @@ def main(argv=None):
     emergency_prepare.add_argument("--corrected-zip")
     emergency_finalize = emergency_actions.add_parser("finalize")
     emergency_finalize.add_argument("--translations", required=True)
+    recovery_parser = commands.add_parser("plan-alignment-recovery")
+    recovery_parser.add_argument("episode", type=int)
+    recovery_parser.add_argument("--part-id")
+    recovery_parser.add_argument("--max-new-ctc-calls", type=int, required=True)
     clean_parser = commands.add_parser("clean")
     clean_parser.add_argument("episode", type=int)
     clean_parser.add_argument("--destroy", action="store_true")
@@ -291,6 +295,13 @@ def main(argv=None):
             elif args.command == "emergency-segment":
                 from .emergency_segment import run_emergency_segment_command
                 result = run_emergency_segment_command(args)
+            elif args.command == "plan-alignment-recovery":
+                from .retry_authorization import propose_alignment_recovery
+                target = propose_alignment_recovery(
+                    episode_dir(args.episode), args.episode,
+                    part_id=args.part_id, max_new_ctc_calls=args.max_new_ctc_calls)
+                print(f"PROPOSAL NOT AUTHORIZED: {target}")
+                result = 0
             else:
                 result = clean(args.episode, args.destroy)
             if run_log:
@@ -299,7 +310,7 @@ def main(argv=None):
         except Exception as exc:
             if run_log:
                 run_log.record_exception()
-            if args.command != "subtitle-pilot" and getattr(args, "episode", None) and _should_notify_run_failure(exc):
+            if args.command not in {"subtitle-pilot", "plan-alignment-recovery"} and getattr(args, "episode", None) and _should_notify_run_failure(exc):
                 details = f"Sonuç: çalıştırma tamamlanamadı.\nHata: {type(exc).__name__}: {exc}"
                 if run_log:
                     details += f"\nSon log: {run_log.directory / 'LATEST'}"
@@ -318,6 +329,8 @@ def main(argv=None):
                 print("DO NOT RELAUNCH: externally verify owned Pod absence first", file=sys.stderr)
             elif args.command == "subtitle-pilot":
                 print("PILOT ONLY: no automatic full-run retry; inspect preserved evidence", file=sys.stderr)
+            elif args.command == "plan-alignment-recovery":
+                print("OFFLINE PROPOSAL ONLY: no episode run or GPU retry authorized", file=sys.stderr)
             elif getattr(args, "episode", None):
                 print(f"SAFE RETRY:\n./mas run {args.episode}", file=sys.stderr)
             if run_log:

@@ -339,3 +339,49 @@ def test_part_permit_rejects_changed_or_new_child_evidence(tmp_path, monkeypatch
     atomic_json(path, {"changed": True})
     with pytest.raises(retry.RetryAuthorizationError, match="checkpoint|changed"):
         retry.validate_code_fix_resume(root, 14, "b" * 40, permit)
+
+
+def _closure_case(tmp_path, monkeypatch):
+    from mas.engine.forced_align import validate_coarse_segments
+    _, root, arguments = _case(tmp_path, monkeypatch)
+    identity_path = root / arguments['diagnostic_records'][0]['relative_path']
+    failure_path = root / arguments['diagnostic_records'][1]['relative_path']
+    identity = retry._read_bound(identity_path)
+    source = validate_coarse_segments([
+        {**item, 'asr_text': item['text'], 'deletion_audio_reviewed': False}
+        for item in identity['source']])
+    identity.update(source=source, source_sha256=digest(source))
+    atomic_json(identity_path, {'data': identity, 'sha256': digest(identity)})
+    failure = retry._read_bound(failure_path)
+    failure['source_sha256'] = digest([source[1]])
+    atomic_json(failure_path, {'data': failure, 'sha256': digest(failure)})
+    arguments['resume_scope']['source_sha256'] = digest(source)
+    arguments['diagnostic_records'] = [retry._record(root, record['relative_path'])
+                                        for record in arguments['diagnostic_records']]
+    return root, arguments, source
+
+
+def test_offline_closure_proposal_is_not_a_gpu_permit(tmp_path, monkeypatch):
+    root, arguments, source = _closure_case(tmp_path, monkeypatch)
+    path = retry.propose_alignment_recovery(root, 14, max_new_ctc_calls=4)
+    body = retry._read_bound(path)
+    assert body['status'] == 'PROPOSAL_NOT_AUTHORIZED'
+    assert body['closure_cue_count'] == 3
+    assert body['scope']['recovery_plan']['components'] == [['a', 'b', 'c']]
+    assert not (root / 'review/code-fix-resume.json').exists()
+    arguments['resume_scope'] = body['scope']
+    permit = retry.authorize_code_fix_retry(root, 14, 'b' * 40, **arguments)
+    assert retry.validate_code_fix_resume(root, 14, 'b' * 40, permit) == body['scope']
+    with pytest.raises(retry.RetryAuthorizationError, match='proposal episode'):
+        retry.propose_alignment_recovery(root, 15, max_new_ctc_calls=4)
+
+
+def test_planning_cli_never_starts_provider_or_sends_mail_on_missing_evidence(tmp_path, monkeypatch, capsys):
+    from mas import cli
+    monkeypatch.setattr(cli, 'episode_dir', lambda episode: tmp_path)
+    monkeypatch.setattr(cli, 'run_remote_episode', lambda *args: pytest.fail('unexpected paid run'))
+    monkeypatch.setattr(cli, 'enqueue_notification', lambda *args, **kwargs: pytest.fail('unexpected mail'))
+    assert cli.main(['plan-alignment-recovery', '14', '--max-new-ctc-calls', '64']) == 1
+    captured = capsys.readouterr()
+    assert 'OFFLINE PROPOSAL ONLY' in captured.err
+    assert 'SAFE RETRY:' not in captured.err

@@ -76,7 +76,8 @@ def producer():
              'src/mas/full_delivery.py', 'src/mas/engine/delivery_coverage.py',
              'src/mas/engine/id_translation.py', 'src/mas/partial_delivery.py',
              'src/mas/engine/partial_encode.py',
-             'src/mas/engine/translation_workspace.py', 'src/mas/engine/part_audio.py',
+             'src/mas/engine/translation_workspace.py', 'src/mas/engine/subtitle_metadata.py',
+             'src/mas/engine/part_audio.py',
              'src/mas/engine/part_scope.py', 'requirements.lock']
     names += ['config/production/' + x for x in ('series.yaml', 'names.yaml', 'religious_terms.yaml')]
     return {name: digest((root / name).read_text(encoding='utf-8')) for name in names}
@@ -136,12 +137,18 @@ def primary_transcript(audio_path, prepare, episode, series, names, religious):
 
 def source_cues(segments, duration_ms):
     from .engine.raw_asr import _is_known_subtitle_hallucination
+    from .engine.subtitle_metadata import repetition_warnings, is_subtitle_credit
+    segments = list(segments)
     cues, warnings = [], []
+    repeated = repetition_warnings([
+        {**segment, 'uid': digest({'segment': segment, 'index': index})[:20]}
+        for index, segment in enumerate(segments)
+    ])
     for index, segment in enumerate(segments):
         start, end = segment.get('start_ms'), segment.get('end_ms')
         text = str(segment.get('text', '')).strip()
         uid = digest({'segment': segment, 'index': index})[:20]
-        if _is_known_subtitle_hallucination(text):
+        if _is_known_subtitle_hallucination(text) or is_subtitle_credit(text):
             warnings.append({'uid': uid, 'start_ms': segment.get('start_ms'),
                              'end_ms': segment.get('end_ms'),
                              'reason': 'known_subtitle_hallucination', 'action': 'omitted'})
@@ -178,7 +185,7 @@ def source_cues(segments, duration_ms):
                 continue
             cues.append({'uid': ident, 'start_ms': a, 'end_ms': b, 'text': value,
                          'timing_source': 'asr_word_interval' if complete else 'source_interval_fallback'})
-    return cues, warnings
+    return cues, warnings + repeated
 
 
 def build_schema(cues, episode, duration_ms, production_policy):
@@ -249,14 +256,16 @@ def read_translations(schema, translated_zip):
                 if not isinstance(text, str) or not text.strip() or any(ord(c) < 32 and c not in '\n\r\t' for c in text):
                     warnings.append({'uid': uid, 'reason': 'missing_indonesian_translation', 'action': 'omitted'})
                 else:
-                    normalized = ' '.join(''.join(c if c.isalnum() else ' ' for c in text.casefold()).split())
-                    if normalized in {'takarir m k', 'subtitle m k', 'altyazı m k', 'altyazi m k'}:
+                    from .engine.subtitle_metadata import is_subtitle_credit
+                    if is_subtitle_credit(text):
                         raise ValueError('Known subtitle-credit hallucination in Indonesian return')
                     accepted[uid] = record
                     if record.get('review_required'):
                         warnings.append({'uid': uid, 'reason': 'translator_review_required', 'action': 'delivered_with_warning'})
     warnings += [{'uid': uid, 'reason': 'missing_indonesian_translation', 'action': 'omitted'}
                  for uid in expected if uid not in seen]
+    from .engine.subtitle_metadata import repetition_warnings
+    warnings += repetition_warnings(list(accepted.values()), text_key='id_final', uid_key='block_uid')
     return accepted, warnings
 
 

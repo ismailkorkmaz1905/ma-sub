@@ -340,6 +340,7 @@ def _aligned_checkpoint(alignment_path, audio_path, alignment_inputs, vad_region
             name: sha256_file(ROOT / name)
             for name in (
                 "src/mas/engine/forced_align.py",
+                "src/mas/engine/alignment_recovery.py",
                 "src/mas/engine/speaker.py",
                 "src/mas/engine/workflow.py",
                 "requirements.lock",
@@ -388,7 +389,9 @@ _STRICT_FINALIZE_PRODUCER_FILES = (
     "src/mas/engine/episode_archive.py",
     "src/mas/engine/finalize.py",
     "src/mas/engine/forced_align.py",
+    "src/mas/engine/alignment_recovery.py",
     "src/mas/engine/id_translation.py",
+    "src/mas/engine/subtitle_metadata.py",
     "src/mas/engine/media.py",
     "src/mas/engine/mux.py",
     "src/mas/engine/srt.py",

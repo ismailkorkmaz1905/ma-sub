@@ -705,6 +705,15 @@ def _write_zip_atomic(destination: Path, payloads: Mapping[str, bytes]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _reject_source_credits(records):
+    from .subtitle_metadata import is_subtitle_credit
+    contaminated = [record['block_uid'] for record in records if is_subtitle_credit(record['tr_text'])]
+    if contaminated:
+        raise IDTranslationError(
+            f"Known subtitle-credit metadata cannot enter a translation pack: {len(contaminated)} cues; "
+            + ", ".join(contaminated[:10]))
+
+
 def create_id_translation_pack(
     schema: Mapping[str, Any],
     out_zip: str | os.PathLike[str],
@@ -723,6 +732,7 @@ def create_id_translation_pack(
     if "production_policy" in trusted and trusted_glossary != trusted["production_policy"]["glossary"]:
         raise IDTranslationError("ID glossary differs from the frozen production policy")
     records = build_id_translation_records(trusted)
+    _reject_source_credits(records)
     batches = _batch_records(records, batch_size)
     payloads: dict[str, bytes] = {
         "schema.json": _pretty_json_bytes(trusted),
@@ -883,6 +893,7 @@ def validate_id_translation_pack(
             archive.read("schema.json"), member="schema.json"
         )
         packed_schema = validate_aligned_turkish_schema(packed_schema_raw)
+        _reject_source_credits(packed_schema['blocks'])
         if archive.read("schema.json") != _pretty_json_bytes(packed_schema):
             raise IDTranslationError("schema.json is not deterministic canonical JSON")
         if expected_schema is not None:
@@ -1071,6 +1082,10 @@ def validate_id_translation_records(
         id_final = record.get("id_final")
         if not isinstance(id_final, str) or not id_final.strip():
             issues.append(f"Record {position} ({uid}) has empty id_final")
+        else:
+            from .subtitle_metadata import is_subtitle_credit
+            if is_subtitle_credit(id_final):
+                issues.append(f"Record {position} ({uid}) has known subtitle-credit metadata")
         review_required = record.get("review_required", False)
         if not isinstance(review_required, bool):
             issues.append(

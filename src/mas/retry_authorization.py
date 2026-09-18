@@ -23,6 +23,7 @@ _ALIGNMENT_SCOPE_OPTIONAL_FIELDS = {
     "continuation_component_limit",
     "discovery_component_limit",
     "recovery_seconds_limit",
+    "recovery_plan",
 }
 _PART_SCOPE_FIELDS = {"part_id", "part_plan_sha256", "part_audio_lineage_sha256"}
 
@@ -349,3 +350,42 @@ def validate_code_fix_resume(local_root, episode, commit, permit_path=None):
     _scope(permit["scope"], _read_bound(safe_relative(local_root, identities[0]["relative_path"])),
            _read_bound(safe_relative(local_root, components[0]["relative_path"])))
     return permit["scope"]
+
+
+def propose_alignment_recovery(local_root, episode, *, max_new_ctc_calls, part_id=None):
+    """Write an offline proposal, never a permit or a provider operation."""
+    from .engine.alignment_recovery import build_recovery_plan
+    from .engine.forced_align import _alignment_resume_context_uids
+    root = Path(local_root)
+    request = _read_bound(root / 'work/remote-job-request.json')
+    parent_failure = _read_bound(root / 'work/remote-failure-invariant.json')
+    if request.get('episode') != episode or parent_failure.get('request_sha256') != digest(request):
+        raise RetryAuthorizationError('proposal episode differs from retained controller request')
+    prefix = retry_diagnostic_layout(episode, part_id)['prefixes'][0]
+    identity = _read_bound(safe_relative(root, prefix + 'resume-identity.json'))
+    failure = _read_bound(safe_relative(root, prefix + 'components/latest-conflict-failure.json'))
+    source = identity.get('source', [])
+    roots = failure.get('component_uids')
+    plan = build_recovery_plan(source, roots, max_new_ctc_calls=max_new_ctc_calls)
+    scope = {'stage': 'forced_alignment', 'target_uids': roots,
+             'context_uids': _alignment_resume_context_uids(source, roots),
+             **{name: identity[name] for name in _ALIGNMENT_SCOPE_FIELDS
+                - {'stage', 'target_uids', 'context_uids'}}, 'recovery_plan': plan}
+    if part_id is not None:
+        if parent_failure.get('part_id') != part_id:
+            raise RetryAuthorizationError('proposal part differs from retained controller failure')
+        scope.update({name: parent_failure[name] for name in _PART_SCOPE_FIELDS})
+        validate_part_retry_context(root, episode, scope)
+    _part_failure_scope(scope, parent_failure)
+    _scope(scope, identity, failure)
+    members = {uid for component in plan['components'] for uid in component}
+    selected = [item for item in source if item['utterance_uid'] in members]
+    body = {'format': 'mas-alignment-recovery-proposal-1', 'episode': episode,
+            'status': 'PROPOSAL_NOT_AUTHORIZED', 'scope': scope,
+            'closure_cue_count': len(members), 'root_cue_count': len(roots),
+            'start_ms': min(item['start_ms'] for item in selected),
+            'end_ms': max(item['end_ms'] for item in selected),
+            'identity_sha256': digest(identity), 'failure_sha256': digest(failure)}
+    target = root / 'review/alignment-recovery-plan.json'
+    atomic_json(target, {'data': body, 'sha256': digest(body)})
+    return target

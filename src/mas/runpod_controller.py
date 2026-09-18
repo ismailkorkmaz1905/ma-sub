@@ -2244,6 +2244,8 @@ def _record_failed_remote_evidence(exit_code, local_root, source_url, commit):
 
 
 def _partial_failure_identity(local_root, episode):
+    if _production_priority() != 'first-hour-v1':
+        return {}
     from .partial_delivery import _read_bound
     from .delivery import verified_record
     path = local_root / 'work/current-part.json'

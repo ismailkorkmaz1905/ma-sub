@@ -251,14 +251,15 @@ def test_production_stop_after_download_does_not_start_audio(tmp_path, monkeypat
     assert pipeline.run(13, stop_after=1) == 75
 
 
-@pytest.mark.parametrize("change", ["text", "vad", "code", "audio", "output", "missing_marker"])
+@pytest.mark.parametrize("change", ["text", "vad", "code", "helper_code", "audio", "output", "missing_marker"])
 def test_alignment_checkpoint_rejects_changed_bindings(tmp_path, monkeypatch, change):
     audio = tmp_path / "audio.wav"
     audio.write_bytes(b"original audio")
     alignment = tmp_path / "alignment.json"
     inputs = [{"utterance_uid": "u1", "text": "Merhaba"}]
     vad = [{"start_ms": 0, "end_ms": 1000}]
-    for name in ("src/mas/engine/forced_align.py", "src/mas/engine/speaker.py",
+    for name in ("src/mas/engine/forced_align.py", "src/mas/engine/alignment_recovery.py",
+                 "src/mas/engine/speaker.py",
                  "src/mas/engine/workflow.py", "requirements.lock"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,6 +288,8 @@ def test_alignment_checkpoint_rejects_changed_bindings(tmp_path, monkeypatch, ch
         vad[0]["end_ms"] = 1100
     elif change == "code":
         (tmp_path / "src/mas/engine/forced_align.py").write_text("changed", encoding="utf-8")
+    elif change == "helper_code":
+        (tmp_path / "src/mas/engine/alignment_recovery.py").write_text("changed", encoding="utf-8")
     elif change == "audio":
         audio.write_bytes(b"different audio")
     elif change == "output":
@@ -306,7 +309,8 @@ def test_verified_legacy_alignment_gets_bound_stage_marker(tmp_path, monkeypatch
     alignment = tmp_path / "forced_alignment_v2.json"
     inputs = [{"utterance_uid": "u1", "text": "Merhaba"}]
     vad = [{"start_ms": 0, "end_ms": 1000}]
-    for name in ("src/mas/engine/forced_align.py", "src/mas/engine/speaker.py",
+    for name in ("src/mas/engine/forced_align.py", "src/mas/engine/alignment_recovery.py",
+                 "src/mas/engine/speaker.py",
                  "src/mas/engine/workflow.py", "requirements.lock"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)

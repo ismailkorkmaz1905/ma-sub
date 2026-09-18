@@ -25,7 +25,7 @@ _PARTIAL_REQUIRED_INPUTS = frozenset({
 })
 _PARTIAL_PRODUCER_FILES = (
     'partial_finalize.py', 'finalize.py', 'workflow.py', 'raw_asr.py', 'primary_checkpoint.py',
-    'forced_align.py', 'speaker.py', 'audio_review.py', 'part_audio.py', 'part_scope.py',
+    'forced_align.py', 'alignment_recovery.py', 'subtitle_metadata.py', 'speaker.py', 'audio_review.py', 'part_audio.py', 'part_scope.py',
     'tr_correction.py', 'id_translation.py', 'translation_workspace.py', 'aligned_schema.py',
     'segmentation.py', 'speech_coverage.py', 'timing_qa.py', 'subtitle_qa.py', 'srt.py',
     'translation_validation.py', 'speaker_evidence.py', 'download.py', 'media.py',

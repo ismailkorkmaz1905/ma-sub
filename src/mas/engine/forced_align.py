@@ -40,9 +40,6 @@ FORCED_ALIGNMENT_FORMAT_VERSION = "1.0"
 TIMING_SOURCE = "whisperx_ctc_forced_alignment"
 SUPPORTED_LANGUAGE = "tr"
 SUPPORTED_WHISPERX_VERSION = "3.8.6"
-ALIGNMENT_RESOLVER_PRODUCER_SHA256 = (
-    "cd9ba42397f05c7b161c9be61bb61182c42e9e77f26cb578aecdb0b4d6cd5af0"
-)
 DEFAULT_TURKISH_ALIGNMENT_MODEL = (
     "mpoyraz/wav2vec2-xls-r-300m-cv7-turkish"
 )
@@ -3236,6 +3233,7 @@ def _alignment_resume_groups(scope, source, identity):
         "continuation_component_limit",
         "discovery_component_limit",
         "recovery_seconds_limit",
+        "recovery_plan",
     }
     if (
         not isinstance(scope, Mapping)
@@ -3262,6 +3260,11 @@ def _alignment_resume_groups(scope, source, identity):
         scope[key] != value for key, value in identity.items()
     ):
         raise ForcedAlignmentError("alignment resume scope identity mismatch")
+    if "recovery_plan" in scope:
+        from .alignment_recovery import validate_recovery_plan
+        if {"continuation_component_limit", "discovery_component_limit"} & set(scope):
+            raise ForcedAlignmentError("closure recovery cannot mix dynamic discovery authority")
+        validate_recovery_plan(scope["recovery_plan"], source, scope["target_uids"])
     source_uids = [str(item["utterance_uid"]) for item in source]
     for field in ("target_uids", "context_uids"):
         values = scope[field]
@@ -3333,7 +3336,12 @@ def _alignment_request_matches_scope(
     scope,
     identity,
 ):
+    from .alignment_recovery import valid_request, request_matches_plan
     groups = _alignment_resume_groups(scope, source, identity)
+    if not valid_request(transcript, request_uids):
+        return False
+    if "recovery_plan" in scope:
+        return request_matches_plan(transcript, request_uids, source, scope["recovery_plan"])
     if not isinstance(transcript, list) or len(transcript) != 1:
         return False
     request = transcript[0]
@@ -3465,6 +3473,23 @@ def _archive_authorized_recovery_failure(
     failure_path = (
         Path(checkpoint_dir) / "components" / "latest-conflict-failure.json"
     )
+    already_archived = False
+    if not failure_path.exists() and "recovery_plan" in resume_scope:
+        matches = []
+        for authorization_path in sorted((failure_path.parent / "resumed-failures").glob("*.authorization.json")):
+            authorization = json.loads(authorization_path.read_text(encoding="utf-8"))
+            body = authorization.get("data")
+            if (isinstance(body, dict) and authorization.get("sha256") == digest(body)
+                    and body.get("scope_sha256") == digest(dict(resume_scope))
+                    and body.get("source_sha256") == digest(source)):
+                candidate = authorization_path.with_name(authorization_path.name.replace(".authorization.json", ".json"))
+                saved_candidate = json.loads(candidate.read_text(encoding="utf-8"))
+                if saved_candidate.get("sha256") != body.get("failure_sha256"):
+                    raise ForcedAlignmentError("archived closure predecessor identity changed")
+                matches.append(candidate)
+        if len(matches) == 1:
+            failure_path = matches[0]
+            already_archived = True
     if not failure_path.is_file() or failure_path.is_symlink():
         raise ForcedAlignmentError(
             "bounded alignment resume requires the retained conflict failure"
@@ -3504,6 +3529,8 @@ def _archive_authorized_recovery_failure(
             raise ForcedAlignmentError(
                 "bounded alignment resume raw acoustic evidence is missing or changed"
             )
+    if already_archived:
+        return failure_path
     archive = (
         failure_path.parent
         / "resumed-failures"
@@ -3654,7 +3681,7 @@ def align_corrected_segments(
         })
         component_journal = UnitJournal(Path(checkpoint_dir) / "components", {
             "raw_binding": journal.binding,
-            "resolver_sha256": ALIGNMENT_RESOLVER_PRODUCER_SHA256,
+            "resolver_sha256": _audio_sha256(Path(__file__)),
             "speaker_policy_sha256": _audio_sha256(Path(__file__).with_name("speaker.py")),
             "policy": OVERLAP_RESOLUTION_POLICY,
             "min_word_score": min_word_score,
@@ -3666,7 +3693,7 @@ def align_corrected_segments(
         model_align = align
         normalized_journal = UnitJournal(Path(checkpoint_dir) / "normalized", {
             "raw_binding": journal.binding,
-            "producer_sha256": ALIGNMENT_RESOLVER_PRODUCER_SHA256,
+            "producer_sha256": _audio_sha256(Path(__file__)),
         })
         resume_identity = {
             "audio_sha256": audio_sha256,
@@ -3676,6 +3703,10 @@ def align_corrected_segments(
         }
         allowed_groups = (_alignment_resume_groups(resume_scope, source, resume_identity)
                           if resume_scope is not None else None)
+        recovery_call_budget = None
+        if resume_scope is not None and "recovery_plan" in resume_scope:
+            from .alignment_recovery import RecoveryCallBudget
+            recovery_call_budget = RecoveryCallBudget(checkpoint_dir, dict(resume_scope))
         identity_record = {
             "stage": "forced_alignment", **resume_identity,
             "source_uids": [str(item["utterance_uid"]) for item in source],
@@ -3836,6 +3867,8 @@ def align_corrected_segments(
                         {"data": details, "sha256": digest(details)},
                     )
                     raise AlignmentConflictBlocked(details)
+                if recovery_call_budget is not None:
+                    recovery_call_budget.reserve(key)
                 result = _execute_alignment_call(
                     model_align,
                     transcript,

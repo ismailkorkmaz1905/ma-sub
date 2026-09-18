@@ -373,3 +373,11 @@ def test_first_hour_dispatch_precedes_full_episode_asr(tmp_path, monkeypatch, va
         assert 0 < calls[0][1]['total_timeout'] <= 21600
         assert calls[0][0][2].name == 'source.mkv'
     assert stages == ['download', 'audio']
+
+
+def test_whole_episode_never_reads_stale_partial_failure_pointer(tmp_path, monkeypatch):
+    monkeypatch.setenv('MAS_PRODUCTION_PRIORITY', 'whole-episode-v1')
+    path = tmp_path / 'work/current-part.json'
+    path.parent.mkdir(parents=True)
+    path.write_text('intentionally invalid stale partial JSON')
+    assert controller._partial_failure_identity(tmp_path, 14) == {}

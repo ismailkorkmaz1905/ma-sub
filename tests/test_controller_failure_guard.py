@@ -126,6 +126,47 @@ def test_changed_evidence_retry_limit_cannot_reset_with_commit(tmp_path):
         controller._guard_failed_remote_job(tmp_path, 13, source, "b" * 40)
 
 
+def test_changed_evidence_retry_limit_accepts_one_operator_extension(
+        tmp_path, monkeypatch):
+    source, commit = _failed_job(tmp_path, attempt=2)
+    returned = tmp_path / "translation_output/Muhtemel Ask 13.Bolum_TR_TEXT_CORRECTED.zip"
+    returned.parent.mkdir()
+    returned.write_bytes(b"changed")
+    monkeypatch.setenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_APPROVED", "1")
+    monkeypatch.setenv(
+        "MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON",
+        "operator approved completion after retained alignment evidence",
+    )
+
+    controller._guard_failed_remote_job(tmp_path, 13, source, commit)
+    base, _ = controller._remote_input_binding(tmp_path, source, commit, 13)
+    identity, attempt = controller._remote_attempt_identity(
+        base,
+        tmp_path / "work/remote-job-request.json",
+        tmp_path / "work/remote-job-status.json",
+    )
+
+    assert attempt == 3
+    assert identity == digest({"base_input_sha256": base, "attempt": 3})
+    ledger = json.loads(
+        (tmp_path / "work/remote-retry-extension.json").read_text(encoding="utf-8")
+    )
+    assert ledger["sha256"] == digest(ledger["data"])
+    assert ledger["data"]["previous_limit"] == 2
+    assert ledger["data"]["extended_limit"] == 5
+
+
+def test_changed_evidence_retry_extension_requires_reason(tmp_path, monkeypatch):
+    source, commit = _failed_job(tmp_path, attempt=2)
+    returned = tmp_path / "translation_output/Muhtemel Ask 13.Bolum_TR_TEXT_CORRECTED.zip"
+    returned.parent.mkdir()
+    returned.write_bytes(b"changed")
+    monkeypatch.setenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_APPROVED", "1")
+
+    with pytest.raises(controller.RunPodControllerError, match="REASON"):
+        controller._guard_failed_remote_job(tmp_path, 13, source, commit)
+
+
 def test_retry_authorization_rejects_changed_failure_evidence(tmp_path):
     source, commit = _failed_job(tmp_path)
     returned = tmp_path / "translation_output/Muhtemel Ask 13.Bolum_TR_TEXT_CORRECTED.zip"

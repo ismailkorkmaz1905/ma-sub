@@ -1915,7 +1915,8 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
     if type(attempt) is not int or attempt < 0:
         raise RunPodControllerError("remote job attempt evidence is invalid")
     attempt += 1
-    if attempt > _runtime_policy()["max_changed_evidence_retries"]:
+    retry_limit = _changed_evidence_retry_limit(status_path.parent, data.get("episode"))
+    if attempt > retry_limit:
         raise RunPodControllerError("BLOCKED: changed-evidence retry budget exhausted")
     return digest({"base_input_sha256": base_input_sha, "attempt": attempt}), attempt
 
@@ -1941,6 +1942,48 @@ def _remote_input_binding(local_root, source_url, commit, episode):
                    "encoder_options": os.getenv("MAS_MP4_ENCODER_OPTIONS"),
                    "target_gb": os.getenv("MAS_MP4_TARGET_GB", "3")})
     return base, evidence
+
+
+def _changed_evidence_retry_limit(work, episode, *, now=None):
+    policy_limit = _runtime_policy()["max_changed_evidence_retries"]
+    path = Path(work) / "remote-retry-extension.json"
+    if path.is_file():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        body = saved.get("data")
+        if (
+            not isinstance(body, dict)
+            or saved.get("sha256") != digest(body)
+            or body.get("format") != "mas-operator-retry-extension-1"
+            or body.get("episode") != episode
+            or body.get("previous_limit") != policy_limit
+            or body.get("extended_limit") != policy_limit + 3
+            or not isinstance(body.get("reason"), str)
+            or not body["reason"].strip()
+            or len(body["reason"]) > 500
+        ):
+            raise RunPodControllerError("operator retry extension integrity mismatch")
+        authorized_at = datetime.fromisoformat(body["authorized_at"])
+        if authorized_at.tzinfo is None:
+            raise RunPodControllerError("operator retry extension timestamp is invalid")
+        return body["extended_limit"]
+    if os.getenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_APPROVED") != "1":
+        return policy_limit
+    reason = os.getenv("MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON", "").strip()
+    if not reason or len(reason) > 500:
+        raise RunPodControllerError(
+            "MAS_CHANGED_EVIDENCE_RETRY_EXTENSION_REASON must record the operator approval"
+        )
+    now = now or datetime.now(timezone.utc)
+    body = {
+        "format": "mas-operator-retry-extension-1",
+        "episode": episode,
+        "authorized_at": now.isoformat(),
+        "previous_limit": policy_limit,
+        "extended_limit": policy_limit + 3,
+        "reason": reason,
+    }
+    atomic_json(path, {"data": body, "sha256": digest(body)})
+    return body["extended_limit"]
 
 
 def _guard_failed_remote_job(local_root, episode, source_url, commit):
@@ -2057,7 +2100,8 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
             and (not failure.get("evidence_input_sha256") or failure["evidence_input_sha256"] == evidence):
         raise RunPodControllerError("BLOCKED: unchanged failed evidence; code or option changes alone do not authorize another GPU run")
     attempt = data.get("attempt", 0)
-    if type(attempt) is not int or not 0 <= attempt < _runtime_policy()["max_changed_evidence_retries"]:
+    retry_limit = _changed_evidence_retry_limit(work, episode)
+    if type(attempt) is not int or not 0 <= attempt < retry_limit:
         raise RunPodControllerError("BLOCKED: changed-evidence retry budget exhausted")
     authorization = {"request_sha256": request["sha256"], "base_input_sha256": base,
                      "evidence_input_sha256": evidence, "failure_sha256": digest(failure),

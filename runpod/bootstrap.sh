@@ -26,7 +26,7 @@ esac
 
 C0E3_RELEASE="/workspace/ma-sub/releases/c0e3c8e40def2d7672a5dd201cd5d65fde086d6f"
 C0E3_REQUIREMENTS_SHA256="1a47075cdac4e504a915ac23badeb0524baaede883fb0608c874acab5206918f"
-REQUIREMENTS_SHA256="$(python3 -c 'import hashlib, pathlib; data = pathlib.Path("requirements.lock").read_bytes().replace(b"\r\n", b"\n"); print(hashlib.sha256(data).hexdigest())')"
+REQUIREMENTS_SHA256="$("$VENV/bin/python" -c 'import hashlib, pathlib; data = pathlib.Path("requirements.lock").read_bytes().replace(b"\r\n", b"\n"); print(hashlib.sha256(data).hexdigest())')"
 
 remove_rebuild_tree() {
   case "$1" in

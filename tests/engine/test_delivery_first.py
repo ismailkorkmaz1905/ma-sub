@@ -183,10 +183,10 @@ def test_delivery_workspace_allows_quality_warning_not_changed_identity(tmp_path
     pack, out = tmp_path / 'pack.zip', tmp_path / 'out.zip'
     create_id_translation_pack(schema, pack, glossary=schema['production_policy']['glossary'])
     workspace = prepare_id_translation_workspaces(pack, tmp_path / 'workers')
-    plan = json.loads(workspace.read_text())['payload']
+    plan = json.loads(workspace.read_text(encoding='utf-8'))['payload']
     returns = {}
     for worker in plan['workers']:
-        data = json.loads((workspace.parent / worker['input_file']).read_text())
+        data = json.loads((workspace.parent / worker['input_file']).read_text(encoding='utf-8'))
         returns[worker['worker_id']] = [{**r, 'id_final': 'Semoga.', 'review_required': True} for r in data['records']]
     result = collect_id_translation_workspaces(pack, workspace, returns, out_zip=out)
     assert result['status'] == 'DELIVERY_RETURN_CREATED'

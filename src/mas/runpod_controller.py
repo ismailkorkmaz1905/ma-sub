@@ -1958,21 +1958,65 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
             raise RunPodControllerError("code-fix retry cannot also change validated text inputs")
         qualified_code_fix = True
     pre_pipeline_code_fix = False
+    checkpointed_raw_asr_code_fix = False
     checkpoint_path = work / "remote-checkpoint-manifest.json"
     checkpoint_sha = failure.get("diagnostics", {}).get("remote-checkpoint-manifest.json")
     if data.get("commit") != commit and checkpoint_sha and checkpoint_path.is_file() \
             and sha256_file(checkpoint_path) == checkpoint_sha:
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         files = checkpoint.get("files")
+        relative_paths = (
+            {item.get("relative_path") for item in files}
+            if isinstance(files, list) and all(isinstance(item, dict) for item in files)
+            else set()
+        )
         pre_pipeline_code_fix = (
             checkpoint.get("identity") == identity
             and isinstance(files, list)
             and all(isinstance(item, dict) for item in files)
-            and {item.get("relative_path") for item in files} <= {"source/source.url"}
+            and relative_paths <= {"source/source.url"}
             and len(files) <= 1
             and checkpoint.get("unstable") == []
         )
+        raw_asr_progress = status.get("progress", {}).get("stage")
+        checkpointed_raw_asr_code_fix = (
+            checkpoint.get("identity") == identity
+            and isinstance(raw_asr_progress, str)
+            and raw_asr_progress.startswith("raw_asr:")
+            and "prepare/raw_asr_v2.recovery.json" in relative_paths
+            and "prepare/raw_asr_v2.done.json" not in relative_paths
+            and "prepare/audio.done.json" in relative_paths
+            and "source/download.done.json" in relative_paths
+            and "source/source.url" in relative_paths
+            and any(
+                isinstance(path, str) and path.startswith("prepare/primary_asr/")
+                for path in relative_paths
+            )
+            and all(
+                isinstance(path, str)
+                and (
+                    path in {
+                        "prepare/audio.done.json",
+                        "prepare/raw_asr_v2.recovery.json",
+                        "source/download.done.json",
+                        "source/source.url",
+                        "work/state.json",
+                    }
+                    or path.startswith("prepare/primary_asr/")
+                    or path.startswith("source/Muhtemel Ask ")
+                    or path.startswith("work/notification-outbox/")
+                )
+                and re.fullmatch(r"[0-9a-f]{64}", item.get("sha256", ""))
+                and type(item.get("size_bytes")) is int
+                and item["size_bytes"] >= 0
+                for item, path in (
+                    (item, item.get("relative_path")) for item in files
+                )
+            )
+            and checkpoint.get("unstable") == []
+        )
     if not qualified_code_fix and not pre_pipeline_code_fix \
+            and not checkpointed_raw_asr_code_fix \
             and (not failure.get("evidence_input_sha256") or failure["evidence_input_sha256"] == evidence):
         raise RunPodControllerError("BLOCKED: unchanged failed evidence; code or option changes alone do not authorize another GPU run")
     attempt = data.get("attempt", 0)
@@ -1980,7 +2024,8 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
         raise RunPodControllerError("BLOCKED: changed-evidence retry budget exhausted")
     authorization = {"request_sha256": request["sha256"], "base_input_sha256": base,
                      "evidence_input_sha256": evidence, "failure_sha256": digest(failure),
-                     "pre_pipeline_code_fix": pre_pipeline_code_fix}
+                     "pre_pipeline_code_fix": pre_pipeline_code_fix,
+                     "checkpointed_raw_asr_code_fix": checkpointed_raw_asr_code_fix}
     atomic_json(work / "remote-retry-authorization.json", {"data": authorization, "sha256": digest(authorization)})
 
 

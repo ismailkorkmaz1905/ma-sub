@@ -942,6 +942,83 @@ class ForcedAlignmentTests(unittest.TestCase):
                 ["utt-charlie", "utt-delta"],
             )
 
+    @patch("mas.engine.forced_align._model_state_sha256", return_value="a" * 64)
+    def test_signed_discovery_allows_one_bounded_uncached_component(self, _model):
+        with tempfile.TemporaryDirectory() as directory:
+            audio = self._audio(directory)
+            checkpoint = Path(directory) / "units"
+            coarse = self._two_pair_coarse()
+            cold = align_corrected_segments(
+                audio,
+                coarse,
+                whisperx_module=_TwoPairOverlapWhisperX(),
+                checkpoint_dir=checkpoint,
+            )
+            identity = json.loads(
+                (checkpoint / "resume-identity.json").read_text(encoding="utf-8")
+            )["data"]
+            scope = {
+                key: identity[key]
+                for key in (
+                    "stage",
+                    "audio_sha256",
+                    "model_state_sha256",
+                    "raw_alignment_binding",
+                    "source_sha256",
+                )
+            }
+            scope.update(
+                target_uids=["utt-alpha"],
+                context_uids=["utt-alpha", "utt-bravo"],
+                discovery_component_limit=3,
+            )
+            retained = None
+            for path in checkpoint.glob("*/*.json"):
+                record = json.loads(path.read_text(encoding="utf-8"))
+                result = record.get("data", {}).get("result")
+                words = result.get("word_segments") if isinstance(result, dict) else None
+                if words and [word["word"] for word in words] == ["Charlie", "Delta"]:
+                    path.unlink()
+                elif retained is None and isinstance(result, dict):
+                    retained = (record["data"]["uid"], result)
+            self.assertIsNotNone(retained)
+            source = identity["source"]
+            details = {
+                "status": "BLOCKED",
+                "reason": "recovery_time_budget",
+                "component_uids": ["utt-alpha"],
+                "source_sha256": forced_align.digest([source[0]]),
+                "raw_results": {retained[0]: forced_align.digest(retained[1])},
+                "total_recovery_seconds": 900.1,
+                "limits": {"total_recovery_seconds": 900},
+            }
+            forced_align.atomic_json(
+                checkpoint / "components/latest-conflict-failure.json",
+                {"data": details, "sha256": forced_align.digest(details)},
+            )
+            fake = _TwoPairOverlapWhisperX()
+
+            warm = align_corrected_segments(
+                audio,
+                coarse,
+                whisperx_module=fake,
+                checkpoint_dir=checkpoint,
+                resume_scope=scope,
+            )
+
+            self.assertEqual(warm, cold)
+            self.assertEqual(fake.align_calls, [{"text": "Charlie Delta"}])
+            receipt = json.loads(
+                (checkpoint / "components/discovered-resume-scope.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(receipt["sha256"], forced_align.digest(receipt["data"]))
+            self.assertEqual(
+                receipt["data"]["requests"][0]["component_uids"],
+                ["utt-charlie", "utt-delta"],
+            )
+
     def test_generic_resume_context_never_joins_words_across_thirty_second_silence(self):
         for words in (("Zeytin", "Gökyüzü"), ("Buralarda", "Dönüyoruz")):
             source = forced_align.validate_coarse_segments([

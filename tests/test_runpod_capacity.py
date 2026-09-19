@@ -89,6 +89,27 @@ def test_allowed_gpu_preference_wins_over_cheaper_reversed_offer(tmp_path):
         assert lease.pod["gpuTypeId"] == "L4"
 
 
+def test_lease_uses_the_selected_offer_rate_for_affordable_duration(tmp_path):
+    provider = Provider()
+    provider.account = lambda timeout: {"clientBalance": 0.106, "currentSpendPerHr": 0.005,
+                                        "isAutoPayEnabled": False}
+    now = [0.0]
+    lease = CapacityLease(
+        provider,
+        BASE,
+        tmp_path / "audit",
+        plan(total_seconds=900, startup_seconds=300, shutdown_seconds=120),
+        nonce="0123456789abcdef",
+        clock=lambda: now[0],
+        wall_clock=lambda: 1_000 + now[0],
+    )
+    lease.acquire()
+    try:
+        assert lease.work_budget_seconds > 700
+    finally:
+        lease.cleanup()
+
+
 def test_capacity_offer_is_polled_within_bounded_startup_window(tmp_path):
     provider = Provider()
     available = provider.offers

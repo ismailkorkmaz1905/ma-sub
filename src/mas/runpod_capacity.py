@@ -325,7 +325,7 @@ class CapacityLease:
             storage_rate += volume_gb * self.plan.network_volume_usd_per_gb_month / (30 * 24)
             affordable_seconds = math.floor(
                 (balance - minimum_balance) * 3600 /
-                (account_rate + self.plan.maximum_rate_usd_per_hour + storage_rate))
+                (account_rate + offer["rate"] + storage_rate))
             lease_seconds = min(self.plan.total_seconds, affordable_seconds)
             if lease_seconds <= self.plan.shutdown_seconds or self.clock() >= self._startup_deadline:
                 continue

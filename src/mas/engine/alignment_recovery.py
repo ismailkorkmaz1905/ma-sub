@@ -94,19 +94,39 @@ def request_matches_plan(transcript, request_uids, source, plan):
     allowed = set(component)
     group = [item for item in source if item['utterance_uid'] in allowed]
     request = transcript[0]
-    if (request['start'] < min(item['start_ms'] for item in group) / 1000
-            or request['end'] > max(item['end_ms'] for item in group) / 1000):
-        return False
-    # Only exact, contiguous source text is admissible. The approved closure
-    # supplies acoustic context; current word/score/drift validators still run.
     text = request['text']
+
+    def run_admissible(run):
+        # UIDs, model text and audio window must all describe the same source
+        # selection. Matching them independently, or only against the whole
+        # closure envelope, would let one cue's text carry another cue's audio.
+        return (bool(run)
+                and set(request_uids) <= {item['utterance_uid'] for item in run}
+                and ' '.join(_alignment_model_text(item['text'])
+                             for item in run) == text
+                and request['start'] >= min(item['start_ms'] for item in run) / 1000
+                and request['end'] <= max(item['end_ms'] for item in run) / 1000)
+
+    # A conflict component is connected by word overlap, so its UIDs need not be
+    # contiguous in source order; such a joint call carries exactly its own
+    # source text, in source order.
+    if run_admissible([item for item in group
+                       if item['utterance_uid'] in requested]):
+        return True
+    # Exact, contiguous source text stays admissible: the request UIDs are the
+    # replaceable targets, the run supplies the acoustic context. The approved
+    # closure supplies context only; word/score/drift validators still run.
+    # Repeated dialogue means several runs can carry the same text, so a
+    # rejected candidate must not reject the request.
     for start in range(len(group)):
         parts = []
-        for item in group[start:]:
-            parts.append(_alignment_model_text(item['text']))
+        for index in range(start, len(group)):
+            parts.append(_alignment_model_text(group[index]['text']))
             candidate = ' '.join(parts)
             if candidate == text:
-                return True
+                if run_admissible(group[start:index + 1]):
+                    return True
+                break
             if len(candidate) >= len(text) or not text.startswith(candidate):
                 break
     return False

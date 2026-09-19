@@ -1,3 +1,16 @@
+## Alignment follow-up - 19 September 2026
+
+The independently reviewed B1-B4 patch is now applied: noncontiguous conflict
+requests bind UID/text/window together, repeated context searches keep scanning,
+joint/context word slicing preserves punctuation, and request UIDs are no longer
+replaced by merged budget UIDs. Three regression files cover these changes.
+The qualification workflow runs the full Python 3.11 suite before committing.
+B1/B2 use the explicit `recovery_plan` route; legacy retry permissions are not
+automatically upgraded. Existing EP14 evidence needs a freshly validated plan
+and exact-commit retry authorization, not an unqualified `run 14` restart.
+No episode, paid GPU, live media replay or Drive operation was performed.
+This is a code fix, not proof of acoustic resolution of the two remaining UIDs.
+
 # EP14 olay sonrası kod incelemesi ve sınırlı onarım
 
 Tarih: 19 Eylül 2026, Singapur.

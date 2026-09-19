@@ -1,3 +1,16 @@
+## Alignment follow-up - 19 September 2026
+
+The independently reviewed B1-B4 patch is now applied: noncontiguous conflict
+requests bind UID/text/window together, repeated context searches keep scanning,
+joint/context word slicing preserves punctuation, and request UIDs are no longer
+replaced by merged budget UIDs. Three regression files cover these changes.
+The qualification workflow runs the full Python 3.11 suite before committing.
+B1/B2 use the explicit `recovery_plan` route; legacy retry permissions are not
+automatically upgraded. Existing EP14 evidence needs a freshly validated plan
+and exact-commit retry authorization, not an unqualified `run 14` restart.
+No episode, paid GPU, live media replay or Drive operation was performed.
+This is a code fix, not proof of acoustic resolution of the two remaining UIDs.
+
 > DELIVERY COMPLETE, 2026-09-06: Episode 12 1080p H.264/AAC MP4 with Indonesian subtitles burned in is complete and published. Drive object 1FAkmN0Z9HWcRrbfOT8C-ftmSXXiDdA2I was fully read before and after metadata-only rename: both actual reads match 8,978,040,872 bytes and SHA-256 3069df576bcf5d9ec88b1176ed3f016c2f210e511adcd216d38bf4b021f22675. Transport PASS; subtitle/perceptual quality remains REVIEW_REQUIRED. All owned MP4 Pods are externally ABSENT, retained Pod EXITED, volume preserved. Last balance USD 2.8764311039 at 14:01 UTC. No active GPU, encoder or delivery job remains.
 
 Current EP14 launch repair: [18 September 2026 repair and operator checks](EP14_READY_2026-09-18.md).

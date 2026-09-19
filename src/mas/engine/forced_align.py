@@ -615,6 +615,53 @@ def _raw_aligned_words(result: Any, utterance_uid: str) -> list[Mapping[str, Any
     return words
 
 
+def _lexical_raw_positions(raw_words: Sequence[Mapping[str, Any]]) -> list[int]:
+    """Indices of raw records that carry a lexeme.
+
+    ``_validate_word_record`` keeps a standalone punctuation token in the
+    segment text instead of letting it manufacture a subtitle interval, so a
+    joint result can hold more raw records than the source has lexical words.
+    Joint slicing must therefore count the same tokens the independent path
+    counts.  Anything that is not a clean punctuation-only string still counts,
+    so a missing/extra real word or a malformed record is still rejected by the
+    caller instead of being silently absorbed.
+    """
+
+    positions: list[int] = []
+    for index, raw in enumerate(raw_words):
+        value = raw.get("word", raw.get("text")) if isinstance(raw, Mapping) else None
+        if (
+            isinstance(value, str)
+            and value.strip()
+            and not _lexeme(unicodedata.normalize("NFC", value.strip()))
+        ):
+            continue
+        positions.append(index)
+    return positions
+
+
+def _lexical_raw_slice(
+    raw_words: Sequence[Mapping[str, Any]],
+    positions: Sequence[int],
+    offset: int,
+    count: int,
+) -> list[Mapping[str, Any]]:
+    """Raw records carrying lexical words ``offset`` .. ``offset + count``.
+
+    Leading punctuation stays with the first utterance and trailing punctuation
+    with the last, so every raw record is still handed to the validator exactly
+    once.
+    """
+
+    start = positions[offset] if offset else 0
+    end = (
+        positions[offset + count]
+        if offset + count < len(positions)
+        else len(raw_words)
+    )
+    return list(raw_words[start:end])
+
+
 def _normalize_aligned_words(
     result: Any,
     coarse: Mapping[str, Any],
@@ -2405,9 +2452,13 @@ def _resolve_alignment_overlaps(
             device,
             **(
                 {
-                    "_mas_component_uids": sorted(
-                        active_budget["uids"], key=order.__getitem__
-                    ) if active_budget is not None else request_uids,
+                    # Budget accounting merges components; request
+                    # authorization identity must stay the caller's own
+                    # replaceable targets. Only a caller that passes no UIDs at
+                    # all falls back to the merged budget.
+                    "_mas_component_uids": request_uids
+                    if request_uids is not None
+                    else sorted(active_budget["uids"], key=order.__getitem__),
                     **kwargs,
                 }
                 if (active_budget is not None or request_uids is not None)
@@ -2541,11 +2592,12 @@ def _resolve_alignment_overlaps(
                 len(_canonical_lexical_surfaces(str(item["text"])))
                 for item in group
             )
-            if len(raw_words) != expected_count:
+            lexical_positions = _lexical_raw_positions(raw_words)
+            if len(lexical_positions) != expected_count:
                 joint_diagnostics["raw_word_count_mismatches"] += 1
                 record_joint_failure(
                     f"{component_index}: expected {expected_count} joint words, "
-                    f"received {len(raw_words)}"
+                    f"received {len(lexical_positions)}"
                 )
                 return False
             offset = 0
@@ -2553,7 +2605,9 @@ def _resolve_alignment_overlaps(
             for item in group:
                 uid = str(item["utterance_uid"])
                 word_count = len(_canonical_lexical_surfaces(str(item["text"])))
-                raw_word_slice = raw_words[offset : offset + word_count]
+                raw_word_slice = _lexical_raw_slice(
+                    raw_words, lexical_positions, offset, word_count
+                )
                 offset += word_count
                 if uid not in target_uid_set:
                     continue
@@ -4127,7 +4181,8 @@ def align_corrected_segments(
                         len(_canonical_lexical_surfaces(str(context["text"])))
                         for context in group
                     ]
-                    if len(raw_words) != sum(counts):
+                    lexical_positions = _lexical_raw_positions(raw_words)
+                    if len(lexical_positions) != sum(counts):
                         continue
                     target_offset = sum(counts[: position - start])
                     expanded = dict(item)
@@ -4135,9 +4190,12 @@ def align_corrected_segments(
                     expanded["end_ms"] = joint_end
                     words, punctuation_count = _normalize_aligned_words(
                         {
-                            "word_segments": raw_words[
-                                target_offset : target_offset + counts[position - start]
-                            ]
+                            "word_segments": _lexical_raw_slice(
+                                raw_words,
+                                lexical_positions,
+                                target_offset,
+                                counts[position - start],
+                            )
                         },
                         expanded,
                         segment_index=position + 1,

@@ -135,11 +135,7 @@ def test_resume_cannot_increase_original_lower_episode_allowance(tmp_path, monke
 def test_expired_budget_accepts_one_explicit_operator_extension(tmp_path, monkeypatch):
     monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "400")
     started = datetime(2026, 9, 7, tzinfo=timezone.utc)
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / "run-original.log").write_text(json.dumps({
-        "event": "run_started", "episode": 14, "timestamp": started.isoformat()
-    }) + "\n", encoding="utf-8")
+    monkeypatch.setenv("MAS_RUN_STARTED_AT", started.isoformat())
     runpod_controller._episode_budget(tmp_path, 14, now=started)
 
     extended_at = started + timedelta(seconds=401)

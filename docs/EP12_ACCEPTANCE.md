@@ -1,7 +1,5 @@
 # Episode 12 incident acceptance criteria
 
-Source: `docs/EP12_PIPELINE_INCIDENT_REPORT_FOR_ASTRA.md`.
-
 The incident's practical Indonesian SRT is an emergency/recovery artifact. It is not strict production evidence and cannot be promoted by renaming or copying it into `final/`.
 
 ## Automated gates

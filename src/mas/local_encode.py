@@ -9,8 +9,7 @@ from .engine.burned_mp4 import (
 from .engine.episode_archive import file_record
 from .engine.semantic_alignment import prepare_semantic_delivery_scope, read_jsonl
 from .engine.srt import parse_srt
-from .hashing import sha256_file
-from .reliability import atomic_json, digest, read_json
+from .reliability import atomic_json, digest, file_digest as sha256_file, read_json
 
 
 def write_subtitle_export(root, episode, *, target_size_gb=3):

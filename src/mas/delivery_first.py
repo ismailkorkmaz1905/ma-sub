@@ -9,8 +9,7 @@ from pathlib import Path
 import textwrap
 import time
 
-from .hashing import sha256_file
-from .reliability import atomic_json, digest, read_json
+from .reliability import atomic_json, digest, file_digest as sha256_file, read_json
 
 MODE = 'delivery-first-v1'
 EXPORT_MODE = 'delivery-first-subtitles'

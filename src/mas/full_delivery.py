@@ -9,8 +9,7 @@ import time
 from .delivery import safe_relative, verified_record
 from .delivery_first import MODE, EXPORT_MODE, _clock, read_signed, write_signed
 from .engine.episode_archive import file_record
-from .hashing import sha256_file
-from .reliability import digest
+from .reliability import digest, file_digest as sha256_file
 
 
 def _probe(path, timeout):

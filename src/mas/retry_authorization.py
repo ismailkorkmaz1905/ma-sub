@@ -9,8 +9,7 @@ from pathlib import Path
 
 from .config import ROOT
 from .delivery import safe_relative
-from .hashing import sha256_file
-from .reliability import RunBudget, atomic_json, digest
+from .reliability import RunBudget, atomic_json, digest, file_digest as sha256_file
 
 
 class RetryAuthorizationError(RuntimeError):

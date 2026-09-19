@@ -8,6 +8,7 @@ from mas import cli
 from mas.reliability import IntegrityError, digest, file_digest
 from mas.subtitle.pilot import build_pilot, write_pilot
 from mas.subtitle.pilot_worker import cached_stage, model_identity, verify_source_clip
+from mas.subtitle.srt import render
 
 
 def evidence(segments=None, turns=None, offset=0):
@@ -22,6 +23,11 @@ def evidence(segments=None, turns=None, offset=0):
             "offset_ms": offset, "duration_ms": 10_000, "segments": segments,
             "speaker_turns": turns}
     return {"data": body, "sha256": digest(body)}
+
+
+def test_pilot_srt_rendering():
+    records = [{"start_ms": 1000, "end_ms": 2000, "text": "Defne"}]
+    assert "00:00:01,000 --> 00:00:02,000" in render(records, "text")
 
 
 def test_cue_starts_at_speech_and_never_cuts_its_end():

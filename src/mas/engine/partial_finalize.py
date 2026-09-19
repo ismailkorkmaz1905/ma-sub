@@ -12,8 +12,7 @@ from .srt import assert_srt_roundtrip, parse_srt, write_srt
 from .translation_workspace import validate_id_workspace_output
 from ..config import ROOT
 from ..delivery import safe_relative, verified_record
-from ..hashing import sha256_file
-from ..reliability import atomic_json, digest, read_json
+from ..reliability import atomic_json, digest, file_digest as sha256_file, read_json
 
 
 _PARTIAL_REQUIRED_INPUTS = frozenset({

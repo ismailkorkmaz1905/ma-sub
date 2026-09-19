@@ -4,8 +4,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from .hashing import sha256_file
-from .reliability import atomic_json
+from .reliability import atomic_json, file_digest as sha256_file
 from .remote import upload_verified
 from .source_discovery import CHANNEL_VIDEOS_URL, is_exact_episode_title
 from .state import load, set_stage

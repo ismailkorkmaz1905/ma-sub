@@ -21,12 +21,11 @@ from .engine.tr_correction import validate_tr_correction_output
 from .id_return_preflight import preflight_local_id_return
 from .engine.download import _validated_cookie_file, validate_download
 from .remote import RemoteVerificationError, _run_watchdog, drive_preflight
-from .reliability import BudgetExceeded, RunBudget, atomic_json, digest
+from .reliability import BudgetExceeded, RunBudget, atomic_json, digest, file_digest as sha256_file
 from .delivery import (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE, WAIT_PART_RETURN,
                        ALIGNMENT_RECOVERY_COMPLETE, READY_FOR_PARTIAL_ENCODE, NEXT_PART,
                        SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
                        publish_local_delivery, safe_relative, validate_delivery)
-from .hashing import sha256_file
 from .source_discovery import discover_episode_metadata
 from .runpod_capacity import (DEFAULT_GPU_TYPE_IDS, CapacityLease, CapacityPlan,
                              CapacityProvider, CapacityReadinessError, load_storage_quote)
@@ -131,16 +130,16 @@ def _episode_budget(local_root, episode, *, now=None):
     if not 3 <= extension_limit <= 12:
         raise RunPodControllerError("MAS_EPISODE_MAX_OPERATOR_EXTENSIONS must be between 3 and 12")
     budget_path = Path(local_root) / "work" / "controller_budget.json"
-    starts = []
     excluded_wait = 0.0
     prior_limit = None
     operator_extensions = []
+    started_at = now
     if budget_path.exists():
         saved = json.loads(budget_path.read_text(encoding="utf-8"))
         body = saved.get("data")
         if not isinstance(body, dict) or saved.get("sha256") != digest(body) or body.get("episode") != episode:
             raise RunPodControllerError("episode budget checkpoint integrity mismatch")
-        starts.append(datetime.fromisoformat(body["started_at"]))
+        started_at = datetime.fromisoformat(body["started_at"])
         prior_limit = body.get('limit_seconds')
         if (type(prior_limit) not in (int, float) or not math.isfinite(prior_limit)
                 or not 0 < prior_limit <= 21600):
@@ -174,32 +173,17 @@ def _episode_budget(local_root, episode, *, now=None):
             elapsed = (now - paused).total_seconds()
             if elapsed < 0:
                 raise RunPodControllerError("wait clock moved backwards")
-    preflight_path = Path(local_root) / "work" / "controller-preflight-only.json"
-    excluded = {}
-    if preflight_path.is_file():
-        preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
-        if preflight.get("sha256") != digest(preflight.get("data")):
-            raise RunPodControllerError("preflight-only log evidence integrity mismatch")
-        excluded = preflight["data"]
-    for log_path in (Path(local_root) / "logs").glob("run-*.log"):
-        with log_path.open(encoding="utf-8") as handle:
-            first_line = handle.readline()
-        if log_path.name in excluded:
-            if digest(first_line) != excluded[log_path.name]:
-                raise RunPodControllerError("preflight-only log identity changed")
-            continue
-        try:
-            event = json.loads(first_line)
-            if event.get("event") == "run_started" and event.get("episode") == episode:
-                starts.append(datetime.fromisoformat(event["timestamp"]))
-        except (ValueError, KeyError, TypeError) as exc:
-            raise RunPodControllerError(f"cannot establish episode budget from {log_path.name}") from exc
-    if any(start.tzinfo is None for start in starts):
-        raise RunPodControllerError("episode budget timestamps must include timezone")
-    started_at = (
-        datetime.fromisoformat(operator_extensions[-1]["authorized_at"])
-        if operator_extensions else min(starts) if starts else now
-    )
+    else:
+        configured_start = os.getenv("MAS_RUN_STARTED_AT")
+        if configured_start:
+            try:
+                started_at = datetime.fromisoformat(configured_start)
+            except ValueError as exc:
+                raise RunPodControllerError("MAS_RUN_STARTED_AT is invalid") from exc
+            if started_at.tzinfo is None or started_at > now:
+                raise RunPodControllerError("MAS_RUN_STARTED_AT must be a past timezone-aware timestamp")
+    if started_at.tzinfo is None:
+        raise RunPodControllerError("episode budget timestamp must include timezone")
     try:
         policy = _runtime_policy()
         limit = float(os.getenv("MAS_EPISODE_BUDGET_SECONDS", str(policy["max_wall_seconds"])))
@@ -1621,34 +1605,18 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
                         "semantic local resume requires local-qsv-v1; remote encoding needs an explicit encoder job"
                     )
                 return local_result
-        try:
-            if alignment_recovery:
-                retained_source = local_root / "source" / "source.url"
-                if not retained_source.is_file():
-                    raise RunPodControllerError("alignment recovery requires the retained source URL")
-                retained_url = retained_source.read_text(encoding="utf-8").strip()
-                if not retained_url or (source_url and source_url != retained_url):
-                    raise RunPodControllerError("alignment recovery source identity mismatch")
-                source_url = retained_url
-            else:
-                source_url = _prepare_official_source(
-                    local_root, episode, source_url, values.get("MAS_YTDLP_COOKIES")
-                )
-        except Exception:
-            # Source preflight cannot spend compute; retain that distinction without resetting a run.
-            latest = local_root / "logs" / "LATEST"
-            if latest.is_file() and not (local_root / "work" / "controller_budget.json").exists():
-                log_name = latest.read_text(encoding="utf-8").strip()
-                if Path(log_name).name == log_name:
-                    with (local_root / "logs" / log_name).open(encoding="utf-8") as handle:
-                        first_line = handle.readline()
-                    path = local_root / "work" / "controller-preflight-only.json"
-                    previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"data": {}}
-                    if "sha256" in previous and previous["sha256"] != digest(previous["data"]):
-                        raise RunPodControllerError("preflight-only evidence changed")
-                    previous["data"][log_name] = digest(first_line)
-                    atomic_json(path, {"data": previous["data"], "sha256": digest(previous["data"])})
-            raise
+        if alignment_recovery:
+            retained_source = local_root / "source" / "source.url"
+            if not retained_source.is_file():
+                raise RunPodControllerError("alignment recovery requires the retained source URL")
+            retained_url = retained_source.read_text(encoding="utf-8").strip()
+            if not retained_url or (source_url and source_url != retained_url):
+                raise RunPodControllerError("alignment recovery source identity mismatch")
+            source_url = retained_url
+        else:
+            source_url = _prepare_official_source(
+                local_root, episode, source_url, values.get("MAS_YTDLP_COOKIES")
+            )
         lease_reference = local_root / "work" / "controller-lease.json"
         resume_lease = False
         audit = local_root / "work" / "capacity" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + f"-{os.getpid()}")

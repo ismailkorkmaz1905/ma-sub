@@ -10,8 +10,7 @@ from .episode_archive import file_record
 from .part_audio import _verify_file
 from .partial_finalize import validate_partial_export
 from ..delivery import safe_relative, verified_record
-from ..hashing import sha256_file
-from ..reliability import atomic_json, digest, read_json
+from ..reliability import atomic_json, digest, file_digest as sha256_file, read_json
 
 
 @contextmanager

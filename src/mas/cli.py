@@ -11,7 +11,7 @@ from .audio_review_ui import run_audio_review_ui
 from .config import episode_dir
 from .engine.download import DownloadError, _validated_cookie_file
 from .notify import enqueue_notification, send_email
-from .pipeline import run, status
+from .pipeline import run, status, status_summary
 from .runlog import RunLog
 from .runpod_controller import RunPodCleanupRequired, drain_cli_notifications, run_remote_episode
 
@@ -220,22 +220,25 @@ def clean(episode, destroy=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="mas")
-    commands = parser.add_subparsers(dest="command", required=True)
-    run_parser = commands.add_parser("run")
+    commands = parser.add_subparsers(
+        dest="command", required=True, metavar="{run,status,doctor,test}"
+    )
+    run_parser = commands.add_parser("run", help="start or resume an episode")
     run_parser.add_argument("episode", type=int)
     run_parser.add_argument("--source-url")
-    run_parser.add_argument("--fixture", action="store_true")
+    run_parser.add_argument("--fixture", action="store_true", help=argparse.SUPPRESS)
     run_parser.add_argument("--local", action="store_true", help=argparse.SUPPRESS)
     run_parser.add_argument("--stop-after", type=int, choices=(1, 2, 3), help=argparse.SUPPRESS)
     run_parser.add_argument("--alignment-recovery", action="store_true", help=argparse.SUPPRESS)
-    status_parser = commands.add_parser("status")
+    status_parser = commands.add_parser("status", help="show the current step")
     status_parser.add_argument("episode", type=int)
-    doctor_parser = commands.add_parser("doctor")
+    status_parser.add_argument("--json", action="store_true")
+    doctor_parser = commands.add_parser("doctor", help="check local readiness")
     doctor_modes = doctor_parser.add_mutually_exclusive_group()
-    doctor_modes.add_argument("--strict-runpod", action="store_true")
-    doctor_modes.add_argument("--strict-runpod-worker", action="store_true")
+    doctor_modes.add_argument("--strict-runpod", action="store_true", help=argparse.SUPPRESS)
+    doctor_modes.add_argument("--strict-runpod-worker", action="store_true", help=argparse.SUPPRESS)
     doctor_modes.add_argument("--controller", action="store_true")
-    commands.add_parser("test")
+    commands.add_parser("test", help="run the local test suite")
     commands.add_parser("notify-test")
     pilot_parser = commands.add_parser("subtitle-pilot")
     pilot_parser.add_argument("episode", type=int)
@@ -265,7 +268,11 @@ def main(argv=None):
     clean_parser.add_argument("episode", type=int)
     clean_parser.add_argument("--destroy", action="store_true")
     args = parser.parse_args(argv)
-    context = RunLog(args.episode, ["mas", *(argv or sys.argv[1:])]) if args.command == "run" else nullcontext()
+    context = (
+        RunLog(args.episode, ["mas", *(argv or sys.argv[1:])])
+        if args.command == "run" and not os.getenv("MAS_REMOTE_JOB_TOKEN")
+        else nullcontext()
+    )
     with context as run_log:
         try:
             if args.command == "run":
@@ -281,7 +288,7 @@ def main(argv=None):
                     else:
                         result = run_remote_episode(args.episode, args.source_url)
             elif args.command == "status":
-                result = status(args.episode)
+                result = status(args.episode) if args.json else status_summary(args.episode)
             elif args.command == "doctor":
                 if args.controller:
                     result = doctor(controller=True)
@@ -321,7 +328,7 @@ def main(argv=None):
             if args.command not in {"subtitle-pilot", "plan-alignment-recovery"} and getattr(args, "episode", None) and _should_notify_run_failure(exc):
                 details = f"Sonuç: çalıştırma tamamlanamadı.\nHata: {type(exc).__name__}: {exc}"
                 if run_log:
-                    details += f"\nSon log: {run_log.directory / 'LATEST'}"
+                    details += f"\nSon log: {run_log.path}"
                 if isinstance(exc, RunPodCleanupRequired):
                     details += "\nSonraki adım: owned Pod yokluğunu dışarıdan doğrulayın; doğrulamadan yeniden başlatmayın."
                 else:

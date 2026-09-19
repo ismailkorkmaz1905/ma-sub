@@ -4,7 +4,7 @@ import pytest
 
 from mas import notify
 from mas.engine import burned_mp4
-from mas.hashing import sha256_file
+from mas.reliability import file_digest as sha256_file
 
 
 def test_corrupt_outbox_records_do_not_starve_terminal_delivery(tmp_path, monkeypatch):

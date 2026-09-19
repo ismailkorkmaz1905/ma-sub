@@ -11,8 +11,7 @@ from mas.delivery import NEXT_PART, READY_FOR_PARTIAL_ENCODE, WAIT_PART_RETURN, 
 from mas.engine import part_audio, partial_finalize
 from mas.engine.episode_archive import file_record
 from mas.engine.part_scope import build_part_plan
-from mas.hashing import sha256_file
-from mas.reliability import BudgetExceeded, atomic_json, digest
+from mas.reliability import BudgetExceeded, atomic_json, digest, file_digest as sha256_file
 from mas.remote_job import _identity, checkpoint_manifest
 
 
@@ -354,6 +353,7 @@ def test_first_hour_dispatch_precedes_full_episode_asr(tmp_path, monkeypatch, va
         return SimpleNamespace(video_path=video, resumed=False, captions_path=None)
     def extract(video, folder, **kwargs):
         audio = folder / 'audio.flac'
+        audio.parent.mkdir(parents=True, exist_ok=True)
         audio.write_bytes(b'fixture audio')
         return SimpleNamespace(audio_path=audio, resumed=False)
     monkeypatch.setattr(pipeline, 'download_source', download)

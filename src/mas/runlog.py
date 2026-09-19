@@ -78,18 +78,20 @@ class RunLog:
         self.episode = episode
         self.argv = argv
         self.started = time.monotonic()
-        self.directory = episode_dir(episode) / "logs"
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-        self.path = self.directory / f"run-{stamp}-{os.getpid()}.log"
+        self.started_at = _utc_now()
+        self.directory = episode_dir(episode) / ".mas"
+        self.path = self.directory / "run.log"
         self.file = None
         self.stdout = None
         self.stderr = None
         self.finished = False
+        self.previous_started_at = None
 
     def __enter__(self):
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.file = self.path.open("x", encoding="utf-8", buffering=1)
-        (self.directory / "LATEST").write_text(self.path.name + "\n", encoding="utf-8")
+        self.file = self.path.open("w", encoding="utf-8", buffering=1)
+        self.previous_started_at = os.environ.get("MAS_RUN_STARTED_AT")
+        os.environ["MAS_RUN_STARTED_AT"] = self.started_at
         lock = threading.RLock()
         self.stdout, self.stderr = sys.stdout, sys.stderr
         sys.stdout = _Tee(self.stdout, self.file, lock)
@@ -126,9 +128,15 @@ class RunLog:
         self.finished = True
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type is not None and not self.finished:
-            self.event("run_exception")
-            traceback.print_exception(exc_type, exc, tb, file=self.file)
-            self.finish(130 if issubclass(exc_type, KeyboardInterrupt) else 1)
-        sys.stdout, sys.stderr = self.stdout, self.stderr
-        self.file.close()
+        try:
+            if exc_type is not None and not self.finished:
+                self.event("run_exception")
+                traceback.print_exception(exc_type, exc, tb, file=self.file)
+                self.finish(130 if issubclass(exc_type, KeyboardInterrupt) else 1)
+            sys.stdout, sys.stderr = self.stdout, self.stderr
+            self.file.close()
+        finally:
+            if self.previous_started_at is None:
+                os.environ.pop("MAS_RUN_STARTED_AT", None)
+            else:
+                os.environ["MAS_RUN_STARTED_AT"] = self.previous_started_at

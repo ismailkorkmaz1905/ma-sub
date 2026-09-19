@@ -4,9 +4,8 @@ from pathlib import Path
 
 from .engine.episode_archive import file_record
 from .engine.part_scope import get_part, validate_file_record, validate_part_plan
-from .hashing import sha256_file
 from .notify import enqueue_notification
-from .reliability import atomic_json, digest, read_json
+from .reliability import atomic_json, digest, file_digest as sha256_file, read_json
 from .state import load, save, set_stage
 
 

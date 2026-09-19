@@ -6,8 +6,7 @@ from mas import pipeline, partial_delivery
 from mas.engine import part_audio
 from mas.engine.episode_archive import file_record
 from mas.engine.part_scope import build_part_plan
-from mas.hashing import sha256_file
-from mas.reliability import atomic_json, digest
+from mas.reliability import atomic_json, digest, file_digest as sha256_file
 
 
 @pytest.fixture
@@ -39,6 +38,39 @@ def test_legacy_status_unchanged(tmp_path, monkeypatch, capsys):
     state = {"episode": 14, "stages": {"audio": {"status": "pass"}}}
     atomic_json(tmp_path / "work/state.json", state)
     assert status_json(capsys) == state
+
+
+def test_simple_status_shows_only_operator_paths(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pipeline, "episode_dir", lambda episode: tmp_path)
+    atomic_json(tmp_path / "work/state.json", {
+        "episode": 14,
+        "stages": {"id_return": {"status": "blocked", "updated_at": "2026-09-19T12:00:00+00:00"}},
+    })
+    source = tmp_path / "source/episode.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    pack = tmp_path / "translation_input/Muhtemel Ask 14.Bolum_ID_TRANSLATION_PACK.zip"
+    pack.parent.mkdir(parents=True)
+    pack.write_bytes(b"pack")
+
+    assert pipeline.status_summary(14) == 0
+
+    output = capsys.readouterr().out
+    assert "Durum: id_return (bekliyor)" in output
+    assert "Kaynak: source" in output and "episode.mp4" in output
+    assert "ChatGPT'ye ver: translation_input" in output
+    assert "Dönüşü koy: translation_output" in output
+    assert "--json" in output
+
+
+def test_simple_status_does_not_create_empty_directories(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "episode"
+    monkeypatch.setattr(pipeline, "episode_dir", lambda episode: root)
+
+    assert pipeline.status_summary(14) == 0
+
+    assert not root.exists()
+    assert "başlamadı" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

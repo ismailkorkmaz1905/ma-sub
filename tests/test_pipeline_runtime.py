@@ -223,6 +223,7 @@ def test_ep15_semantic_mode_never_enters_forced_ctc(tmp_path, monkeypatch):
 
     def audio(source, prepare, **kwargs):
         path = prepare / "audio.flac"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"audio")
         return SimpleNamespace(audio_path=path, resumed=False)
 
@@ -526,6 +527,9 @@ def test_work_marker_and_shell_watchdog_are_separate_from_log(tmp_path, monkeypa
     shell = (pipeline.ROOT / "runpod/run-episode.sh").read_text()
     assert 'stat -c %Y "$MAS_PROGRESS_FILE"' in shell
     assert 'stat -c %Y "$LOG_PATH"' not in shell
+    assert 'tee -a' not in shell
+    assert '.Bolum/.mas"' in shell
+    assert '$RUNTIME_DIR/progress.json' in shell
 
 
 def test_json_reader_retries_sharing_violation_but_not_invalid_json(tmp_path, monkeypatch):

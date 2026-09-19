@@ -2,7 +2,7 @@
 
 This repository is the sole maintained Muhtemel Ask Subtitles production project. There is no separate V1 or V2 product. Public code belongs under `src/mas/`, configuration under `config/`, tests under `tests/`, and operator commands under `./mas`. Names containing `v2` inside legacy schemas or persisted artifact contracts are compatibility identifiers, not another product line.
 
-The system downloads one episode source, extracts audio, performs GPU-only Turkish ASR and acoustic alignment, creates exact Turkish correction and Indonesian translation handoff packs, validates returned packs, emits strict subtitle artifacts, verifies Google Drive publication by byte count and SHA-256 readback, writes per-run local logs, sends Gmail status notifications when configured, and requests RunPod shutdown. Notebooks and the imported source snapshot under `legacy/` are read-only reference material and are never production entrypoints.
+The system downloads one episode source, extracts audio, performs GPU-only Turkish ASR and acoustic alignment, creates exact Turkish correction and Indonesian translation handoff packs, validates returned packs, emits strict subtitle artifacts, verifies Google Drive publication by byte count and SHA-256 readback, keeps one current local run log, sends Gmail status notifications when configured, and requests RunPod shutdown. Notebooks and the imported source snapshot under `legacy/` are read-only reference material and are never production entrypoints.
 
 Start by reading `README.md`, `docs/CODEX_HANDOFF.md`, `docs/EP12_ACCEPTANCE.md`, `docs/ARCHITECTURE_DECISIONS.md`, and `docs/ASTRA_HANDOFF.md`. Use `docs/ASTRA_REVIEW_PROMPT.md` only for the independent Astra review.
 

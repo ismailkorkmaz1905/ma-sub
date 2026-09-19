@@ -8,8 +8,7 @@ import pytest
 from mas import delivery_first as df, partial_delivery as pd, runpod_controller as rc
 from mas.engine import delivery_align as da, delivery_coverage as dc, id_translation as it
 from mas.engine import partial_finalize as pf, partial_encode as pe, part_scope as ps
-from mas.hashing import sha256_file
-from mas.reliability import atomic_json, digest
+from mas.reliability import atomic_json, digest, file_digest as sha256_file
 from test_part_audio import synthetic_parents
 
 

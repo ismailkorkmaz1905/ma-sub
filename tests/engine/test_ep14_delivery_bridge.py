@@ -12,8 +12,7 @@ from mas import delivery_first as df, partial_delivery as pd, full_delivery as f
 from mas import pipeline, remote, runpod_controller as rc
 from mas.engine import burned_mp4 as burn, part_audio as pa, id_translation as it
 from mas.engine import partial_finalize as pf
-from mas.hashing import sha256_file
-from mas.reliability import atomic_json, digest
+from mas.reliability import atomic_json, digest, file_digest as sha256_file
 
 
 def release(root, part_id):

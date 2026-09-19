@@ -12,9 +12,8 @@ EPISODE="$1"
 MAX_RUNTIME_SECONDS="${MAS_MAX_RUNTIME_SECONDS:-14400}"
 IDLE_TIMEOUT_SECONDS="${MAS_IDLE_TIMEOUT_SECONDS:-1800}"
 CHECK_SECONDS="${MAS_WATCHDOG_CHECK_SECONDS:-15}"
-LOG_DIR="$ROOT/EPISODES/Muhtemel Ask ${EPISODE}.Bolum/logs"
-LOG_PATH="$LOG_DIR/runpod-session.log"
-export MAS_PROGRESS_FILE="$LOG_DIR/useful-progress.json"
+RUNTIME_DIR="$ROOT/EPISODES/Muhtemel Ask ${EPISODE}.Bolum/.mas"
+export MAS_PROGRESS_FILE="$RUNTIME_DIR/progress.json"
 
 for value in "$MAX_RUNTIME_SECONDS" "$IDLE_TIMEOUT_SECONDS" "$CHECK_SECONDS"; do
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
@@ -23,9 +22,8 @@ for value in "$MAX_RUNTIME_SECONDS" "$IDLE_TIMEOUT_SECONDS" "$CHECK_SECONDS"; do
   }
 done
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$RUNTIME_DIR"
 cd "$ROOT"
-touch "$LOG_PATH"
 touch "$MAS_PROGRESS_FILE"
 
 pipeline_pid=""
@@ -48,9 +46,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-bash "$ROOT/runpod/preflight.sh" 2>&1 | tee -a "$LOG_PATH"
+bash "$ROOT/runpod/preflight.sh"
 
-setsid env PYTHONUNBUFFERED=1 stdbuf -oL -eL ./mas run "$@" --local > >(tee -a "$LOG_PATH") 2>&1 &
+setsid env PYTHONUNBUFFERED=1 stdbuf -oL -eL ./mas run "$@" --local &
 pipeline_pid=$!
 started="$(date +%s)"
 stop_reason=""
@@ -70,7 +68,7 @@ while kill -0 "$pipeline_pid" 2>/dev/null; do
 done
 
 if [[ -n "$stop_reason" ]]; then
-  echo "WATCHDOG: $stop_reason" | tee -a "$LOG_PATH" >&2
+  echo "WATCHDOG: $stop_reason" >&2
   kill -TERM -- "-$pipeline_pid" 2>/dev/null || true
   for _ in {1..6}; do
     kill -0 "$pipeline_pid" 2>/dev/null || break

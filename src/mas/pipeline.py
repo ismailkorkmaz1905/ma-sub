@@ -11,9 +11,9 @@ from urllib.parse import urlparse
 import yaml
 
 from .config import ROOT, episode_dir
-from .hashing import sha256_file, sha256_json
 from .notify import enqueue_notification as notify
 from .progress import mark_work_progress
+from .reliability import digest as sha256_json, file_digest as sha256_file
 from .remote import upload_verified
 from .runpod import stop_current_pod
 from .source_discovery import discover_episode_source
@@ -121,14 +121,15 @@ def _requires_external_delivery():
     )
 
 
-def _paths(episode):
+def _paths(episode, *, create=False):
     root = episode_dir(episode)
     name = f"Muhtemel Ask {episode}.Bolum"
     dirs = {key: root / key for key in ("source", "prepare", "translation_input",
                                         "translation_output", "review", "final",
-                                        "emergency", "logs", "work")}
-    for directory in dirs.values():
-        directory.mkdir(parents=True, exist_ok=True)
+                                        "emergency", "work")}
+    if create:
+        dirs["source"].mkdir(parents=True, exist_ok=True)
+        dirs["work"].mkdir(parents=True, exist_ok=True)
     return root, name, dirs
 
 
@@ -1344,7 +1345,7 @@ def _deliver_semantic_report(
 def run(episode, source_url=None, fixture=False, stop_after=None, alignment_recovery=False):
     if fixture:
         return run_fixture(episode, stop_after=stop_after)
-    root, name, dirs = _paths(episode)
+    root, name, dirs = _paths(episode, create=True)
     state_path = dirs["work"] / "state.json"
     new_state = not state_path.is_file()
     state = load(state_path, episode)
@@ -1830,7 +1831,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
 
 
 def run_fixture(episode, stop_after=None):
-    _, _, dirs = _paths(episode)
+    _, _, dirs = _paths(episode, create=True)
     state_path = dirs["work"] / "fixture-state.json"
     state = load(state_path, episode)
     state["mode"] = "offline-fixture"
@@ -1844,6 +1845,70 @@ def run_fixture(episode, stop_after=None):
         set_stage(state_path, state, name, "pass", output=str(output), sha256=sha256_file(output))
         if stop_after == index:
             return 75
+    return 0
+
+
+def status_summary(episode):
+    root, _, dirs = _paths(episode)
+    state_path = dirs["work"] / "state.json"
+    if not state_path.is_file():
+        print(f"Bölüm {episode}\nDurum: başlamadı\nKomut: .\\mas.ps1 run {episode} --source-url 'URL'")
+        return 0
+
+    state = load(state_path, episode)
+    stage_name = "başlamadı"
+    stage_status = ""
+    stages = state.get("stages", {})
+    if stages:
+        stage_name, stage = max(
+            stages.items(), key=lambda item: item[1].get("updated_at", "")
+        )
+        stage_status = {
+            "pass": "tamam",
+            "blocked": "bekliyor",
+            "running": "çalışıyor",
+            "failed": "hata",
+        }.get(stage.get("status"), "bilinmiyor")
+
+    pending = None
+    packs = list(dirs["translation_input"].glob("*.zip"))
+    packs += list((root / "parts").glob("part-*/translation_input/*.zip"))
+    suffixes = {
+        "_SEMANTIC_ALIGNMENT_PACK.zip": "_SEMANTIC_ALIGNMENT_RETURN.zip",
+        "_TR_CORRECTION_PACK.zip": "_TR_TEXT_CORRECTED.zip",
+        "_ID_TRANSLATION_PACK.zip": "_ID_TRANSLATED.zip",
+    }
+    for pack in sorted(packs, key=lambda path: path.stat().st_mtime, reverse=True):
+        for pack_suffix, return_suffix in suffixes.items():
+            if not pack.name.endswith(pack_suffix):
+                continue
+            returned = pack.parent.parent / "translation_output" / (
+                pack.name[:-len(pack_suffix)] + return_suffix
+            )
+            if not returned.is_file():
+                pending = pack, returned
+            break
+        if pending:
+            break
+
+    videos = []
+    if dirs["source"].is_dir():
+        videos = sorted(
+            path for path in dirs["source"].iterdir()
+            if path.is_file() and path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
+        )
+    outputs = sorted(dirs["final"].rglob("*.mp4")) if dirs["final"].is_dir() else []
+
+    print(f"Bölüm {episode}")
+    print(f"Durum: {stage_name}" + (f" ({stage_status})" if stage_status else ""))
+    print(f"Kaynak: {videos[0].relative_to(root) if videos else 'henüz yok'}")
+    if pending:
+        print(f"ChatGPT'ye ver: {pending[0].relative_to(root)}")
+        print(f"Dönüşü koy: {pending[1].relative_to(root)}")
+    else:
+        print("Handoff: bekleyen dosya yok")
+    print(f"Çıktı: {outputs[-1].relative_to(root) if outputs else 'henüz yok'}")
+    print(f"Detay: .\\mas.ps1 status {episode} --json")
     return 0
 
 

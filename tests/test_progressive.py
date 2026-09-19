@@ -9,8 +9,7 @@ from mas import pipeline, progressive, partial_delivery
 from mas.delivery import NEXT_PART, READY_FOR_PARTIAL_ENCODE, WAIT_PART_RETURN
 from mas.engine import part_audio, partial_finalize
 from mas.engine.part_scope import build_part_plan, project_part_vad
-from mas.hashing import sha256_file
-from mas.reliability import atomic_json, digest, read_json
+from mas.reliability import atomic_json, digest, file_digest as sha256_file, read_json
 
 
 @pytest.fixture

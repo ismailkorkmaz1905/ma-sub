@@ -906,14 +906,10 @@ def test_invalid_local_return_fails_before_provider_access(monkeypatch, tmp_path
         runpod_controller.run_remote_episode(11)
 
 
-def test_episode_budget_anchors_existing_logs_across_retries(monkeypatch, tmp_path):
+def test_episode_budget_anchors_run_start_across_retries(monkeypatch, tmp_path):
     monkeypatch.delenv("MAS_EPISODE_BUDGET_SECONDS", raising=False)
-    logs = tmp_path / "logs"
-    logs.mkdir()
     first = datetime.now(timezone.utc) - timedelta(hours=7)
-    (logs / "run-original.log").write_text(json.dumps({
-        "event": "run_started", "episode": 11, "timestamp": first.isoformat()
-    }) + "\n", encoding="utf-8")
+    monkeypatch.setenv("MAS_RUN_STARTED_AT", first.isoformat())
     for _ in range(2):
         with pytest.raises(BudgetExceeded):
             runpod_controller._episode_budget(tmp_path, 11)

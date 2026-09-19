@@ -5,9 +5,8 @@ from pathlib import Path
 from .delivery import NEXT_PART, safe_relative
 from .engine.episode_archive import file_record
 from .engine.part_audio import _deadline, _remaining, _verify_file
-from .hashing import sha256_file
 from .notify import enqueue_notification
-from .reliability import atomic_json, digest, read_json
+from .reliability import atomic_json, digest, file_digest as sha256_file, read_json
 from .remote import upload_verified
 from .source_discovery import CHANNEL_VIDEOS_URL, is_exact_episode_title
 

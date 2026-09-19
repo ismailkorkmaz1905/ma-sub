@@ -4,8 +4,7 @@ import pytest
 
 from mas import local_encode
 from mas.engine.episode_archive import file_record
-from mas.hashing import sha256_file
-from mas.reliability import atomic_json, digest
+from mas.reliability import atomic_json, digest, file_digest as sha256_file
 
 
 def subtitle_export(root):

@@ -12,7 +12,7 @@ import pytest
 
 from mas.audio_review_ui import AudioReviewStore, AudioReviewUIError, make_handler
 from mas.engine.tr_correction import create_tr_correction_output, create_tr_correction_pack
-from mas.hashing import sha256_json
+from mas.reliability import digest as sha256_json
 
 
 def _wav(duration_ms):

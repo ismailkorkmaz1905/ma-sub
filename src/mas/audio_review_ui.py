@@ -16,7 +16,7 @@ from .engine.tr_correction import (
     read_tr_correction_pack,
     validate_tr_correction_output,
 )
-from .hashing import sha256_file, sha256_json
+from .reliability import digest as sha256_json, file_digest as sha256_file
 
 
 class AudioReviewUIError(RuntimeError):

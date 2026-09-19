@@ -1,5 +1,6 @@
 import json
 import io
+import os
 from pathlib import Path
 import threading
 
@@ -26,9 +27,7 @@ def test_tee_reconfigures_narrow_stream_for_turkish_output():
 
 
 def _latest(root):
-    logs = root / "13" / "logs"
-    name = (logs / "LATEST").read_text(encoding="utf-8").strip()
-    return logs / name
+    return root / "13" / ".mas" / "run.log"
 
 
 def test_run_log_captures_output_metadata_and_redacts_source_url(tmp_path, monkeypatch):
@@ -73,8 +72,7 @@ def test_failed_run_records_traceback_and_operator_summary(tmp_path, monkeypatch
     assert args[:2] == (13, "çalıştırma başarısız")
     assert "Sonuç: çalıştırma tamamlanamadı." in args[2]
     assert "ValueError: broken stage" in args[2]
-    assert str(_latest(tmp_path).parent / "LATEST") in args[2]
-    assert str(_latest(tmp_path)) not in args[2]
+    assert str(_latest(tmp_path)) in args[2]
     assert "Sonraki adım:" in args[2]
     assert kwargs == {"root": tmp_path / "13", "kind": "terminal"}
 
@@ -138,7 +136,27 @@ def test_non_run_command_does_not_create_episode_log(tmp_path, monkeypatch):
     assert not list(Path(tmp_path).rglob("*.log"))
 
 
-def test_unchanged_failed_run_preserves_terminal_submission_across_new_logs(tmp_path, monkeypatch):
+def test_help_keeps_the_operator_surface_small(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--help"])
+
+    output = capsys.readouterr().out
+    assert stopped.value.code == 0
+    assert "{run,status,doctor,test}" in output
+    assert "subtitle-pilot" not in output
+    assert "plan-alignment-recovery" not in output
+
+
+def test_remote_worker_uses_only_the_supervisor_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(runlog, "episode_dir", lambda episode: tmp_path / str(episode))
+    monkeypatch.setenv("MAS_REMOTE_JOB_TOKEN", "worker-job-token")
+    monkeypatch.setattr(cli, "run", lambda *args: 0)
+
+    assert cli.main(["run", "13", "--local"]) == 0
+    assert not list(Path(tmp_path).rglob("*.log"))
+
+
+def test_repeated_failed_run_reuses_one_log_and_preserves_terminal_submission(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(runlog, "episode_dir", lambda episode: tmp_path / str(episode))
     monkeypatch.setattr(cli, "run", lambda *args: (_ for _ in ()).throw(ValueError("broken stage")))
@@ -154,11 +172,23 @@ def test_unchanged_failed_run_preserves_terminal_submission_across_new_logs(tmp_
     first_receipt = record.read_bytes()
 
     assert cli.main(["run", "13", "--local"]) == 1
-    assert _latest(tmp_path) != first_log
+    assert _latest(tmp_path) == first_log
+    assert list((tmp_path / "13").rglob("*.log")) == [first_log]
     assert record.read_bytes() == first_receipt
     assert not (outbox / "history").exists()
     assert notify.drain_outbox(tmp_path / "13") == []
     assert len(sent) == 1
+
+
+def test_run_start_is_available_only_inside_run(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.delenv("MAS_RUN_STARTED_AT", raising=False)
+    monkeypatch.setattr(runlog, "episode_dir", lambda episode: tmp_path / str(episode))
+    monkeypatch.setattr(cli, "run", lambda *args: seen.append(os.environ["MAS_RUN_STARTED_AT"]) or 0)
+
+    assert cli.main(["run", "13", "--local"]) == 0
+    assert seen and seen[0].endswith("+00:00")
+    assert "MAS_RUN_STARTED_AT" not in os.environ
 
 
 def test_notify_test_remains_explicit_direct_email(monkeypatch):

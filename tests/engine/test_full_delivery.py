@@ -87,7 +87,7 @@ def test_full_delivery_waits_for_first_part_readback(staged_episode, monkeypatch
 
 def test_upload_retry_reuses_assembled_video_and_never_passes_bad_hash(staged_episode, monkeypatch):
     from mas import remote
-    from mas.hashing import sha256_file
+    from mas.reliability import file_digest as sha256_file
     root, _ = staged_episode
     calls = {'assemble': 0, 'upload': 0}
     def assemble(parts, output, **kwargs):

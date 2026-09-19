@@ -208,6 +208,15 @@ def test_log_reads_bounded_chunks(tmp_path):
         read_log(tmp_path, 13, COMMIT, 0, 65537)
 
 
+def test_runtime_lock_is_transient_and_log_stays_with_its_job(tmp_path):
+    from mas import remote_job
+    identity = remote_job._identity(13, COMMIT)
+    paths = remote_job._paths(tmp_path, 13, identity["token"])
+
+    assert not paths["lock"].is_relative_to(paths["episode"])
+    assert paths["log"] == paths["job"] / "run.log"
+
+
 def test_poll_returns_bound_status_log_and_checkpoint_snapshot(tmp_path):
     from mas import remote_job
     identity = remote_job._identity(13, COMMIT)

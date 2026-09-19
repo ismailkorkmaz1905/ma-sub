@@ -58,14 +58,15 @@ def _paths(root, episode, token=None):
     episode_root = (Path(root).resolve() / "EPISODES" / f"Muhtemel Ask {episode}.Bolum").resolve()
     jobs_root = episode_root / "work" / "remote-jobs"
     job_root = jobs_root / token if token else jobs_root
+    lock_name = hashlib.sha256(str(episode_root).encode()).hexdigest()[:20]
     return {
         "episode": episode_root,
         "job": job_root,
         "claim": episode_root / "work" / "remote-job.claim.json",
-        "lock": episode_root / "work" / "remote-job.lock",
+        "lock": Path(tempfile.gettempdir()) / "mas-locks" / f"remote-job-{lock_name}.lock",
         "request": job_root / "request.json",
         "state": job_root / "state.json",
-        "log": episode_root / "logs" / (f"remote-job-{token}.log" if token else "remote-job.log"),
+        "log": job_root / "run.log",
     }
 
 
@@ -209,7 +210,7 @@ def status_job(root, episode, commit, input_sha256=None):
         "exit_code": state.get("exit_code") if status == "EXITED" else None,
         "state_path": str(paths["state"]),
         "log_path": str(paths["log"]),
-        "progress": _read_json(paths["episode"] / "logs" / "useful-progress.json"),
+        "progress": _read_json(paths["episode"] / ".mas" / "progress.json"),
         "started_at": state.get("started_at") if state else None,
         "deadline_at": state.get("deadline_at") if state else None,
         "ended_at": state.get("ended_at") if state else None,

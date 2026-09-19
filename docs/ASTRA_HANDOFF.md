@@ -1,3 +1,17 @@
+## EP15+ semantic alignment review boundary - 19 September 2026
+
+Review `semantic-block-v1` as a separate release policy, never as strict CTC.
+The word timeline is timing authority; the ChatGPT Pro ZIP return is linguistic
+authority only; Python is safety authority. EP15+ defaults to semantic, while
+existing EP14 and older state remains explicit legacy strict state. Exit 29 must
+release the GPU and resume locally. First-hour and whole-episode selections must
+bind the same canonical final-block hash. Forced alignment and commit
+`b1f9c857ebed6aea2820c27a8af4d0ef887b4c12` remain present for explicit
+`strict-ctc-v1`. See [architecture](SEMANTIC_ALIGNMENT_EP15.md) and
+[real EP14 offline replay](EP14_SEMANTIC_REPLAY_2026-09-19.md). The real replay
+passed complete word ownership but its development-only non-linguistic return
+did not pass release QA; do not relabel it as a production semantic PASS.
+
 ## Alignment follow-up - 19 September 2026
 
 The independently reviewed B1-B4 patch is now applied: noncontiguous conflict

@@ -1,5 +1,17 @@
 # Muhtemel Ask Subtitles
 
+## EP15+ semantic alignment policy
+
+New Episode 15 and later runs default to `semantic-block-v1`. The immutable ASR
+word timeline owns timing, ChatGPT Pro file handoff owns difficult Turkish text
+and word-span decisions, and Python owns validation, timestamp derivation and
+release QA. GPT returns word IDs only and cannot return timestamps. Forced CTC
+remains available only through the explicit `strict-ctc-v1` run policy. First-hour
+and whole-episode publication select from one canonical episode-level semantic
+block set; they do not select different alignment policies. See the
+[EP15 semantic architecture](docs/SEMANTIC_ALIGNMENT_EP15.md) and the
+[real EP14 offline replay](docs/EP14_SEMANTIC_REPLAY_2026-09-19.md).
+
 Current EP14 launch repair: [18 September 2026 repair and operator checks](docs/EP14_READY_2026-09-18.md).
 This supersedes older controller cleanup, all-tail publication and doctor guidance below.
 First-part Drive readback is followed by verified local tail encoding and one full MP4.
@@ -24,8 +36,8 @@ Current outcome and next-run checklist: [simple Episode 13 handoff](docs/SON_DUR
 Muhtemel Ask Subtitles is the single production pipeline for turning one episode source into strict Turkish and Indonesian subtitle deliverables.
 
 ```text
-source -> audio -> Turkish ASR -> acoustic review -> correction handoff
-       -> alignment -> Indonesian handoff -> subtitle QA -> Drive verification
+source -> audio -> Turkish ASR -> immutable word timeline -> semantic handoff
+       -> word-ID validation -> Indonesian handoff -> subtitle QA -> Drive verification
        -> notification -> RunPod shutdown request
 ```
 

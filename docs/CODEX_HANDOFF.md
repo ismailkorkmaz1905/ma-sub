@@ -1,3 +1,18 @@
+## EP15+ semantic alignment - 19 September 2026
+
+New EP15+ states default to `semantic-block-v1`; EP14 and older states are not
+silently migrated. Word timing is immutable `semantic_word_span_v1` evidence,
+ChatGPT Pro is a human-mediated linguistic/word-span handoff, and Python rejects
+timestamps or unowned word IDs before deriving display times. Exit code 29 is
+`SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED`; the controller collects its single ZIP,
+verifies Pod shutdown, and resumes semantic and ID-return work locally without
+reopening a semantic GPU. First-hour and whole-episode delivery use the same
+canonical `final_blocks.jsonl`. Forced CTC remains intact as explicit
+`strict-ctc-v1`, not an automatic semantic fallback. Read
+[the architecture](SEMANTIC_ALIGNMENT_EP15.md) and
+[EP14 replay evidence](EP14_SEMANTIC_REPLAY_2026-09-19.md). The replay used real
+EP14 artifacts read-only and made no RunPod, Drive, Gmail or model-download call.
+
 ## Alignment follow-up - 19 September 2026
 
 The independently reviewed B1-B4 patch is now applied: noncontiguous conflict

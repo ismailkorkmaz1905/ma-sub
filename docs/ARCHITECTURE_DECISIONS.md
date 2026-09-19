@@ -139,6 +139,21 @@ yet demonstrated here as a complete transitive, hash-pinned dependency lock for
 every Python package, native library, model and base-image component. Immutable
 image identity and complete transitive hash locking remain open release risks.
 
+## ADR-018: Semantic block alignment is the default EP15+ release policy
+
+New Episode 15 and later run contracts default to `semantic-block-v1`, independent
+of whether delivery scope is `first-hour` or `whole-episode`. An immutable,
+hash-bound word timeline is the only timing authority. ChatGPT Pro receives a
+human-mediated ZIP and may choose corrected Turkish text plus owned
+`first_word_id`/`last_word_id` spans, but it may not supply timestamps. Python is
+the safety authority: it validates pack identity and ownership, rejects timestamp
+fields, derives display times, locks block UIDs, and applies coverage, overlap,
+speaker, scene, gap, subtitle and translation QA. Semantic PASS is explicitly not
+strict CTC PASS. Existing forced-alignment code remains available only through
+explicit `strict-ctc-v1` or diagnostic use. Exit 29 releases GPU capacity before
+manual handoff wait; semantic return and ID handoff resume locally. Existing EP14
+and older states are never silently migrated.
+
 ## Provider references (historical)
 
 - [RunPod Stop a Pod REST API](https://docs.runpod.io/api-reference/pods/POST/pods/podId/stop)

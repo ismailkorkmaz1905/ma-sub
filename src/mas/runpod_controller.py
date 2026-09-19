@@ -2346,9 +2346,12 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
     offset = 0
     downloaded = {}
     while True:
+        poll_idle_timeout = 180 if alignment_recovery else 60
+        poll_total_timeout = 240 if alignment_recovery else 120
         output = _network_retry(
             ssh + [prefix + "poll" + common + f" --offset {offset} --max-bytes 65536 --deadline-seconds 60"],
-            capture=True, attempts=3, total_timeout=120, budget=budget)
+            capture=True, attempts=3, idle_timeout=poll_idle_timeout,
+            total_timeout=poll_total_timeout, budget=budget)
         poll = json.loads(output)
         status = poll["status"]
         expected_identity = {"episode": episode, "commit": commit, "input_sha256": input_sha,

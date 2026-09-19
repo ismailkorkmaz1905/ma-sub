@@ -65,6 +65,20 @@ def test_lost_start_response_retries_idempotent_start_then_only_monitors(monkeyp
     assert "; exec env PYTHONPATH=src " in starts[0]
 
 
+def test_alignment_recovery_uses_the_extended_bounded_poll_watchdog(monkeypatch, tmp_path):
+    calls = []
+    def response(command, **kwargs):
+        calls.append((command[-1], kwargs))
+        return _remote_response(command)
+    monkeypatch.setattr(controller, "_network_retry", response)
+    assert controller._monitor_remote_job(
+        ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
+        "https://example.invalid/episode", 500, Budget(), alignment_recovery=True) == 0
+    poll = next(kwargs for command, kwargs in calls if " mas.remote_job poll " in command)
+    assert poll["idle_timeout"] == 180
+    assert poll["total_timeout"] == 240
+
+
 def test_resume_only_never_sends_start(monkeypatch, tmp_path):
     request = {"commit": "a" * 40, "episode": 13, "input_sha256": "b" * 64}
     atomic_json(tmp_path / "work" / "remote-job-request.json",

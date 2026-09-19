@@ -1,13 +1,5 @@
---extra-index-url https://download.pytorch.org/whl/cu128
-
 PyYAML==6.0.2
-openpyxl==3.1.5
 pytest==8.3.5
-torch==2.8.0
-torchvision==0.23.0
-torchaudio==2.8.0
-torchcodec==0.6.0
 faster-whisper==1.2.1
 ctranslate2==4.8.1
-whisperx==3.8.6
 yt-dlp[default]==2026.8.19

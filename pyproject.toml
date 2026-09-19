@@ -22,11 +22,3 @@ include = ["mas", "mas.*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers --strict-config"
-markers = [
-  "gpu: requires an NVIDIA CUDA GPU and downloaded models",
-  "integration: multi-stage deterministic pipeline integration",
-]
-
-[tool.coverage.run]
-branch = true
-source = ["src"]

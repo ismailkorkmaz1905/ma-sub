@@ -1,5 +1,0 @@
-# Optional pilot dependencies; existing strict runtime stays unchanged.
--r requirements.lock
-stable-ts==2.19.1
-openai-whisper==20250625
-pyannote.audio==4.0.0

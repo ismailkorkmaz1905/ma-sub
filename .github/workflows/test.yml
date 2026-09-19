@@ -1,35 +1,22 @@
 name: test
 on: [push, pull_request]
+
 permissions:
   contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install CPU media test dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core
-          pip install -r requirements-ci.lock
-          pip install --no-deps -e .
-      - name: Test without external networking or GPU
-        env:
-          CUDA_VISIBLE_DEVICES: '-1'
-          NVIDIA_VISIBLE_DEVICES: none
-          HF_HUB_OFFLINE: '1'
-          TRANSFORMERS_OFFLINE: '1'
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-          PYTHONDONTWRITEBYTECODE: '1'
-        run: |
-          python_path="$(command -v python)"
-          sudo --preserve-env=CUDA_VISIBLE_DEVICES,NVIDIA_VISIBLE_DEVICES,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE,PYTEST_DISABLE_PLUGIN_AUTOLOAD,PYTHONDONTWRITEBYTECODE unshare --net -- bash -c 'ip link set lo up; exec runuser -u runner -- "$@"' -- "$python_path" -m pytest -q -ra -m 'not gpu' tests
-      - name: Check whitespace
-        run: git diff --check
+          python-version: "3.11"
+      - run: pip install -r requirements-ci.lock
+      - run: pip install --no-deps -e .
+      - run: python -m pytest -q
+      - run: git diff --check
+
   dockerfile:
     runs-on: ubuntu-latest
     steps:

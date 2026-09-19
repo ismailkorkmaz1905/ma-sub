@@ -1,62 +1,81 @@
 # Muhtemel Ask Subtitles
 
-Bir bölümü başlatmak veya kaldığı yerden sürdürmek için tek komut kullanılır:
+Tek komut, tek çeviri paketi, dört klasör.
 
 ```powershell
-.\mas.ps1 run 15 --source-url 'SOURCE_URL'
+.\mas.ps1 run 15 --source-url "VIDEO_URL"
 ```
 
-Sonraki çalıştırmalarda URL gerekmez:
+Elinde video varsa:
+
+```powershell
+.\mas.ps1 run 15 --source "D:\video.mp4"
+```
+
+Program GPU ile Türkçe ASR yapar ve burada durur:
+
+```text
+handoff/Muhtemel Ask 15.Bolum_TRANSLATION_PACK.zip
+```
+
+ZIP'i ChatGPT'ye ver. ZIP'in içindeki `INSTRUCTIONS.md` dönüş biçimini anlatır.
+Dönen dosyayı şu adla aynı klasöre koy:
+
+```text
+handoff/Muhtemel Ask 15.Bolum_TRANSLATED.zip
+```
+
+Sonra aynı komutu tekrar çalıştır:
 
 ```powershell
 .\mas.ps1 run 15
 ```
 
-Durumu görmek için:
+Türkçe SRT, Endonezce SRT ve Endonezce gömülü MP4 `output/` içine yazılır.
 
-```powershell
-.\mas.ps1 status 15
-```
-
-## Bölüm klasörü
+## Klasörler
 
 ```text
-source/    değişmeyen kaynak video
-handoff/   ChatGPT'ye verilen ve geri alınan ZIP dosyaları
-output/    altyazı, video ve teslim makbuzları
-work/      otomatik ara dosyalar
-.mas/      tek güncel çalışma logu
-parts/     yalnız parçalı teslim gerekirse oluşur
+source/   değişmeyen kaynak video
+work/     state.json, ASR blokları ve doğrulanmış çeviri
+handoff/  ChatGPT'ye giden ve dönen iki ZIP
+output/   iki SRT, MP4 ve varsa Drive makbuzu
 ```
 
-Normal kullanımda yalnız `handoff/` ve `output/` ile ilgilenilir. Her çalıştırma
-`.mas/run.log` dosyasını yeniler; tarih damgalı log yığını yoktur.
+Tarih damgalı log, mail kuyruğu, review ağacı, partial/whole ağacı ve eski bölüm
+özel durumları yoktur.
 
 ## Akış
 
 ```text
-kaynak -> GPU Türkçe ASR -> semantik zamanlama -> Endonezce çeviri
-       -> altyazı kontrolü -> MP4 -> Drive byte ve SHA-256 doğrulaması
+video -> faster-whisper GPU ASR -> tek ChatGPT ZIP'i
+      -> kimlik/sıra doğrulaması -> TR + ID SRT -> gömülü MP4
 ```
 
-Bir ZIP dönüşü gerektiğinde komut durur, tam dosya yolunu gösterir ve RunPod'u
-güvenli biçimde kapatır. Dosya yerine konduktan sonra aynı `run` komutu sürdürür.
+ChatGPT yalnız Türkçe ve Endonezce metni değiştirir. Blok kimliği, sırası ve
+zamanı Python'da sabit kalır. Eski veya eksik dönüş reddedilir. Kaynak videonun
+SHA-256 değeri değişirse çalışma durur.
 
-## Değişmez kurallar
-
-- Kaynak SHA-256 kaydından sonra değişmez.
-- GPU aşamaları CPU'ya düşmez.
-- Metin, zaman ve kimlik alanlarının yetkileri birbirinden ayrıdır.
-- Drive teslimi ancak byte sayısı ve SHA-256 readback eşleşince tamamlanır.
-- Test veya kod düzenleme ücretli RunPod çalıştırma izni değildir.
-
-Kod `src/mas/`, ayarlar `config/`, testler `tests/` altındadır.
+Drive teslimi istenirse `MAS_DRIVE_REMOTE` ayarlanır. Program MP4'ü yükler,
+yeniden indirir ve byte sayısı ile SHA-256 eşleşmeden `DONE_DRIVE` yazmaz.
+Değişken yoksa sonuç `DONE_LOCAL` olur.
 
 ```powershell
-.\mas.ps1 doctor --controller
-& .\.venv\Scripts\python.exe -m pytest -q
-git diff --check
+.\mas.ps1 status 15
+.\mas.ps1 doctor
+.\mas.ps1 test
 ```
 
-Teknik ayrıntı gerektiğinde [mimari kararlar](docs/ARCHITECTURE_DECISIONS.md) ve
-[semantik zamanlama sözleşmesi](docs/SEMANTIC_ALIGNMENT.md) okunur.
+`--subtitles-only` MP4 üretmeden yalnız iki SRT'yi tamamlar.
+
+## Kurulum
+
+Python 3.11, FFmpeg ve CUDA destekli NVIDIA GPU gerekir.
+
+```powershell
+uv venv --python 3.11 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.lock
+```
+
+RunPod veya başka bir GPU makinesi kullanılabilir; depo Pod satın almaz ya da
+controller çalıştırmaz. GPU işi bitip çeviri ZIP'i beklendiğinde Pod'u kapat.

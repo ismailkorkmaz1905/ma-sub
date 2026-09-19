@@ -1,12 +1,9 @@
 .git
 .venv
-.testvenv
 __pycache__
 .pytest_cache
-var
 EPISODES
-legacy
+models
 *.pyc
 *.pyo
 *.log
-bootstrap

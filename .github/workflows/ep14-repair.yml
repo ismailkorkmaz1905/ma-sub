@@ -1,9 +1,9 @@
-name: Qualify EP14 recovery repair
+name: Qualify and apply alignment B1-B4 fix
 on:
   push:
     branches: [main]
     paths:
-      - '.audit-stage/ep14-closure-*.b64'
+      - '.audit-stage/ep14-alignment-fix.b64'
       - '.github/workflows/ep14-repair.yml'
 permissions:
   contents: write
@@ -12,40 +12,58 @@ concurrency:
   cancel-in-progress: false
 jobs:
   qualify:
+    if: contains(github.event.head_commit.message, '[apply-alignment-b1-b4]')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Install CPU-only test dependencies
+        timeout-minutes: 2
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core
           pip install -r requirements-ci.lock
           pip install --no-deps -e .
-      - name: Apply exact locally tested patch
+      - name: Apply exact reviewed patch to its verified base
         run: |
           python - <<'PY'
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
-          encoded = ''.join(Path(f'.audit-stage/ep14-closure-{index}.b64').read_text().strip() for index in range(3))
-          compressed = base64.b64decode(encoded, validate=True)
-          assert hashlib.sha256(compressed).hexdigest() == '0878f70a49d75ebce64481bc07345d979e8554262eefedd74cae73507d57abea'
+          base = '574f611957c442502a33750c092d92222b5d017a'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == base
+          staged_paths = set(subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines())
+          assert staged_paths == {'.audit-stage/ep14-alignment-fix.b64', '.github/workflows/ep14-repair.yml'}
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          compressed = base64.b64decode(Path('.audit-stage/ep14-alignment-fix.b64').read_text().strip(), validate=True)
+          assert hashlib.sha256(compressed).hexdigest() == '8c78ad95968f3fea9a6558d22ac81e479b10bc288300e1af6409f3c9deeb9928'
           patch = lzma.decompress(compressed)
-          assert hashlib.sha256(patch).hexdigest() == '05554f7a3c91cc264ad3698a90f6e6dc95f0c0ae3ad6d56b70b261aa3827a075'
-          target = Path(os.environ['RUNNER_TEMP']) / 'ep14-reviewed.patch'
+          assert len(patch) == 43735
+          assert hashlib.sha256(patch).hexdigest() == '2ffc89820178f13eaab3d4fbf9f587ec9f0e8b6e326d74efa7adaa0381b20546'
+          target = Path(os.environ['RUNNER_TEMP']) / 'alignment-reviewed.patch'
           target.write_bytes(patch)
           subprocess.run(['git', 'apply', '--index', '--check', str(target)], check=True)
           subprocess.run(['git', 'apply', '--index', str(target)], check=True)
           subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
-          allowed = set(['docs/EP14_CODE_AUDIT_2026-09-19.md', 'src/mas/cli.py', 'src/mas/delivery_first.py', 'src/mas/engine/alignment_recovery.py', 'src/mas/engine/forced_align.py', 'src/mas/engine/id_translation.py', 'src/mas/engine/partial_finalize.py', 'src/mas/engine/subtitle_metadata.py', 'src/mas/pipeline.py', 'src/mas/retry_authorization.py', 'src/mas/runpod_controller.py', 'tests/engine/test_alignment_recovery_plan.py', 'tests/engine/test_delivery_first.py', 'tests/engine/test_ep14_metadata_regression.py', 'tests/test_controller_progressive.py', 'tests/test_pipeline_runtime.py', 'tests/test_retry_authorization.py'])
+          expected = {
+              'docs/ASTRA_HANDOFF.md': 'e02e67abe6a7b7da33a5c54b7f1eb0b96487695167c0bec0675b9f34d2cf3ef4',
+              'docs/CODEX_HANDOFF.md': '8b3d92425b7783328cfafa75f47f461005d441c047060b0cc008c1178a41a54c',
+              'docs/EP14_CODE_AUDIT_2026-09-19.md': 'c490b8bebbc812b0f0dc4a35740aff995b32f653e76269aa9e6f6d529a6d367b',
+              'src/mas/engine/alignment_recovery.py': 'c0444e5bf7152abc2125c539169c3181f2303c2537ca30e73cebb0449e509fbf',
+              'src/mas/engine/forced_align.py': 'e5811d8faafeded53ddf1c46c9c52b88d0573909d938436099c134792610c412',
+              'tests/engine/test_alignment_budget_uid_identity.py': '176e12f94acabedc149df4792323f626d968ad81c20d665e45fdb9eaea08d15d',
+              'tests/engine/test_alignment_joint_punctuation.py': '757de545166c1e5433da3d1ef9a394b09cb400c41defe02a6e034c071f922280',
+              'tests/engine/test_alignment_recovery_noncontiguous.py': '40f07c7994b75de4668231bc1fcacdc2f05ca38f4a296a92dec648b3a085e4dd',
+          }
           actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
-          assert actual == allowed, (actual, allowed)
-          proof = Path(os.environ['RUNNER_TEMP']) / 'ep14-qualification'
+          assert actual == set(expected), (actual, set(expected))
+          assert all(hashlib.sha256(Path(name).read_bytes()).hexdigest() == sha for name, sha in expected.items())
+          proof = Path(os.environ['RUNNER_TEMP']) / 'alignment-qualification'
           proof.mkdir()
           names = subprocess.check_output(['git', 'ls-files', '-z']).split(b'\0')
           before = {name.decode(): hashlib.sha256(Path(name.decode()).read_bytes()).hexdigest() for name in names if name}
@@ -63,15 +81,22 @@ jobs:
         run: |
           set -o pipefail
           python_path="$(command -v python)"
-          sudo --preserve-env=CUDA_VISIBLE_DEVICES,NVIDIA_VISIBLE_DEVICES,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE,PYTEST_DISABLE_PLUGIN_AUTOLOAD,PYTHONDONTWRITEBYTECODE unshare --net -- bash -c 'ip link set lo up; exec runuser -u runner -- "$@"' -- "$python_path" -m pytest -q -ra -m 'not gpu' tests | tee "$RUNNER_TEMP/ep14-qualification/pytest.log"
+          python --version | tee "$RUNNER_TEMP/alignment-qualification/python-version.txt"
+          isolated_pytest() {
+            sudo --preserve-env=CUDA_VISIBLE_DEVICES,NVIDIA_VISIBLE_DEVICES,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE,PYTEST_DISABLE_PLUGIN_AUTOLOAD,PYTHONDONTWRITEBYTECODE unshare --net -- bash -c 'ip link set lo up; exec runuser -u runner -- "$@"' -- "$python_path" -m pytest "$@"
+          }
+          isolated_pytest -q tests/engine/test_alignment_recovery_noncontiguous.py tests/engine/test_alignment_joint_punctuation.py tests/engine/test_alignment_budget_uid_identity.py | tee "$RUNNER_TEMP/alignment-qualification/targeted.log"
+          isolated_pytest -q -ra -m 'not gpu' tests --junitxml="$RUNNER_TEMP/alignment-qualification/pytest.xml" | tee "$RUNNER_TEMP/alignment-qualification/pytest.log"
           for script in runpod/*.sh; do bash -n "$script"; done
       - name: Commit only the unchanged qualified tree
         run: |
           python - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path
-          proof = Path(os.environ['RUNNER_TEMP']) / 'ep14-qualification'
+          proof = Path(os.environ['RUNNER_TEMP']) / 'alignment-qualification'
           before = json.loads((proof / 'before.json').read_text())
+          names = {name.decode() for name in subprocess.check_output(['git', 'ls-files', '-z']).split(b'\0') if name}
+          assert names == set(before)
           after = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in before}
           assert before == after, 'Source changed during qualification'
           (proof / 'after.json').write_text(json.dumps(after, sort_keys=True, indent=2))
@@ -80,14 +105,14 @@ jobs:
           PY
           git fetch origin main
           test "$(git rev-parse origin/main)" = "$GITHUB_SHA"
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Repair explicit alignment closure recovery and subtitle metadata gates'
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Fix alignment request binding, punctuation slicing and recovery UID identity'
           git push origin HEAD:refs/heads/main
-          git rev-parse HEAD | tee "$RUNNER_TEMP/ep14-qualification/COMMIT"
-          git rev-parse HEAD^{tree} | tee "$RUNNER_TEMP/ep14-qualification/TREE"
-          echo 'This qualifies source tests only; no real GPU, Drive readback or perceptual PASS.' >> "$GITHUB_STEP_SUMMARY"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/alignment-qualification/COMMIT"
+          git rev-parse HEAD^{tree} | tee "$RUNNER_TEMP/alignment-qualification/TREE"
+          echo 'Qualified on Python 3.11: source tests only, not real GPU or EP14 acoustic acceptance.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ep14-recovery-qualification
-          path: ${{ runner.temp }}/ep14-qualification/
+          name: alignment-b1-b4-qualification
+          path: ${{ runner.temp }}/alignment-qualification/
           retention-days: 14

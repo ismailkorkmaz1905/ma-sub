@@ -41,6 +41,33 @@ def test_legacy_status_unchanged(tmp_path, monkeypatch, capsys):
     assert status_json(capsys) == state
 
 
+@pytest.mark.parametrize(
+    ("stages", "expected"),
+    [
+        ({"semantic_prepare": {"status": "pass"}}, "SEMANTIC_PREPARED"),
+        ({"semantic_prepare": {"status": "pass"}, "semantic_return": {"status": "blocked"}},
+         "WAITING_FOR_SEMANTIC_RETURN"),
+        ({"semantic_return": {"status": "pass"}}, "SEMANTIC_RETURN_VALIDATED"),
+        ({"semantic_return": {"status": "pass"}, "semantic_finalize": {"status": "pass"}},
+         "SEMANTIC_FINALIZED"),
+    ],
+)
+def test_semantic_status_is_explicit(tmp_path, monkeypatch, capsys, stages, expected):
+    monkeypatch.setattr(pipeline, "episode_dir", lambda episode: tmp_path)
+    atomic_json(tmp_path / "work/state.json", {
+        "episode": 15,
+        "run_contract": {
+            "format": "mas-run-contract-1",
+            "episode": 15,
+            "delivery_scope": "whole-episode",
+            "alignment_policy": "semantic-block-v1",
+        },
+        "stages": stages,
+    })
+    assert pipeline.status(15) == 0
+    assert json.loads(capsys.readouterr().out)["semantic_status"] == expected
+
+
 def test_part_status_shows_exact_plan_current_child_and_stored_handoff(stored_parts, capsys):
     root, plan = stored_parts
     plan_sha = sha256_file(root / "work/part-plan.json")

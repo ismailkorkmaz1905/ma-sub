@@ -4,6 +4,7 @@ import re
 import stat
 import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -42,8 +43,30 @@ from .engine.forced_align import (
 )
 from .engine.id_translation import (
     build_production_translation_policy,
+    create_id_translation_pack as create_semantic_id_translation_pack,
     load_and_validate_id_translation_zip,
     load_default_id_translation_glossary,
+)
+from .engine.semantic_alignment import (
+    ALIGNMENT_POLICY as SEMANTIC_ALIGNMENT_POLICY,
+    SemanticAlignmentConfig,
+    _write_jsonl as write_semantic_jsonl,
+    build_semantic_translation_schema,
+    build_semantic_windows,
+    build_word_timeline,
+    deterministic_exact_results,
+    evidence_sources,
+    finalize_semantic_blocks,
+    finalize_semantic_episode,
+    load_word_timeline,
+    prepare_semantic_delivery_scope,
+    read_jsonl as read_semantic_jsonl,
+    semantic_producer_identity,
+)
+from .engine.semantic_alignment_handoff import (
+    create_semantic_alignment_pack,
+    validate_semantic_alignment_pack,
+    validate_semantic_alignment_return,
 )
 from .engine.media import extract_audio
 from .engine.translation_workspace import prepare_id_translation_workspaces, validate_id_workspace_output
@@ -53,7 +76,8 @@ from .engine.burned_mp4 import (burn_indonesian_mp4, SUBTITLE_STYLE, plan_encodi
                                inspect_encoding_storage, create_encoding_samples, qualify_encoding)
 from .engine.episode_archive import file_record
 from .delivery import (ALIGNMENT_RECOVERY_COMPLETE, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE,
-                       WAIT_MP4_SAMPLE, write_delivery_export)
+                       SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED, WAIT_MP4_SAMPLE,
+                       write_delivery_export)
 from .engine.tr_correction import create_tr_correction_pack, read_tr_correction_pack, validate_tr_correction_output
 
 
@@ -594,13 +618,750 @@ def _validate_id_quality(artifacts, validation, series, names, religious):
     return qa_report
 
 
+def _resolve_run_contract(state, *, episode, new_state, priority):
+    delivery_scope = {
+        "whole-episode-v1": "whole-episode",
+        "first-hour-v1": "first-hour",
+    }.get(priority)
+    if delivery_scope is None:
+        raise RuntimeError("unsupported production priority")
+    requested_policy = os.getenv("MAS_ALIGNMENT_POLICY", "").strip()
+    if requested_policy and requested_policy not in {SEMANTIC_ALIGNMENT_POLICY, "strict-ctc-v1"}:
+        raise RuntimeError("unsupported alignment policy")
+    existing = state.get("run_contract")
+    if existing is None:
+        if not new_state:
+            if episode >= 15:
+                raise RuntimeError(
+                    "existing EP15+ state lacks an explicit run contract; preserve it and choose a migration explicitly"
+                )
+            return {
+                "format": "mas-run-contract-legacy-1",
+                "episode": episode,
+                "delivery_scope": delivery_scope,
+                "alignment_policy": "strict-ctc-v1",
+            }
+        policy = requested_policy or (
+            SEMANTIC_ALIGNMENT_POLICY if episode >= 15 else "strict-ctc-v1"
+        )
+        existing = {
+            "format": "mas-run-contract-1",
+            "episode": episode,
+            "delivery_scope": delivery_scope,
+            "alignment_policy": policy,
+        }
+        state["run_contract"] = existing
+        return existing
+    if (
+        not isinstance(existing, dict)
+        or set(existing) != {"format", "episode", "delivery_scope", "alignment_policy"}
+        or existing.get("format") != "mas-run-contract-1"
+        or existing.get("episode") != episode
+        or existing.get("alignment_policy") not in {SEMANTIC_ALIGNMENT_POLICY, "strict-ctc-v1"}
+    ):
+        raise RuntimeError("persisted run contract is invalid or conflicts with delivery scope")
+    if existing["delivery_scope"] != delivery_scope:
+        if existing["alignment_policy"] != SEMANTIC_ALIGNMENT_POLICY:
+            raise RuntimeError("strict run delivery scope cannot change after episode initialization")
+        history = state.setdefault("delivery_scope_history", [])
+        for scope in (existing["delivery_scope"], delivery_scope):
+            if scope not in history:
+                history.append(scope)
+        existing = {**existing, "delivery_scope": delivery_scope}
+        state["run_contract"] = existing
+    if requested_policy and requested_policy != existing["alignment_policy"]:
+        raise RuntimeError("alignment policy cannot change after episode initialization")
+    return existing
+
+
+def _run_semantic_flow(
+    *,
+    root,
+    name,
+    dirs,
+    episode,
+    source_video,
+    raw,
+    state,
+    state_path,
+    config_dir,
+    series,
+    names,
+    religious,
+):
+    semantic_root = dirs["work"] / "semantic_alignment"
+    semantic_root.mkdir(parents=True, exist_ok=True)
+    settings = SemanticAlignmentConfig()
+    producer = semantic_producer_identity()
+    raw_path = dirs["prepare"] / "raw_asr_v2.json"
+    source_sha = _source_guard(state, source_video)
+    config_sha = sha256_json(asdict(settings))
+
+    timeline_marker = semantic_root / "semantic_word_timeline.done.json"
+    timeline_input_sha = sha256_json(
+        {
+            "source_sha256": source_sha,
+            "timing_source_sha256": sha256_file(raw_path),
+            "producer_sha256": producer["sha256"],
+            "config_sha256": config_sha,
+        }
+    )
+
+    def make_timeline():
+        marker = load_valid_stage_marker(
+            timeline_marker,
+            stage="semantic_word_timeline_v1",
+            input_sha256=timeline_input_sha,
+            required_output_keys=("timeline", "manifest", "quarantine"),
+            allowed_root=semantic_root,
+        )
+        resumed = marker is not None
+        if resumed:
+            built = load_word_timeline(semantic_root)
+        else:
+            built = build_word_timeline(
+                raw,
+                semantic_root,
+                source_sha256=source_sha,
+                timing_source_sha256=sha256_file(raw_path),
+                producer_identity=producer,
+            )
+            write_stage_marker(
+                timeline_marker,
+                stage="semantic_word_timeline_v1",
+                input_sha256=timeline_input_sha,
+                outputs={
+                    "timeline": built["timeline_path"],
+                    "manifest": built["manifest_path"],
+                    "quarantine": built["quarantine_path"],
+                },
+                details={
+                    "word_count": built["manifest"]["word_count"],
+                    "timeline_sha256": built["manifest"]["timeline_sha256"],
+                    "producer_sha256": producer["sha256"],
+                },
+            )
+        holder["semantic_timeline"] = built
+        return {
+            "timeline": str(semantic_root / "word_timeline.jsonl"),
+            "sha256": built["manifest"]["timeline_sha256"],
+            "resumed": resumed,
+        }
+
+    holder = {}
+    _stage(state_path, state, "semantic_word_timeline", make_timeline)
+    timeline = holder["semantic_timeline"]
+
+    windows_path = semantic_root / "semantic_windows.jsonl"
+    auto_path = semantic_root / "deterministic_exact.jsonl"
+    unresolved_path = semantic_root / "unresolved_windows.jsonl"
+    prepare_report_path = semantic_root / "semantic_prepare.json"
+    prepare_marker = semantic_root / "semantic_prepare.done.json"
+    pack_path = dirs["translation_input"] / f"{name}_SEMANTIC_ALIGNMENT_PACK.zip"
+    prepare_input_sha = sha256_json(
+        {
+            "timeline_sha256": timeline["manifest"]["timeline_sha256"],
+            "raw_sha256": sha256_file(raw_path),
+            "producer_sha256": producer["sha256"],
+            "config_sha256": config_sha,
+        }
+    )
+
+    def prepare_semantic():
+        marker = load_valid_stage_marker(
+            prepare_marker,
+            stage="semantic_prepare_v1",
+            input_sha256=prepare_input_sha,
+            required_output_keys=("windows", "deterministic", "unresolved", "report"),
+            optional_output_keys=("pack",),
+        )
+        resumed = marker is not None
+        if resumed:
+            windows = read_semantic_jsonl(windows_path)
+            auto = read_semantic_jsonl(auto_path)
+            unresolved = read_semantic_jsonl(unresolved_path)
+            if unresolved:
+                validate_semantic_alignment_pack(pack_path)
+        else:
+            sources = evidence_sources(raw)
+            windows = build_semantic_windows(timeline, sources, config=settings)
+            auto, unresolved = deterministic_exact_results(windows, config=settings)
+            write_semantic_jsonl(windows_path, windows)
+            write_semantic_jsonl(auto_path, auto)
+            write_semantic_jsonl(unresolved_path, unresolved)
+            if unresolved:
+                create_semantic_alignment_pack(
+                    unresolved,
+                    pack_path,
+                    episode=episode,
+                    source_sha256=source_sha,
+                    word_timeline_sha256=timeline["manifest"]["timeline_sha256"],
+                    all_windows_sha256=sha256_file(windows_path),
+                    deterministic_results_sha256=sha256_file(auto_path),
+                    producer_sha256=producer["sha256"],
+                    config_sha256=config_sha,
+                )
+            report = {
+                "format": "mas-semantic-prepare-1",
+                "semantic_window_count": len(windows),
+                "auto_mapped_window_count": len(auto),
+                "gpt_needed_window_count": len(unresolved),
+                "quarantined_metadata_count": len(timeline["quarantine"]),
+                "word_timeline_sha256": timeline["manifest"]["timeline_sha256"],
+                "forced_ctc_call_count": 0,
+            }
+            atomic_write_json(prepare_report_path, report)
+            outputs = {
+                "windows": windows_path,
+                "deterministic": auto_path,
+                "unresolved": unresolved_path,
+                "report": prepare_report_path,
+            }
+            if unresolved:
+                outputs["pack"] = pack_path
+            write_stage_marker(
+                prepare_marker,
+                stage="semantic_prepare_v1",
+                input_sha256=prepare_input_sha,
+                outputs=outputs,
+                details={
+                    "semantic_window_count": len(windows),
+                    "auto_mapped_window_count": len(auto),
+                    "gpt_needed_window_count": len(unresolved),
+                    "producer_sha256": producer["sha256"],
+                },
+            )
+        holder["semantic_windows"] = windows
+        holder["semantic_auto"] = auto
+        holder["semantic_unresolved"] = unresolved
+        return {
+            "windows": len(windows),
+            "auto_mapped": len(auto),
+            "gpt_needed": len(unresolved),
+            "pack": str(pack_path) if unresolved else None,
+            "resumed": resumed,
+        }
+
+    _stage(state_path, state, "semantic_prepare", prepare_semantic)
+    windows = holder["semantic_windows"]
+    auto = holder["semantic_auto"]
+    unresolved = holder["semantic_unresolved"]
+    return_path = dirs["translation_output"] / f"{name}_SEMANTIC_ALIGNMENT_RETURN.zip"
+    if unresolved and not return_path.is_file():
+        set_stage(
+            state_path,
+            state,
+            "semantic_return",
+            "blocked",
+            semantic_status="WAITING_FOR_SEMANTIC_RETURN",
+            pack=str(pack_path),
+            expected=str(return_path),
+        )
+        print(
+            "SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED\n"
+            f"Pack: {pack_path}\nExpected: {return_path}\n"
+            "GPU compute is not required while this return is pending.",
+            flush=True,
+        )
+        return SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED
+
+    validated_return_path = semantic_root / "validated_semantic_return.json"
+    return_marker = semantic_root / "semantic_return.done.json"
+    return_input_sha = sha256_json(
+        {
+            "pack_sha256": sha256_file(pack_path) if unresolved else None,
+            "return_sha256": sha256_file(return_path) if unresolved else None,
+            "timeline_sha256": timeline["manifest"]["timeline_sha256"],
+            "producer_sha256": producer["sha256"],
+            "config_sha256": config_sha,
+        }
+    )
+
+    def validate_semantic_return():
+        marker = load_valid_stage_marker(
+            return_marker,
+            stage="semantic_return_v1",
+            input_sha256=return_input_sha,
+            required_output_keys=("validated_return",),
+            allowed_root=semantic_root,
+        )
+        resumed = marker is not None
+        if resumed:
+            validated = _json(validated_return_path)
+        elif unresolved:
+            validated = validate_semantic_alignment_return(pack_path, return_path, config=settings)
+            atomic_write_json(validated_return_path, validated)
+            write_stage_marker(
+                return_marker,
+                stage="semantic_return_v1",
+                input_sha256=return_input_sha,
+                outputs={"validated_return": validated_return_path},
+                details={
+                    "window_count": len(validated["results"]),
+                    "review_required_count": validated["review_required_count"],
+                    "gpt_supplied_timestamp_field_count": 0,
+                    "producer_sha256": producer["sha256"],
+                },
+            )
+        else:
+            validated = {
+                "manifest": None,
+                "results": [],
+                "gpt_supplied_timestamp_field_count": 0,
+                "review_required_count": 0,
+            }
+            atomic_write_json(validated_return_path, validated)
+            write_stage_marker(
+                return_marker,
+                stage="semantic_return_v1",
+                input_sha256=return_input_sha,
+                outputs={"validated_return": validated_return_path},
+                details={
+                    "window_count": 0,
+                    "review_required_count": 0,
+                    "gpt_supplied_timestamp_field_count": 0,
+                    "producer_sha256": producer["sha256"],
+                },
+            )
+        holder["validated_semantic_return"] = validated
+        return {
+            "status": "SEMANTIC_RETURN_VALIDATED",
+            "records": len(validated["results"]),
+            "resumed": resumed,
+        }
+
+    _stage(state_path, state, "semantic_return", validate_semantic_return)
+    validated_return = holder["validated_semantic_return"]
+
+    final_blocks_path = semantic_root / "final_blocks.jsonl"
+    semantic_qa_path = semantic_root / "semantic_release_qa.json"
+    schema_path = dirs["prepare"] / "aligned_tr_schema_semantic_v1.json"
+    finalize_marker = semantic_root / "semantic_finalize.done.json"
+    production_policy = build_production_translation_policy(series, names, religious)
+    approval_path = dirs["review"] / "semantic_coarse_fallback_approvals.json"
+    allow_approved_coarse_release = (
+        os.getenv("MAS_ALLOW_APPROVED_COARSE_SEMANTIC_RELEASE") == "1"
+    )
+    finalize_input_sha = sha256_json(
+        {
+            "timeline_sha256": timeline["manifest"]["timeline_sha256"],
+            "windows_sha256": sha256_file(windows_path),
+            "deterministic_sha256": sha256_file(auto_path),
+            "validated_return_sha256": sha256_file(validated_return_path),
+            "producer_sha256": producer["sha256"],
+            "config_sha256": config_sha,
+            "production_policy_sha256": production_policy["policy_sha256"],
+            "coarse_approval_sha256": sha256_file(approval_path) if approval_path.is_file() else None,
+            "allow_approved_coarse_release": allow_approved_coarse_release,
+        }
+    )
+
+    def finalize_semantic():
+        marker = load_valid_stage_marker(
+            finalize_marker,
+            stage="semantic_finalize_v1",
+            input_sha256=finalize_input_sha,
+            required_output_keys=("final_blocks", "release_qa", "schema"),
+        )
+        resumed = marker is not None
+        if resumed:
+            blocks = read_semantic_jsonl(final_blocks_path)
+            report = _json(semantic_qa_path)
+            schema = _json(schema_path)
+        else:
+            approvals = _json(approval_path) if approval_path.is_file() else None
+            if isinstance(approvals, dict) and "data" in approvals:
+                approvals = approvals["data"]
+            finalized = finalize_semantic_blocks(
+                episode=episode,
+                source_sha256=source_sha,
+                timeline=timeline,
+                windows=windows,
+                deterministic_results=auto,
+                semantic_results=validated_return["results"],
+                output_dir=semantic_root,
+                config=settings,
+                coarse_approvals=approvals,
+                allow_approved_coarse_release=allow_approved_coarse_release,
+            )
+            blocks = finalized["blocks"]
+            report = finalized["report"]
+            schema = build_semantic_translation_schema(
+                episode=episode,
+                final_blocks=blocks,
+                source_sha256=source_sha,
+                word_timeline_sha256=timeline["manifest"]["timeline_sha256"],
+                production_policy=production_policy,
+            )
+            atomic_write_json(schema_path, schema)
+            if report.get("release_eligible") is not True:
+                raise RuntimeError(
+                    "semantic release QA failed; inspect " + str(semantic_qa_path)
+                )
+            write_stage_marker(
+                finalize_marker,
+                stage="semantic_finalize_v1",
+                input_sha256=finalize_input_sha,
+                outputs={
+                    "final_blocks": final_blocks_path,
+                    "release_qa": semantic_qa_path,
+                    "schema": schema_path,
+                },
+                details={
+                    "block_count": len(blocks),
+                    "release_eligible": True,
+                    "strict_ctc_pass": False,
+                    "semantic_alignment_pass": report["semantic_alignment_pass"],
+                    "producer_sha256": producer["sha256"],
+                },
+            )
+        if report.get("release_eligible") is not True:
+            raise RuntimeError("cached semantic release QA is not eligible")
+        holder["semantic_blocks"] = blocks
+        holder["semantic_schema"] = schema
+        return {
+            "status": "SEMANTIC_FINALIZED",
+            "blocks": len(blocks),
+            "release_eligible": True,
+            "resumed": resumed,
+        }
+
+    _stage(state_path, state, "semantic_finalize", finalize_semantic)
+    schema = holder["semantic_schema"]
+
+    id_pack = dirs["translation_input"] / f"{name}_ID_TRANSLATION_PACK.zip"
+    id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
+
+    def make_id_pack():
+        manifest = create_semantic_id_translation_pack(
+            schema,
+            id_pack,
+            batch_size=series["batch_size"],
+            glossary=load_default_id_translation_glossary(),
+        )
+        prepare_id_translation_workspaces(id_pack, dirs["translation_input"] / "id-workers")
+        holder["semantic_id_manifest"] = manifest
+        return {
+            "path": str(id_pack),
+            "sha256": sha256_file(id_pack),
+            "schema_sha256": manifest["schema_sha256"],
+        }
+
+    _stage(state_path, state, "id_pack", make_id_pack)
+    if not id_output.is_file():
+        set_stage(state_path, state, "id_return", "blocked", expected=str(id_output))
+        print(
+            f"[WAIT] ID TRANSLATION\nPack: {id_pack}\nExpected: {id_output}\n"
+            "GPU compute is not required while this return is pending.",
+            flush=True,
+        )
+        return WAIT_ID
+
+    def validate_id_return():
+        validate_id_workspace_output(id_pack, id_output)
+        result = load_and_validate_id_translation_zip(
+            schema,
+            id_output,
+            input_manifest=holder["semantic_id_manifest"],
+        )
+        if any(record.get("review_required") is True for record in result.ordered_records(schema)):
+            raise RuntimeError("Indonesian translation still requires review")
+        return {"sha256": sha256_file(id_output), "records": result.output_block_count}
+
+    _stage(state_path, state, "id_return", validate_id_return)
+
+    report_path = dirs["final"] / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
+    semantic_release_marker = dirs["final"] / "semantic_release.done.json"
+    release_inputs = {
+        "source": source_video,
+        "raw_asr": raw_path,
+        "word_timeline": semantic_root / "word_timeline.jsonl",
+        "word_timeline_manifest": semantic_root / "word_timeline.manifest.json",
+        "quarantine": semantic_root / "quarantine.json",
+        "final_blocks": final_blocks_path,
+        "semantic_qa": semantic_qa_path,
+        "schema": schema_path,
+        "id_pack": id_pack,
+        "id_output": id_output,
+        "id_workspace_receipt": Path(str(id_output) + ".workspace.json"),
+    }
+    if approval_path.is_file():
+        release_inputs["coarse_fallback_approvals"] = approval_path
+    release_input_sha = sha256_json(
+        {name: sha256_file(path) for name, path in sorted(release_inputs.items())}
+    )
+
+    def release_semantic():
+        marker = load_valid_stage_marker(
+            semantic_release_marker,
+            stage="semantic_release_v1",
+            input_sha256=release_input_sha,
+            required_output_keys=("report", "mkv", "id_srt", "tr_srt"),
+            allowed_root=root,
+        )
+        resumed = marker is not None
+        if resumed:
+            report = _json(report_path)
+        else:
+            report = finalize_semantic_episode(
+                episode_root=root,
+                episode=episode,
+                source_video=source_video,
+                raw_asr_path=raw_path,
+                word_timeline_path=semantic_root / "word_timeline.jsonl",
+                word_timeline_manifest_path=semantic_root / "word_timeline.manifest.json",
+                quarantine_path=semantic_root / "quarantine.json",
+                final_blocks_path=final_blocks_path,
+                semantic_qa_path=semantic_qa_path,
+                aligned_schema_path=schema_path,
+                id_translation_pack=id_pack,
+                id_translation_zip=id_output,
+                coarse_fallback_approvals_path=(approval_path if approval_path.is_file() else None),
+                series_config=config_dir / "series.yaml",
+                names_config=config_dir / "names.yaml",
+                religious_config=config_dir / "religious_terms.yaml",
+            )
+            outputs = {
+                "report": report_path,
+                "mkv": root / report["outputs"]["mkv"]["relative_path"],
+                "id_srt": root / report["outputs"]["id_srt"]["relative_path"],
+                "tr_srt": root / report["outputs"]["tr_srt"]["relative_path"],
+            }
+            write_stage_marker(
+                semantic_release_marker,
+                stage="semantic_release_v1",
+                input_sha256=release_input_sha,
+                outputs=outputs,
+                details={
+                    "alignment_policy": SEMANTIC_ALIGNMENT_POLICY,
+                    "strict_ctc_pass": False,
+                    "semantic_alignment_pass": report["semantic_alignment_pass"],
+                    "release_eligible": True,
+                },
+            )
+        holder["semantic_final_report"] = report
+        return {"report": str(report_path), "sha256": sha256_file(report_path), "resumed": resumed}
+
+    _stage(state_path, state, "semantic_release", release_semantic)
+    return holder["semantic_final_report"]
+
+
+def _deliver_semantic_report(
+    *,
+    root,
+    name,
+    dirs,
+    episode,
+    source_video,
+    report,
+    state,
+    state_path,
+    encoder,
+    target,
+    encoder_options,
+    external_delivery,
+    execution_plan,
+    sample_approval,
+):
+    report_path = dirs["final"] / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
+    if (
+        report.get("status") != "PASS"
+        or report.get("alignment_policy") != SEMANTIC_ALIGNMENT_POLICY
+        or report.get("strict_ctc_pass") is not False
+        or report.get("release_eligible") is not True
+    ):
+        raise RuntimeError("semantic finalization report is not release eligible")
+    delivery_scope = state["run_contract"]["delivery_scope"]
+    selection = prepare_semantic_delivery_scope(
+        root,
+        report,
+        delivery_scope=delivery_scope,
+        finalization_sha256=sha256_file(report_path),
+    )
+    selected_id_srt = root / selection["id_srt_relative_path"]
+    duration_limit_seconds = (
+        selection["duration_limit_ms"] / 1000.0
+        if selection["duration_limit_ms"] is not None
+        else None
+    )
+    if external_delivery and execution_plan == "local-qsv-v1":
+        from .local_encode import write_subtitle_export
+        write_subtitle_export(root, episode, target_size_gb=target)
+        set_stage(
+            state_path,
+            state,
+            "burn_mp4",
+            "blocked",
+            reason="verified subtitle collection and external GPU release precede local QSV",
+        )
+        return READY_FOR_LOCAL_ENCODE
+
+    holder = {}
+
+    def burn_mp4():
+        id_srt = selected_id_srt
+        settings, _ = plan_encoding_settings(
+            source_video,
+            encoder=encoder,
+            target_size_gb=target,
+            encoder_options=encoder_options,
+            duration_limit_seconds=duration_limit_seconds,
+        )
+        identity = sha256_json(
+            {
+                "source": sha256_file(source_video),
+                "id_srt": sha256_file(id_srt),
+                "style": SUBTITLE_STYLE,
+                "settings": settings["identity_sha256"],
+            }
+        )[:12]
+        mp4 = dirs["final"] / f"{name}.id.{identity}.mp4"
+        if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1" and not sample_approval.is_file():
+            samples = dirs["work"] / "encoding-samples" / identity
+            manifest_path = create_encoding_samples(
+                source_video,
+                id_srt,
+                samples,
+                encoder=encoder,
+                target_size_gb=target,
+                encoder_options=encoder_options,
+                duration_limit_seconds=duration_limit_seconds,
+            )
+            files = [file_record(path, root) for path in sorted(samples.iterdir()) if path.is_file()]
+            atomic_write_json(
+                dirs["work"] / "sample-export.json",
+                {"episode": episode, "mode": "review", "files": files},
+            )
+            holder["sample_wait"] = True
+            return {
+                "report": str(report_path),
+                "samples": str(manifest_path),
+                "sample_review_required": True,
+            }
+        network = os.getenv("MAS_NETWORK_VOLUME_QUOTA_BYTES")
+        if network:
+            storage = inspect_encoding_storage(
+                dirs["final"],
+                network_volume_root="/workspace",
+                network_volume_quota_bytes=int(network),
+            )
+            atomic_write_json(dirs["work"] / "encoding-storage.json", storage)
+            if storage["network_volume_free_bytes"] < target * 1_000_000_000 * 2:
+                mp4 = Path(f"/tmp/mas-ep{episode}-output") / mp4.name
+        burn_indonesian_mp4(
+            source_video,
+            id_srt,
+            mp4,
+            encoder=encoder,
+            target_size_gb=target,
+            encoder_options=encoder_options,
+            sample_approval_path=sample_approval if sample_approval.is_file() else None,
+            require_sample_approval=os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1",
+            network_volume_root="/workspace" if network and mp4.is_relative_to(root) else None,
+            network_volume_quota_bytes=int(network) if network else None,
+            duration_limit_seconds=duration_limit_seconds,
+        )
+        if mp4.is_relative_to(root):
+            mp4_record = file_record(mp4, root)
+        else:
+            mp4_record = {
+                "relative_path": f"final/{mp4.name}",
+                "storage_path": str(mp4),
+                "size_bytes": mp4.stat().st_size,
+                "sha256": sha256_file(mp4),
+            }
+        delivery = {
+            "format": "mas-burned-mp4-delivery-1",
+            "mode": SEMANTIC_ALIGNMENT_POLICY,
+            "delivery_scope": delivery_scope,
+            "delivery_scope_sha256": sha256_file(selection["path"]),
+            "finalization_sha256": sha256_file(report_path),
+            "encoding_receipt_sha256": sha256_file(mp4.with_suffix(".burn.json")),
+            "outputs": {"mp4": mp4_record},
+        }
+        delivery_path = dirs["final"] / "burned_mp4_delivery.json"
+        atomic_write_json(delivery_path, delivery)
+        scoped_delivery_path = (
+            dirs["final"] / "delivery-scopes" / delivery_scope / "burned_mp4_delivery.json"
+        )
+        atomic_write_json(scoped_delivery_path, delivery)
+        holder["delivery"] = delivery
+        return {"delivery": str(delivery_path), "delivery_sha256": sha256_file(delivery_path)}
+
+    _stage(state_path, state, "burn_mp4", burn_mp4)
+    if holder.get("sample_wait"):
+        set_stage(
+            state_path,
+            state,
+            "burn_mp4",
+            "blocked",
+            reason="MP4 samples require review",
+            approval_path=str(sample_approval),
+        )
+        return WAIT_MP4_SAMPLE
+    if external_delivery:
+        write_delivery_export(root, episode)
+        set_stage(
+            state_path,
+            state,
+            "drive_readback",
+            "blocked",
+            reason="external controller must publish after verified GPU shutdown",
+        )
+        return READY_FOR_DELIVERY
+    remote_root = os.getenv("MAS_DRIVE_STRICT_REMOTE")
+    if not remote_root:
+        set_stage(
+            state_path,
+            state,
+            "drive_readback",
+            "blocked",
+            error="MAS_DRIVE_STRICT_REMOTE is not set",
+        )
+        raise RuntimeError("semantic output is local only; Drive byte/SHA-256 readback is mandatory")
+    receipt_path = dirs["final"] / "drive_readback_receipt.json"
+
+    def publish():
+        record = holder["delivery"]["outputs"]["mp4"]
+        local = root / record["relative_path"]
+        if local.stat().st_size != record["size_bytes"] or sha256_file(local) != record["sha256"]:
+            raise RuntimeError("semantic burned MP4 changed after final verification")
+        receipt = upload_verified(local, f"{remote_root.rstrip('/')}/{name}/{local.name}")
+        atomic_write_json(
+            receipt_path,
+            {"status": "PASS", "mode": SEMANTIC_ALIGNMENT_POLICY, "files": [receipt]},
+        )
+        atomic_write_json(
+            dirs["final"] / "delivery-scopes" / delivery_scope / "drive_readback_receipt.json",
+            {"status": "PASS", "mode": SEMANTIC_ALIGNMENT_POLICY, "files": [receipt]},
+        )
+        return {"receipt": str(receipt_path), "sha256": sha256_file(receipt_path)}
+
+    _stage(state_path, state, "drive_readback", publish)
+    set_stage(state_path, state, "compute_shutdown", "running")
+    shutdown = stop_current_pod()
+    set_stage(state_path, state, "compute_shutdown", "pass", **shutdown)
+    print("SEMANTIC RELEASE PASS")
+    return 0
+
+
 def run(episode, source_url=None, fixture=False, stop_after=None, alignment_recovery=False):
     if fixture:
         return run_fixture(episode, stop_after=stop_after)
     root, name, dirs = _paths(episode)
     state_path = dirs["work"] / "state.json"
+    new_state = not state_path.is_file()
     state = load(state_path, episode)
-    state["mode"] = "strict"
+    priority = os.getenv('MAS_PRODUCTION_PRIORITY', 'whole-episode-v1')
+    contract = _resolve_run_contract(
+        state,
+        episode=episode,
+        new_state=new_state,
+        priority=priority,
+    )
+    state["mode"] = (
+        "semantic" if contract["alignment_policy"] == SEMANTIC_ALIGNMENT_POLICY else "strict"
+    )
     save(state_path, state)
     url_path = dirs["source"] / "source.url"
     url = _resolve_source_url(url_path, state, episode, source_url)
@@ -610,7 +1371,6 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         from .retry_authorization import validate_code_fix_resume, retry_predecessor_paths
         resume_scope = validate_code_fix_resume(root, episode, os.environ["MAS_GIT_COMMIT"],
                                                permit_path=os.environ["MAS_CODE_FIX_RESUME"])
-        priority = os.getenv('MAS_PRODUCTION_PRIORITY', 'whole-episode-v1')
         if (priority == 'first-hour-v1') != ('part_id' in resume_scope):
             raise RuntimeError("Scoped retry authority does not match the production priority")
         for relative in retry_predecessor_paths(episode, resume_scope, root):
@@ -690,10 +1450,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
     if stop_after == 2:
         return 75
 
-    priority = os.getenv('MAS_PRODUCTION_PRIORITY', 'whole-episode-v1')
-    if priority not in {'whole-episode-v1', 'first-hour-v1'}:
-        raise RuntimeError('unsupported production priority')
-    if priority == 'first-hour-v1':
+    if priority == 'first-hour-v1' and contract["alignment_policy"] == "strict-ctc-v1":
         if not external_delivery or execution_plan != 'local-qsv-v1':
             raise RuntimeError('first-hour production requires externally released local QSV delivery')
         from .progressive import run_progressive_worker
@@ -736,6 +1493,42 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
     raw = holder["raw"]
     if stop_after == 3:
         return 75
+
+    if contract["alignment_policy"] == SEMANTIC_ALIGNMENT_POLICY:
+        if alignment_recovery:
+            raise RuntimeError("semantic-block-v1 never enters automatic forced-alignment recovery")
+        semantic_result = _run_semantic_flow(
+            root=root,
+            name=name,
+            dirs=dirs,
+            episode=episode,
+            source_video=download.video_path,
+            raw=raw,
+            state=state,
+            state_path=state_path,
+            config_dir=config_dir,
+            series=series,
+            names=names,
+            religious=religious,
+        )
+        if isinstance(semantic_result, int):
+            return semantic_result
+        return _deliver_semantic_report(
+            root=root,
+            name=name,
+            dirs=dirs,
+            episode=episode,
+            source_video=download.video_path,
+            report=semantic_result,
+            state=state,
+            state_path=state_path,
+            encoder=encoder,
+            target=target,
+            encoder_options=encoder_options,
+            external_delivery=external_delivery,
+            execution_plan=execution_plan,
+            sample_approval=sample_approval,
+        )
 
     def make_tr_pack():
         manifest = create_tr_correction_pack(
@@ -1061,6 +1854,16 @@ def run_fixture(episode, stop_after=None):
 def status(episode):
     root, _, dirs = _paths(episode)
     result = load(dirs["work"] / "state.json", episode)
+    if result.get("run_contract", {}).get("alignment_policy") == SEMANTIC_ALIGNMENT_POLICY:
+        stages = result.get("stages", {})
+        if stages.get("semantic_finalize", {}).get("status") == "pass":
+            result["semantic_status"] = "SEMANTIC_FINALIZED"
+        elif stages.get("semantic_return", {}).get("status") == "pass":
+            result["semantic_status"] = "SEMANTIC_RETURN_VALIDATED"
+        elif stages.get("semantic_return", {}).get("status") == "blocked":
+            result["semantic_status"] = "WAITING_FOR_SEMANTIC_RETURN"
+        elif stages.get("semantic_prepare", {}).get("status") == "pass":
+            result["semantic_status"] = "SEMANTIC_PREPARED"
     if (dirs["work"] / "part-plan.json").is_file():
         from .engine.part_audio import load_part_plan
         from .partial_delivery import _read_bound

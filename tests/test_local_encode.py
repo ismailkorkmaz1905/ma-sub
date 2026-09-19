@@ -52,6 +52,52 @@ def test_export_rejects_forged_equal_hash_inventory_with_changed_timeline(tmp_pa
         local_encode.validate_subtitle_export(tmp_path, 14)
 
 
+def test_semantic_first_hour_export_selects_from_canonical_blocks(tmp_path):
+    def record(name, content):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding='utf-8')
+        return file_record(path, tmp_path)
+
+    inputs = {
+        'source_video': record('source/source.mp4', 'source'),
+        'final_blocks': record(
+            'work/semantic_alignment/final_blocks.jsonl',
+            json.dumps({'block_uid': 'one', 'block_index': 1, 'start_ms': 3_599_000,
+                        'end_ms': 3_600_100}) + '\n'
+            + json.dumps({'block_uid': 'two', 'block_index': 2, 'start_ms': 3_601_000,
+                          'end_ms': 3_602_000}) + '\n'),
+    }
+    srt = ('1\n00:59:59,000 --> 01:00:00,100\nBir.\n\n'
+           '2\n01:00:01,000 --> 01:00:02,000\nİki.\n')
+    outputs = {
+        'tr_srt': record('final/subtitles/episode-tr.srt', srt),
+        'id_srt': record('final/subtitles/episode-id.srt', srt),
+    }
+    report = {
+        'episode': 15, 'status': 'PASS', 'alignment_policy': 'semantic-block-v1',
+        'strict_ctc_pass': False, 'semantic_alignment_pass': True,
+        'release_eligible': True, 'input_files': inputs, 'outputs': outputs,
+    }
+    atomic_json(tmp_path / 'final/Muhtemel Ask 15.Bolum_SEMANTIC_FINALIZATION_REPORT.json', report)
+    record('source/official-source.json', '{}')
+    record('source/source.url', 'https://example.invalid/source')
+    atomic_json(tmp_path / 'work/state.json', {
+        'episode': 15,
+        'run_contract': {'format': 'mas-run-contract-1', 'episode': 15,
+                         'delivery_scope': 'first-hour',
+                         'alignment_policy': 'semantic-block-v1'},
+        'stages': {},
+    })
+
+    local_encode.write_subtitle_export(tmp_path, 15)
+    plan, _ = local_encode.validate_subtitle_export(tmp_path, 15)
+
+    assert plan['delivery_scope'] == 'first-hour'
+    assert plan['duration_limit_seconds'] == 3600.1
+    assert len(local_encode.parse_srt(tmp_path / plan['id_srt']['relative_path'])) == 1
+
+
 def test_no_hardware_or_encoder_call_before_external_gpu_release(tmp_path, monkeypatch):
     subtitle_export(tmp_path)
     monkeypatch.setattr(local_encode, 'plan_encoding_settings', lambda *a, **k: pytest.fail('encoded before release'))

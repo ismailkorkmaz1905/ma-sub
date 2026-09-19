@@ -19,6 +19,18 @@ WAIT_PART_RETURN = 25
 READY_FOR_PARTIAL_ENCODE = 26
 NEXT_PART = 27
 ALIGNMENT_RECOVERY_COMPLETE = 28
+SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED = 29
+
+
+def finalization_report_path(root, episode):
+    root = Path(root)
+    name = f"Muhtemel Ask {episode}.Bolum"
+    strict = root / "final" / f"{name}_FINALIZATION_REPORT_V2.json"
+    semantic = root / "final" / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
+    present = [path for path in (strict, semantic) if path.is_file()]
+    if len(present) != 1:
+        raise ValueError("episode must have exactly one strict or semantic finalization report")
+    return present[0]
 
 
 def safe_relative(root, value):
@@ -87,12 +99,31 @@ def validate_delivery(root, episode):
     name = f"Muhtemel Ask {episode}.Bolum"
     delivery_path = root / "final" / "burned_mp4_delivery.json"
     delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
-    report_path = root / "final" / f"{name}_FINALIZATION_REPORT_V2.json"
-    if delivery.get("mode") != "strict" or sha256_file(report_path) != delivery["strict_finalization_sha256"]:
-        raise ValueError("strict delivery report binding changed")
+    report_path = finalization_report_path(root, episode)
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    if report.get("status") != "PASS" or report.get("episode") != episode:
-        raise ValueError("strict finalization has not passed for this episode")
+    semantic = report.get("alignment_policy") == "semantic-block-v1"
+    expected_mode = "semantic-block-v1" if semantic else "strict"
+    digest_field = "finalization_sha256" if semantic else "strict_finalization_sha256"
+    if delivery.get("mode") != expected_mode or sha256_file(report_path) != delivery.get(digest_field):
+        raise ValueError("delivery finalization report binding changed")
+    if (report.get("status") != "PASS" or report.get("episode") != episode
+            or semantic and (report.get("strict_ctc_pass") is not False
+                             or report.get("release_eligible") is not True)):
+        raise ValueError("finalization has not passed for this episode")
+    if semantic:
+        scope_path = (
+            root / "work" / "delivery-scopes" / delivery.get("delivery_scope", "")
+            / "semantic-delivery-scope.json"
+        )
+        if (not scope_path.is_file()
+                or delivery.get("delivery_scope_sha256") != sha256_file(scope_path)):
+            raise ValueError("semantic delivery scope binding changed")
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        if (scope.get("format") != "mas-semantic-delivery-scope-1"
+                or scope.get("episode") != episode
+                or scope.get("delivery_scope") != delivery.get("delivery_scope")
+                or scope.get("finalization_sha256") != sha256_file(report_path)):
+            raise ValueError("semantic delivery scope identity changed")
     mp4 = verified_record(root, delivery["outputs"]["mp4"])
     receipt_path = mp4.with_suffix(".burn.json")
     if sha256_file(receipt_path) != delivery["encoding_receipt_sha256"]:
@@ -119,7 +150,7 @@ def validate_delivery(root, episode):
 
 def write_delivery_export(root, episode):
     root = Path(root)
-    report_path = root / "final" / f"Muhtemel Ask {episode}.Bolum_FINALIZATION_REPORT_V2.json"
+    report_path = finalization_report_path(root, episode)
     report = json.loads(report_path.read_text(encoding="utf-8"))
     delivery_path = root / "final" / "burned_mp4_delivery.json"
     delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
@@ -144,7 +175,8 @@ def write_delivery_export(root, episode):
         actual = remote_storage_path(root, record, episode)
         if actual.stat().st_size != record["size_bytes"] or sha256_file(actual) != record["sha256"]:
             raise ValueError("export file identity changed")
-    manifest = {"episode": episode, "mode": "strict", "files": list(unique.values())}
+    mode = "semantic-block-v1" if report.get("alignment_policy") == "semantic-block-v1" else "strict"
+    manifest = {"episode": episode, "mode": mode, "files": list(unique.values())}
     atomic_json(root / "work" / "delivery-export.json", manifest)
     return manifest
 
@@ -161,6 +193,7 @@ def publish_local_delivery(root, episode, remote_root, *, total_timeout=3600):
 
     root = Path(root)
     delivery, mp4 = validate_delivery(root, episode)
+    delivery_mode = delivery["mode"]
     metadata = json.loads((root / "source" / "official-source.json").read_text(encoding="utf-8"))
     source_url = (root / "source" / "source.url").read_text(encoding="utf-8").strip()
     title = metadata.get("title", "")
@@ -185,9 +218,16 @@ def publish_local_delivery(root, episode, remote_root, *, total_timeout=3600):
         validate_delivery(root, episode)
         remaining()
         receipt_path = root / "final" / "drive_readback_receipt.json"
-        atomic_json(receipt_path, {"status": "PASS", "mode": "strict", "files": [receipt],
-                                  "delivery_sha256": sha256_file(root / "final" / "burned_mp4_delivery.json"),
-                                  "perceptual_acceptance": "NOT_ASSERTED"})
+        receipt_body = {"status": "PASS", "mode": delivery_mode, "files": [receipt],
+                        "delivery_sha256": sha256_file(root / "final" / "burned_mp4_delivery.json"),
+                        "perceptual_acceptance": "NOT_ASSERTED"}
+        atomic_json(receipt_path, receipt_body)
+        if delivery_mode == "semantic-block-v1":
+            atomic_json(
+                root / "final" / "delivery-scopes" / delivery["delivery_scope"]
+                / "drive_readback_receipt.json",
+                receipt_body,
+            )
         set_stage(state_path, state, "drive_readback", "pass", receipt=str(receipt_path),
                   sha256=sha256_file(receipt_path))
         evidence["status"] = "PASS"

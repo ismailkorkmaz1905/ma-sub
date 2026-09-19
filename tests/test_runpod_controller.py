@@ -376,7 +376,8 @@ def test_failed_terminal_remote_job_cannot_get_new_attempt_without_authorization
         runpod_controller._remote_attempt_identity(base, request_path, status_path)
 
 
-@pytest.mark.parametrize("exit_code", [0, 20, 21, runpod_controller.WAIT_MP4_SAMPLE])
+@pytest.mark.parametrize("exit_code", [0, 20, 21, runpod_controller.SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
+                                         runpod_controller.WAIT_MP4_SAMPLE])
 def test_expected_terminal_remote_job_keeps_input_identity(tmp_path, exit_code):
     request_path = tmp_path / "remote-job-request.json"
     status_path = tmp_path / "remote-job-status.json"

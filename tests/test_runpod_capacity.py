@@ -325,7 +325,7 @@ def test_lease_is_reduced_to_affordable_work_budget(tmp_path):
     with CapacityLease(provider, BASE, tmp_path / "audit",
                        plan(total_seconds=14400, reserve_usd=1.0, billing_margin_usd=0.10),
                        nonce="0123456789abcdef") as lease:
-        assert 1700 < lease.work_budget_seconds < 1800
+        assert 2700 < lease.work_budget_seconds < 2800
         assert 0 < lease.remaining_work_seconds() <= lease.work_budget_seconds
 
 

@@ -206,6 +206,74 @@ def test_offline_fixture_interruption_and_resume(tmp_path, monkeypatch):
     assert resumed["stages"]["fixture_verify"]["status"] == "pass"
 
 
+def test_ep15_semantic_mode_never_enters_forced_ctc(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "episode_dir", lambda episode: tmp_path / str(episode))
+    monkeypatch.setattr(
+        pipeline,
+        "_load_configs",
+        lambda: (tmp_path, {"whisper_model": "model"}, {"canonical_names": []}, {"terms": []}),
+    )
+    monkeypatch.setattr(pipeline, "_guard_existing_source", lambda *args: None)
+    monkeypatch.setattr(pipeline, "_resolve_source_url", lambda *args: "https://example.test/15")
+
+    def download(url, source_dir, **kwargs):
+        video = source_dir / "source.mkv"
+        video.write_bytes(b"source")
+        return SimpleNamespace(video_path=video, resumed=False, captions_path=None)
+
+    def audio(source, prepare, **kwargs):
+        path = prepare / "audio.flac"
+        path.write_bytes(b"audio")
+        return SimpleNamespace(audio_path=path, resumed=False)
+
+    monkeypatch.setattr(pipeline, "download_source", download)
+    monkeypatch.setattr(pipeline, "extract_audio", audio)
+    def transcribe(audio_path, prepare, **kwargs):
+        result = {
+            "independent_vad": True,
+            "model": {"settings": {"allow_cpu_fallback": False}},
+        }
+        (prepare / "raw_asr_v2.json").write_text(json.dumps(result), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(pipeline, "transcribe_raw_audio", transcribe)
+    monkeypatch.setattr(
+        pipeline,
+        "_run_semantic_flow",
+        lambda **kwargs: pipeline.SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_aligned_checkpoint",
+        lambda *args, **kwargs: pytest.fail("semantic mode must not call forced CTC"),
+    )
+    monkeypatch.setattr(pipeline, "_stage", lambda path, state, name, action: action())
+    monkeypatch.delenv("MAS_ALIGNMENT_POLICY", raising=False)
+    monkeypatch.delenv("RUNPOD_POD_ID", raising=False)
+    monkeypatch.delenv("MAS_EXTERNAL_RUNPOD_CONTROLLER", raising=False)
+
+    assert pipeline.run(15) == pipeline.SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED
+    state = json.loads((tmp_path / "15/work/state.json").read_text(encoding="utf-8"))
+    assert state["run_contract"] == {
+        "format": "mas-run-contract-1",
+        "episode": 15,
+        "delivery_scope": "whole-episode",
+        "alignment_policy": "semantic-block-v1",
+    }
+
+
+def test_ep15_delivery_scope_can_change_without_changing_semantic_evidence(monkeypatch):
+    monkeypatch.delenv("MAS_ALIGNMENT_POLICY", raising=False)
+    state = {}
+    first = pipeline._resolve_run_contract(
+        state, episode=15, new_state=True, priority="first-hour-v1")
+    whole = pipeline._resolve_run_contract(
+        state, episode=15, new_state=False, priority="whole-episode-v1")
+    assert first["alignment_policy"] == whole["alignment_policy"] == "semantic-block-v1"
+    assert whole["delivery_scope"] == "whole-episode"
+    assert state["delivery_scope_history"] == ["first-hour", "whole-episode"]
+
+
 @pytest.mark.parametrize('execution', ['remote-nvenc-v1', 'local-qsv-v1'])
 def test_production_stop_after_download_does_not_start_audio(tmp_path, monkeypatch, execution):
     monkeypatch.setattr(pipeline, "episode_dir", lambda episode: tmp_path / str(episode))

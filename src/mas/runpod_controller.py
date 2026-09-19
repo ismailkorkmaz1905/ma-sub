@@ -24,6 +24,7 @@ from .remote import RemoteVerificationError, _run_watchdog, drive_preflight
 from .reliability import BudgetExceeded, RunBudget, atomic_json, digest
 from .delivery import (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE, WAIT_PART_RETURN,
                        ALIGNMENT_RECOVERY_COMPLETE, READY_FOR_PARTIAL_ENCODE, NEXT_PART,
+                       SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
                        publish_local_delivery, safe_relative, validate_delivery)
 from .hashing import sha256_file
 from .source_discovery import discover_episode_metadata
@@ -237,7 +238,7 @@ def _episode_budget(local_root, episode, *, now=None):
 
 
 def _pause_episode_budget(local_root, episode, reason, evidence_path, shutdown_path):
-    if reason not in (20, 21, WAIT_MP4_SAMPLE, WAIT_PART_RETURN):
+    if reason not in (20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED, WAIT_MP4_SAMPLE, WAIT_PART_RETURN):
         raise RunPodControllerError("only a verified human handoff may pause the budget")
     local_root = Path(local_root)
     if not Path(evidence_path).is_file() or not Path(shutdown_path).is_file():
@@ -281,6 +282,22 @@ def _validate_local_tr_return(local_root, name):
             raise RunPodControllerError(
                 "local Turkish correction return does not match the current pack"
             ) from exc
+
+
+def _validate_local_semantic_return(local_root, name):
+    pack = Path(local_root) / "translation_input" / f"{name}_SEMANTIC_ALIGNMENT_PACK.zip"
+    returned = Path(local_root) / "translation_output" / f"{name}_SEMANTIC_ALIGNMENT_RETURN.zip"
+    if not returned.is_file():
+        return
+    if not pack.is_file():
+        raise RunPodControllerError(f"local semantic alignment pack is missing: {pack}")
+    try:
+        from .engine.semantic_alignment_handoff import validate_semantic_alignment_return
+        validate_semantic_alignment_return(pack, returned)
+    except Exception as exc:
+        raise RunPodControllerError(
+            "local semantic alignment return does not match the current pack"
+        ) from exc
 
 
 class RunPodClient:
@@ -1529,6 +1546,7 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
         values = _required_environment()
         commit, rclone_config = _local_preflight(values)
         _validate_local_tr_return(local_root, f"Muhtemel Ask {episode}.Bolum")
+        _validate_local_semantic_return(local_root, f"Muhtemel Ask {episode}.Bolum")
         if not alignment_recovery:
             preflight_local_id_return(local_root, episode, ROOT / "config" / "production")
             _preflight_part_return(local_root, episode)
@@ -1538,6 +1556,8 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
             expected_returns = {
                 20: local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_TR_TEXT_CORRECTED.zip",
                 21: local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_ID_TRANSLATED.zip",
+                SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED:
+                    local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_SEMANTIC_ALIGNMENT_RETURN.zip",
                 WAIT_MP4_SAMPLE: local_root / "review" / "mp4-sample-approval.json",
             }
             code = previous_job.get("exit_code") if previous_job.get("status") == "EXITED" else None
@@ -1553,6 +1573,54 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
                             raise RunPodControllerError("verified wait evidence changed")
                     print(f"[WAIT] local return required: {expected_returns[code]}; no GPU acquired")
                     return code
+            state_path = local_root / "work" / "state.json"
+            semantic_local_resume = False
+            if state_path.is_file():
+                local_state = json.loads(state_path.read_text(encoding="utf-8"))
+                semantic_local_resume = (
+                    local_state.get("run_contract", {}).get("alignment_policy")
+                    == "semantic-block-v1"
+                )
+            if (
+                code in (SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED, 21)
+                and semantic_local_resume
+                and expected_returns[code].is_file()
+                and budget_path.is_file()
+            ):
+                saved = json.loads(budget_path.read_text(encoding="utf-8"))
+                if saved.get("sha256") != digest(saved.get("data")):
+                    raise RunPodControllerError("episode budget checkpoint integrity mismatch")
+                wait = saved["data"].get("wait")
+                if not isinstance(wait, dict) or wait.get("reason") != code:
+                    raise RunPodControllerError("semantic local resume lacks verified GPU release evidence")
+                for key in ("evidence", "shutdown"):
+                    if sha256_file(safe_relative(local_root, wait[key + "_path"])) != wait[key + "_sha256"]:
+                        raise RunPodControllerError("verified semantic wait evidence changed")
+                previous_external = os.environ.get("MAS_EXTERNAL_RUNPOD_CONTROLLER")
+                os.environ["MAS_EXTERNAL_RUNPOD_CONTROLLER"] = "1"
+                try:
+                    from .pipeline import run as run_pipeline
+                    local_result = run_pipeline(episode, source_url)
+                finally:
+                    if previous_external is None:
+                        os.environ.pop("MAS_EXTERNAL_RUNPOD_CONTROLLER", None)
+                    else:
+                        os.environ["MAS_EXTERNAL_RUNPOD_CONTROLLER"] = previous_external
+                if local_result == READY_FOR_LOCAL_ENCODE:
+                    shutdown_path = safe_relative(local_root, wait["shutdown_path"])
+                    shutdown = json.loads(shutdown_path.read_text(encoding="utf-8"))
+                    shutdown_data = shutdown.get("data")
+                    pods = shutdown_data.get("owned_pods") if isinstance(shutdown_data, dict) else None
+                    if not isinstance(pods, list) or len(pods) != 1:
+                        raise RunPodControllerError("semantic GPU release Pod identity is invalid")
+                    pod_id = pods[0].get("pod_id")
+                    _write_encode_release(local_root, episode, pod_id, shutdown_path.parent)
+                    return _finish_local_encode(local_root, episode, _episode_budget(local_root, episode))
+                if local_result == READY_FOR_DELIVERY:
+                    raise RunPodControllerError(
+                        "semantic local resume requires local-qsv-v1; remote encoding needs an explicit encoder job"
+                    )
+                return local_result
         try:
             if alignment_recovery:
                 retained_source = local_root / "source" / "source.url"
@@ -1715,10 +1783,12 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
                                           total_timeout=episode_budget.check())
         if result == ALIGNMENT_RECOVERY_COMPLETE and alignment_recovery:
             return result
-        if result in (20, 21, WAIT_MP4_SAMPLE):
+        if result in (20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED, WAIT_MP4_SAMPLE):
             evidence = (local_root / "work" / "sample-export.json" if result == WAIT_MP4_SAMPLE else
                         local_root / "translation_input" / (f"Muhtemel Ask {episode}.Bolum_" +
-                            ("TR_CORRECTION_PACK.zip" if result == 20 else "ID_TRANSLATION_PACK.zip")))
+                            ("TR_CORRECTION_PACK.zip" if result == 20 else
+                             "SEMANTIC_ALIGNMENT_PACK.zip" if result == SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED
+                             else "ID_TRANSLATION_PACK.zip")))
             _pause_episode_budget(local_root, episode, result, evidence, audit / "capacity-shutdown.json")
         return result
 
@@ -1935,7 +2005,8 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
         if attempt > _runtime_policy()["max_changed_evidence_retries"]:
             raise RunPodControllerError("BLOCKED: collection retry budget exhausted")
         return digest({"base_input_sha256": base_input_sha, "attempt": attempt}), attempt
-    if exit_code in (None, 0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
+    if exit_code in (None, 0, 20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
+                     READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
                      WAIT_PART_RETURN, READY_FOR_PARTIAL_ENCODE):
         return base_input_sha, 0
     ticket_path = status_path.with_name("remote-retry-authorization.json")
@@ -1967,8 +2038,8 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
 
 def _remote_input_binding(local_root, source_url, commit, episode):
     resume_files = [local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_{suffix}.zip"
-                    for suffix in ("TR_TEXT_CORRECTED", "ID_TRANSLATED")]
-    resume_files += [Path(str(resume_files[1]) + ".workspace.json")]
+                    for suffix in ("TR_TEXT_CORRECTED", "SEMANTIC_ALIGNMENT_RETURN", "ID_TRANSLATED")]
+    resume_files += [Path(str(resume_files[-1]) + ".workspace.json")]
     resume_files += _part_resume_files(local_root, episode)
     validated_returns = {path.relative_to(local_root).as_posix(): sha256_file(path)
                          for path in resume_files if path.is_file() and path.parent.name != 'review'}
@@ -2136,7 +2207,8 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
         base, _ = _remote_input_binding(local_root, source_url, commit, episode)
         _remote_attempt_identity(base, request_path, status_path)
         return
-    if code in (None, 0, 20, 21, WAIT_MP4_SAMPLE, WAIT_PART_RETURN):
+    if code in (None, 0, 20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
+                WAIT_MP4_SAMPLE, WAIT_PART_RETURN):
         return
     if not request_path.is_file():
         raise RunPodControllerError("remote job retry evidence is incomplete")
@@ -2251,7 +2323,8 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
 
 
 def _record_failed_remote_evidence(exit_code, local_root, source_url, commit):
-    if exit_code in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
+    if exit_code in (0, 20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
+                     READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
                      WAIT_PART_RETURN, READY_FOR_PARTIAL_ENCODE, ALIGNMENT_RECOVERY_COMPLETE):
         return
     work = local_root / "work"
@@ -2603,7 +2676,8 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
                 _record_result_collection_failure(local_root, exit_code, current_record)
             raise
 
-    if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
+    if exit_code not in (0, 20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
+                         READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
                          ALIGNMENT_RECOVERY_COMPLETE):
         try:
             _collect_diagnostics(episode, local_root, remote_root, ssh, scp, host, retrieval_deadline)
@@ -2615,6 +2689,8 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
         handoff = f"{name}_TR_CORRECTION_PACK.zip"
     elif exit_code == 21:
         handoff = f"{name}_ID_TRANSLATION_PACK.zip"
+    elif exit_code == SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED:
+        handoff = f"{name}_SEMANTIC_ALIGNMENT_PACK.zip"
     if handoff:
         local_pack = local_root / "translation_input" / handoff
         local_pack.parent.mkdir(parents=True, exist_ok=True)
@@ -2631,7 +2707,8 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
                 from .engine.translation_workspace import prepare_id_translation_workspaces
                 prepare_id_translation_workspaces(local_pack, local_root / "translation_input/id-workers")
         print(f"[HANDOFF] downloaded {local_pack}")
-    if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE):
+    if exit_code not in (0, 20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
+                         READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE):
         raise RunPodControllerError(f"remote pipeline failed with exit code {exit_code}")
 
 
@@ -2732,7 +2809,11 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                     print("[RUNPOD] local source seed verified: "
                           f"video_bytes={source_receipts['video']['bytes']} "
                           f"video_sha256={source_receipts['video']['sha256']}")
-                for filename in (f"{name}_TR_TEXT_CORRECTED.zip", f"{name}_ID_TRANSLATED.zip"):
+                for filename in (
+                    f"{name}_TR_TEXT_CORRECTED.zip",
+                    f"{name}_SEMANTIC_ALIGNMENT_RETURN.zip",
+                    f"{name}_ID_TRANSLATED.zip",
+                ):
                     local_return = local_root / "translation_output" / filename
                     if local_return.is_file():
                         destination = f"{remote_root}/translation_output/{filename}"

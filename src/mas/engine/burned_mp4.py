@@ -36,7 +36,7 @@ def _probe(path):
 
 
 def plan_encoding_settings(source_video, *, encoder='h264_nvenc', target_size_gb=3.0,
-                           encoder_options=None):
+                           encoder_options=None, duration_limit_seconds=None):
     if encoder not in ENCODERS:
         raise ValueError('Unsupported MP4 encoder')
     if type(target_size_gb) not in (int, float) or not 0 < target_size_gb <= 100:
@@ -50,17 +50,27 @@ def plan_encoding_settings(source_video, *, encoder='h264_nvenc', target_size_gb
     source = Path(source_video)
     probe = _probe(source)
     try:
-        duration = float(probe['format']['duration'])
+        source_duration = float(probe['format']['duration'])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError('Source duration is invalid') from exc
-    if not 0 < duration < float('inf'):
+    if not 0 < source_duration < float('inf'):
         raise ValueError('Source duration is invalid')
+    if duration_limit_seconds is not None:
+        if (type(duration_limit_seconds) not in (int, float)
+                or not 0 < float(duration_limit_seconds) < float('inf')):
+            raise ValueError('Delivery duration limit is invalid')
+        duration = min(source_duration, float(duration_limit_seconds))
+    else:
+        duration = source_duration
     target_bytes = round(float(target_size_gb) * 1_000_000_000)
     bitrate = max(100_000, round(target_bytes * 8 / duration - AUDIO_BITRATE))
     settings = {'encoder': encoder, 'encoder_options': options, 'target_size_gb': float(target_size_gb),
                 'target_bytes': target_bytes, 'target_policy': 'SOFT_TARGET',
                 'planned_video_bitrate_bps': bitrate, 'audio_bitrate_bps': AUDIO_BITRATE,
                 'source_sha256': sha256_file(source), 'source_duration_seconds': duration}
+    if duration_limit_seconds is not None:
+        settings.update(source_full_duration_seconds=source_duration,
+                        delivery_duration_limit_seconds=float(duration_limit_seconds))
     settings['identity_sha256'] = hashlib.sha256(
         json.dumps(settings, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return settings, probe
@@ -68,7 +78,8 @@ def plan_encoding_settings(source_video, *, encoder='h264_nvenc', target_size_gb
 
 def create_encoding_samples(source_video, id_srt, output_dir, *, encoder='h264_nvenc',
                             target_size_gb=3.0, encoder_options=None, timeout_seconds=180,
-                            idle_timeout_seconds=30, resume_identity=None):
+                            idle_timeout_seconds=30, resume_identity=None,
+                            duration_limit_seconds=None):
     started_all = time.monotonic()
     if not 0 < timeout_seconds <= 180 or not 0 < idle_timeout_seconds <= timeout_seconds:
         raise ValueError('Sample encoding requires bounded idle and total timeouts')
@@ -77,7 +88,8 @@ def create_encoding_samples(source_video, id_srt, output_dir, *, encoder='h264_n
     if len(entries) < 3:
         raise ValueError('Representative encoding samples require at least three subtitle cues')
     settings, probe = plan_encoding_settings(source, encoder=encoder, target_size_gb=target_size_gb,
-                                             encoder_options=encoder_options)
+                                             encoder_options=encoder_options,
+                                             duration_limit_seconds=duration_limit_seconds)
     video = next(stream for stream in probe['streams'] if stream['codec_type'] == 'video')
     duration = settings['source_duration_seconds']
     sample_duration = min(15.0, duration)
@@ -291,7 +303,7 @@ def _qsv_hardware(*, timeout_seconds=55):
 
 
 def qualify_encoding(source_video, output_dir, *, encoder='h264_nvenc', target_size_gb=3.0,
-                     encoder_options=None, timeout_seconds=240):
+                     encoder_options=None, timeout_seconds=240, duration_limit_seconds=None):
     if not 0 < timeout_seconds <= 240:
         raise ValueError('Technical encoder qualification requires a bounded timeout')
     deadline = time.monotonic() + timeout_seconds
@@ -306,7 +318,8 @@ def qualify_encoding(source_video, output_dir, *, encoder='h264_nvenc', target_s
     if encoder not in {'h264_nvenc', 'h264_qsv'}:
         raise ValueError('Technical encoder qualification requires explicit NVENC or QSV')
     settings, probe = plan_encoding_settings(source, encoder=encoder, target_size_gb=target_size_gb,
-                                             encoder_options=encoder_options)
+                                             encoder_options=encoder_options,
+                                             duration_limit_seconds=duration_limit_seconds)
     duration = settings['source_duration_seconds']
     sample_duration = min(15.0, duration)
     anchors = [duration * fraction for fraction in (.1, .5, .9)]
@@ -368,7 +381,8 @@ def qualify_encoding(source_video, output_dir, *, encoder='h264_nvenc', target_s
                                             encoder_options=encoder_options,
                                             timeout_seconds=min(180, remaining()),
                                             idle_timeout_seconds=min(30, remaining()),
-                                            resume_identity=request)
+                                            resume_identity=request,
+                                            duration_limit_seconds=duration_limit_seconds)
     remaining()
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
     receipt = {'format': 'mas-technical-encoder-qualification-1', 'status': 'TECHNICALLY_VERIFIED',
@@ -546,7 +560,7 @@ def burn_indonesian_mp4(source_video, id_srt, output_path, *, encoder='h264_nven
                         timeout_seconds=7200, target_size_gb=3.0, encoder_options=None,
                         sample_approval_path=None, idle_timeout_seconds=900, scratch_dir=None,
                         network_volume_root=None, network_volume_quota_bytes=None,
-                        require_sample_approval=False):
+                        require_sample_approval=False, duration_limit_seconds=None):
     started_all = time.monotonic()
     source, subtitles, output = map(Path, (source_video, id_srt, output_path))
     if not 0 < timeout_seconds <= 14400:
@@ -554,7 +568,8 @@ def burn_indonesian_mp4(source_video, id_srt, output_path, *, encoder='h264_nven
     if not 0 < idle_timeout_seconds <= timeout_seconds:
         raise ValueError('MP4 progress watchdog must be positive and within total timeout')
     settings, before = plan_encoding_settings(source, encoder=encoder, target_size_gb=target_size_gb,
-                                              encoder_options=encoder_options)
+                                              encoder_options=encoder_options,
+                                              duration_limit_seconds=duration_limit_seconds)
     options = settings['encoder_options']
     subtitle_sha256 = sha256_file(subtitles)
     approval = None
@@ -648,7 +663,10 @@ def burn_indonesian_mp4(source_video, id_srt, output_path, *, encoder='h264_nven
         if encoder == 'h264_nvenc' and video['codec_name'] == 'av1' and video.get('pix_fmt') == 'yuv420p':
             decoder = ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-c:v', 'av1_cuvid']
             video_filter = 'hwdownload,format=nv12,' + video_filter
+        duration_args = (['-t', f'{duration:.3f}']
+                         if duration_limit_seconds is not None else [])
         command = ['ffmpeg', '-hide_banner', '-nostdin', '-n', *decoder, '-i', str(source.resolve()),
+                   *duration_args,
                    '-map', '0:v:0', '-map', '0:a:0', '-sn', '-dn', '-vf', video_filter,
                    '-c:v', encoder, *options, '-b:v', str(bitrate), '-pix_fmt', 'yuv420p',
                    '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-metadata:s:a:0', 'language=tur',

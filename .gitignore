@@ -1,10 +1,14 @@
 .venv/
+.testvenv/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.audit-stage/
 .serena/
 .coverage
+htmlcov/
+var/
 models/
 *.log
 EPISODES/

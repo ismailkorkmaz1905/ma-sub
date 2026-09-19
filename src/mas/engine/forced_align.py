@@ -1,0 +1,4420 @@
+"""Strict Turkish CTC forced alignment for corrected subtitle text.
+
+This module deliberately treats WhisperX as an optional runtime dependency.
+Importing :mod:`src.forced_align` never imports torch, transformers, or
+WhisperX.  The heavy dependency is loaded only when
+:func:`align_corrected_segments` is called, and a compatible module can be
+injected for deterministic unit tests.
+
+No guessed timing is permitted.  WhisperX interpolation is disabled and every
+lexical token (a whitespace-delimited token containing a Unicode letter or
+number) must have a finite, positive, monotonically ordered CTC interval.
+Every lexical token must also carry a finite WhisperX acoustic score in
+``[0, 1]`` at or above the beta minimum (``0.30``), and no single aligned word
+may exceed 2500 ms.
+Punctuation-only tokens do not require their own timestamp because their
+surface form remains in the segment text.
+"""
+
+from __future__ import annotations
+
+import importlib.metadata
+import hashlib
+import heapq
+import inspect
+import json
+import math
+import re
+import time
+import types
+import unicodedata
+from pathlib import Path
+from typing import Any, Mapping, Sequence, Union, get_args, get_origin
+
+from .speaker import overlap_is_unsafe, speaker_id
+from ..reliability import UnitJournal, atomic_json, digest
+from ..progress import mark_work_progress
+
+
+FORCED_ALIGNMENT_FORMAT_VERSION = "1.0"
+TIMING_SOURCE = "whisperx_ctc_forced_alignment"
+SUPPORTED_LANGUAGE = "tr"
+SUPPORTED_WHISPERX_VERSION = "3.8.6"
+DEFAULT_TURKISH_ALIGNMENT_MODEL = (
+    "mpoyraz/wav2vec2-xls-r-300m-cv7-turkish"
+)
+DEFAULT_MIN_WORD_SCORE = 0.30
+CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE = 0.25
+REVIEW_WORD_SCORE = 0.55
+DEFAULT_MAX_WORD_DURATION_MS = 2_500
+DEFAULT_MAX_OUTWARD_DRIFT_MS = 500
+EDITED_TOKEN_MIN_WORD_SCORE = 0.55
+AUDIO_REVIEW_SCORE_CONTEXT = "hash_bound_confirmed_dialogue_audio_review"
+DURATION_VAD_CONTEXT = "hash_bound_independent_vad_boundary"
+ALIGNMENT_TEXT_NORMALIZATION = "turkish_ascii_ctc_v1"
+OVERLAP_RESOLUTION_POLICY = "ctc_joint_adaptive_partition_v17"
+MAX_OVERLAP_COMBINATIONS = 2_097_152
+MAX_FINAL_STABILIZATION_ROUNDS = 4
+MAX_INDEPENDENT_CONTEXT_RECOVERIES = 32
+MAX_CONFLICT_ALIGNMENT_CALLS = 64
+MAX_CONFLICT_SEARCH_CHECKS = MAX_OVERLAP_COMBINATIONS
+MAX_CONFLICT_SECONDS = 120
+MAX_RECOVERY_SECONDS = 900
+MAX_RECOVERY_CONTEXT_GAP_MS = 1000
+DURATION_VAD_FIELDS = frozenset(
+    {
+        "duration_context",
+        "raw_start_ms",
+        "raw_end_ms",
+        "vad_region_index",
+        "vad_start_ms",
+        "vad_end_ms",
+        "vad_source",
+    }
+)
+
+
+class ForcedAlignmentError(RuntimeError):
+    """Raised when corrected text cannot be aligned without guessed timing."""
+
+
+class _RecoverableIndependentAlignmentError(ForcedAlignmentError):
+    pass
+
+
+class AlignmentConflictBlocked(ForcedAlignmentError):
+    def __init__(self, details):
+        self.details = details
+        super().__init__(
+            f"{details['reason']}: {details['message']}; "
+            f"unresolved component UIDs: {details['component_uids']}"
+        )
+
+
+def _alignment_model_text(value: str) -> str:
+    mapped = value.translate(
+        str.maketrans(
+            {
+                "Ç": "C",
+                "Ğ": "G",
+                "İ": "I",
+                "Ö": "O",
+                "Ş": "S",
+                "Ü": "U",
+                "ç": "c",
+                "ğ": "g",
+                "ı": "i",
+                "ö": "o",
+                "ş": "s",
+                "ü": "u",
+            }
+        )
+    )
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKD", mapped)
+        if not unicodedata.combining(character)
+    )
+
+
+def _require_integer(value: Any, field: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ForcedAlignmentError(f"{field} must be an integer")
+    if value < minimum:
+        raise ForcedAlignmentError(f"{field} must be at least {minimum}")
+    return value
+
+
+def _require_nonempty_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ForcedAlignmentError(f"{field} must be a non-empty string")
+    return unicodedata.normalize("NFC", value)
+
+
+def _finite_number(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ForcedAlignmentError(f"{field} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ForcedAlignmentError(f"{field} must be a finite number")
+    return number
+
+
+def _lexeme(value: str) -> str:
+    """Normalize a word for exact lexical coverage comparisons.
+
+    Punctuation and combining marks are intentionally excluded.  This makes
+    ``M.K.`` and ``M.K`` the same lexical token without making two different
+    words equivalent.
+    """
+
+    # Python's locale-independent casefold maps ASCII ``I`` to ``i``.  Turkish
+    # casing instead pairs ``I``/``ı`` and ``İ``/``i``; normalize those two
+    # capitals before casefolding so a casing-only correction is not mislabeled
+    # as an acoustic lexical replacement.
+    normalized = unicodedata.normalize("NFKC", value).translate(
+        str.maketrans({"I": "ı", "İ": "i"})
+    ).casefold()
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def _surface_tokens(text: str) -> list[str]:
+    return re.findall(r"\S+", text, flags=re.UNICODE)
+
+
+def _lexical_tokens(text: str) -> list[str]:
+    return [token for token in _surface_tokens(text) if _lexeme(token)]
+
+
+def _canonical_lexical_surfaces(text: str) -> list[str]:
+    """Bind each lexical token to its exact corrected-Turkish surface.
+
+    WhisperX supplies acoustic intervals and scores, but its returned token
+    spelling is not a correction authority.  Punctuation-only whitespace
+    tokens are attached to their nearest preceding lexical token (or carried
+    into the first token) so joining the resulting words reconstructs the
+    human-corrected surface instead of WhisperX capitalization/punctuation.
+    """
+
+    surfaces: list[str] = []
+    leading_punctuation: list[str] = []
+    for token in _surface_tokens(text):
+        if _lexeme(token):
+            if leading_punctuation:
+                surfaces.append(" ".join([*leading_punctuation, token]))
+                leading_punctuation.clear()
+            else:
+                surfaces.append(token)
+        elif surfaces:
+            surfaces[-1] = f"{surfaces[-1]} {token}"
+        else:
+            leading_punctuation.append(token)
+    return surfaces
+
+
+def _token_edit_audit(
+    asr_text: str,
+    corrected_text: str,
+    *,
+    deletion_audio_reviewed: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return a deterministic lexical edit map and its complete audit.
+
+    The map uses Levenshtein alignment with a stable tie-break: exact diagonal
+    matches first, then replacements, deletions, and insertions.  Preferring a
+    replacement on equal-cost paths keeps ordinary spelling corrections from
+    being mislabeled as an unreviewed deletion plus insertion.  Punctuation,
+    casing, and apostrophes are excluded by :func:`_lexeme` and therefore do
+    not manufacture an acoustic edit.
+    """
+
+    asr_surfaces = _lexical_tokens(asr_text)
+    corrected_surfaces = _canonical_lexical_surfaces(corrected_text)
+    asr_lexemes = [_lexeme(token) for token in asr_surfaces]
+    corrected_lexemes = [_lexeme(token) for token in corrected_surfaces]
+    row_count = len(asr_lexemes) + 1
+    column_count = len(corrected_lexemes) + 1
+    distance = [[0] * column_count for _ in range(row_count)]
+    for row in range(row_count):
+        distance[row][0] = row
+    for column in range(column_count):
+        distance[0][column] = column
+    for row in range(1, row_count):
+        for column in range(1, column_count):
+            substitution_cost = (
+                0
+                if asr_lexemes[row - 1] == corrected_lexemes[column - 1]
+                else 1
+            )
+            distance[row][column] = min(
+                distance[row - 1][column] + 1,
+                distance[row][column - 1] + 1,
+                distance[row - 1][column - 1] + substitution_cost,
+            )
+
+    reversed_operations: list[dict[str, Any]] = []
+    deleted_asr_token_count = 0
+    row = len(asr_lexemes)
+    column = len(corrected_lexemes)
+    while row or column:
+        if (
+            row
+            and column
+            and asr_lexemes[row - 1] == corrected_lexemes[column - 1]
+            and distance[row][column] == distance[row - 1][column - 1]
+        ):
+            reversed_operations.append(
+                {
+                    "corrected_token_index": column,
+                    "corrected_lexeme": corrected_lexemes[column - 1],
+                    "asr_token_index": row,
+                    "edit_kind": "unchanged",
+                }
+            )
+            row -= 1
+            column -= 1
+            continue
+        if (
+            row
+            and column
+            and distance[row][column] == distance[row - 1][column - 1] + 1
+        ):
+            reversed_operations.append(
+                {
+                    "corrected_token_index": column,
+                    "corrected_lexeme": corrected_lexemes[column - 1],
+                    "asr_token_index": row,
+                    "edit_kind": "replaced",
+                }
+            )
+            row -= 1
+            column -= 1
+            continue
+        if row and distance[row][column] == distance[row - 1][column] + 1:
+            deleted_asr_token_count += 1
+            row -= 1
+            continue
+        if column and distance[row][column] == distance[row][column - 1] + 1:
+            reversed_operations.append(
+                {
+                    "corrected_token_index": column,
+                    "corrected_lexeme": corrected_lexemes[column - 1],
+                    "asr_token_index": None,
+                    "edit_kind": "inserted",
+                }
+            )
+            column -= 1
+            continue
+        raise ForcedAlignmentError("lexical edit audit could not be reconstructed")
+
+    token_edits = list(reversed(reversed_operations))
+    unchanged_count = sum(
+        operation["edit_kind"] == "unchanged" for operation in token_edits
+    )
+    replaced_count = sum(
+        operation["edit_kind"] == "replaced" for operation in token_edits
+    )
+    inserted_count = sum(
+        operation["edit_kind"] == "inserted" for operation in token_edits
+    )
+    edited_count = replaced_count + inserted_count
+    corrected_count = len(corrected_lexemes)
+    unreviewed_deleted_count = (
+        0 if deletion_audio_reviewed else deleted_asr_token_count
+    )
+    audit: dict[str, Any] = {
+        "asr_lexical_token_count": len(asr_lexemes),
+        "corrected_lexical_token_count": corrected_count,
+        "unchanged_token_count": unchanged_count,
+        "replaced_token_count": replaced_count,
+        "inserted_token_count": inserted_count,
+        "edited_token_count": edited_count,
+        "edited_token_ratio": (
+            edited_count / corrected_count if corrected_count else 0.0
+        ),
+        "deleted_asr_token_count": deleted_asr_token_count,
+        "deletion_audio_reviewed": deletion_audio_reviewed,
+        "unreviewed_deleted_token_count": unreviewed_deleted_count,
+        "token_edits": token_edits,
+    }
+    return token_edits, audit
+
+
+def correction_deletes_lexical_tokens(asr_text: str, corrected_text: str) -> bool:
+    _, audit = _token_edit_audit(
+        asr_text,
+        corrected_text,
+        deletion_audio_reviewed=False,
+    )
+    return bool(audit["deleted_asr_token_count"])
+
+
+def validate_coarse_segments(
+    coarse_segments: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate and copy ordered alignment windows.
+
+    Each input record must contain ``start_ms``, ``end_ms``, corrected ``text``,
+    immutable ``asr_text``, ``deletion_audio_reviewed`` and a unique
+    ``utterance_uid``.  Windows must be ordered by start time; overlap is
+    allowed here because the final word validator is the timing authority and
+    rejects any actual overlapping word intervals.
+    """
+
+    if isinstance(coarse_segments, (str, bytes)) or not isinstance(
+        coarse_segments, Sequence
+    ):
+        raise ForcedAlignmentError("coarse_segments must be a sequence")
+    if not coarse_segments:
+        raise ForcedAlignmentError("coarse_segments must not be empty")
+
+    validated: list[dict[str, Any]] = []
+    seen_uids: set[str] = set()
+    previous_start = -1
+    for index, raw in enumerate(coarse_segments, start=1):
+        if not isinstance(raw, Mapping):
+            raise ForcedAlignmentError(f"coarse segment {index} must be an object")
+        start_ms = _require_integer(
+            raw.get("start_ms"), f"coarse segment {index} start_ms"
+        )
+        end_ms = _require_integer(
+            raw.get("end_ms"), f"coarse segment {index} end_ms", minimum=1
+        )
+        if end_ms <= start_ms:
+            raise ForcedAlignmentError(
+                f"coarse segment {index} end_ms must be greater than start_ms"
+            )
+        if start_ms < previous_start:
+            raise ForcedAlignmentError(
+                f"coarse segment {index} starts before the preceding segment"
+            )
+        previous_start = start_ms
+        coarse_start_ms = _require_integer(
+            raw.get("coarse_start_ms", start_ms),
+            f"coarse segment {index} coarse_start_ms",
+        )
+        coarse_end_ms = _require_integer(
+            raw.get("coarse_end_ms", end_ms),
+            f"coarse segment {index} coarse_end_ms",
+            minimum=1,
+        )
+        if (
+            coarse_start_ms < start_ms
+            or coarse_end_ms > end_ms
+            or coarse_end_ms <= coarse_start_ms
+        ):
+            raise ForcedAlignmentError(
+                f"coarse segment {index} unpadded bounds must be a positive "
+                "interval inside its alignment window"
+            )
+
+        text = _require_nonempty_string(
+            raw.get("text"), f"coarse segment {index} text"
+        )
+        if not _lexical_tokens(text):
+            raise ForcedAlignmentError(
+                f"coarse segment {index} contains no lexical token"
+            )
+        asr_text_value = raw.get("asr_text")
+        if not isinstance(asr_text_value, str):
+            raise ForcedAlignmentError(
+                f"coarse segment {index} asr_text must be a string"
+            )
+        asr_text = unicodedata.normalize("NFC", asr_text_value)
+        deletion_audio_reviewed = raw.get("deletion_audio_reviewed")
+        if not isinstance(deletion_audio_reviewed, bool):
+            raise ForcedAlignmentError(
+                f"coarse segment {index} deletion_audio_reviewed must be boolean"
+            )
+        audio_reviewed = raw.get("audio_reviewed", False)
+        review_disposition = raw.get("review_disposition", "not_applicable")
+        if not isinstance(audio_reviewed, bool):
+            raise ForcedAlignmentError(
+                f"coarse segment {index} audio_reviewed must be boolean"
+            )
+        if review_disposition not in {"not_applicable", "confirmed_dialogue"}:
+            raise ForcedAlignmentError(
+                f"coarse segment {index} review_disposition is invalid for alignment"
+            )
+        if audio_reviewed != (review_disposition == "confirmed_dialogue"):
+            raise ForcedAlignmentError(
+                f"coarse segment {index} audio-review fields are inconsistent"
+            )
+        _, edit_audit = _token_edit_audit(
+            asr_text,
+            text,
+            deletion_audio_reviewed=deletion_audio_reviewed,
+        )
+        if edit_audit["unreviewed_deleted_token_count"] != 0:
+            raise ForcedAlignmentError(
+                f"coarse segment {index} has lexical deletions without exact "
+                "audio-reviewed evidence"
+            )
+        utterance_uid = _require_nonempty_string(
+            raw.get("utterance_uid"), f"coarse segment {index} utterance_uid"
+        )
+        try:
+            segment_speaker_id = speaker_id(raw, f"coarse segment {index}")
+        except ValueError as exc:
+            raise ForcedAlignmentError(str(exc)) from exc
+        if utterance_uid in seen_uids:
+            raise ForcedAlignmentError(
+                f"duplicate utterance_uid in coarse segments: {utterance_uid}"
+            )
+        seen_uids.add(utterance_uid)
+        segment = {
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "coarse_start_ms": coarse_start_ms,
+                "coarse_end_ms": coarse_end_ms,
+                "text": text,
+                "asr_text": asr_text,
+                "deletion_audio_reviewed": deletion_audio_reviewed,
+                "audio_reviewed": audio_reviewed,
+                "review_disposition": review_disposition,
+                "utterance_uid": utterance_uid,
+            }
+        if segment_speaker_id is not None:
+            segment["speaker_id"] = segment_speaker_id
+        validated.append(segment)
+    return validated
+
+
+def _validate_word_record(
+    raw: Mapping[str, Any],
+    *,
+    utterance_uid: str,
+    raw_index: int,
+    window_start_ms: int,
+    window_end_ms: int,
+) -> tuple[str, int, int, float] | None:
+    text_value = raw.get("word", raw.get("text"))
+    if not isinstance(text_value, str) or not text_value.strip():
+        raise ForcedAlignmentError(
+            f"{utterance_uid} aligned word {raw_index} has no text"
+        )
+    text = unicodedata.normalize("NFC", text_value.strip())
+    if not _lexeme(text):
+        # A standalone punctuation token is preserved in segment text and is
+        # not allowed to manufacture a subtitle interval.
+        return None
+
+    if raw.get("interpolated") or raw.get("synthetic"):
+        raise ForcedAlignmentError(
+            f"{utterance_uid} word {text!r} uses synthetic/interpolated timing"
+        )
+    upstream_source = raw.get("timing_source")
+    if upstream_source not in (None, TIMING_SOURCE):
+        raise ForcedAlignmentError(
+            f"{utterance_uid} word {text!r} has untrusted timing_source "
+            f"{upstream_source!r}"
+        )
+
+    start_seconds = _finite_number(
+        raw.get("start"), f"{utterance_uid} word {text!r} start"
+    )
+    end_seconds = _finite_number(
+        raw.get("end"), f"{utterance_uid} word {text!r} end"
+    )
+    if start_seconds < 0 or end_seconds <= start_seconds:
+        raise ForcedAlignmentError(
+            f"{utterance_uid} word {text!r} has an invalid interval"
+        )
+
+    start_ms = round(start_seconds * 1000)
+    end_ms = round(end_seconds * 1000)
+    if end_ms <= start_ms:
+        raise ForcedAlignmentError(
+            f"{utterance_uid} word {text!r} collapses to a non-positive ms interval"
+        )
+    if start_ms < window_start_ms or end_ms > window_end_ms:
+        raise ForcedAlignmentError(
+            f"{utterance_uid} word {text!r} lies outside its coarse alignment window"
+        )
+    score_value = raw.get("score")
+    if score_value is None:
+        raise ForcedAlignmentError(
+            f"{utterance_uid} word {text!r} alignment score is required"
+        )
+    score = _finite_number(
+        score_value, f"{utterance_uid} word {text!r} score"
+    )
+    if not 0.0 <= score <= 1.0:
+        raise ForcedAlignmentError(
+            f"{utterance_uid} word {text!r} alignment score must be within [0, 1]"
+        )
+    return text, start_ms, end_ms, score
+
+
+def _trusted_vad_regions(
+    vad_regions: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if isinstance(vad_regions, (str, bytes)) or not isinstance(vad_regions, Sequence):
+        raise ForcedAlignmentError("vad_regions must be a sequence")
+    trusted: list[dict[str, Any]] = []
+    seen_indices: set[int] = set()
+    previous_end_ms = -1
+    for position, raw in enumerate(vad_regions, start=1):
+        if not isinstance(raw, Mapping):
+            raise ForcedAlignmentError(f"vad_regions[{position}] must be an object")
+        vad_index = _require_integer(
+            raw.get("vad_region_index"),
+            f"vad_regions[{position}] vad_region_index",
+            minimum=1,
+        )
+        if vad_index in seen_indices:
+            raise ForcedAlignmentError("vad_region_index values must be unique")
+        seen_indices.add(vad_index)
+        start_ms = _require_integer(
+            raw.get("start_ms"), f"vad_regions[{position}] start_ms"
+        )
+        end_ms = _require_integer(
+            raw.get("end_ms"), f"vad_regions[{position}] end_ms", minimum=1
+        )
+        if end_ms <= start_ms:
+            raise ForcedAlignmentError(f"vad_regions[{position}] interval is invalid")
+        if start_ms < previous_end_ms:
+            raise ForcedAlignmentError("vad_regions must be chronological and disjoint")
+        if raw.get("source") != "silero_vad":
+            raise ForcedAlignmentError(
+                f"vad_regions[{position}] is not independent Silero VAD evidence"
+            )
+        trusted.append(
+            {
+                "vad_region_index": vad_index,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "source": "silero_vad",
+            }
+        )
+        previous_end_ms = end_ms
+    return trusted
+
+
+def _raw_aligned_words(result: Any, utterance_uid: str) -> list[Mapping[str, Any]]:
+    if not isinstance(result, Mapping):
+        raise ForcedAlignmentError(
+            f"WhisperX returned a non-object result for {utterance_uid}"
+        )
+    word_segments = result.get("word_segments")
+    if word_segments is None:
+        segments = result.get("segments")
+        if isinstance(segments, (str, bytes)) or not isinstance(segments, Sequence):
+            raise ForcedAlignmentError(
+                f"WhisperX returned no word_segments for {utterance_uid}"
+            )
+        flattened: list[Any] = []
+        for segment in segments:
+            if not isinstance(segment, Mapping):
+                raise ForcedAlignmentError(
+                    f"WhisperX returned a malformed segment for {utterance_uid}"
+                )
+            nested_words = segment.get("words") or []
+            if isinstance(nested_words, (str, bytes)) or not isinstance(
+                nested_words, Sequence
+            ):
+                raise ForcedAlignmentError(
+                    f"WhisperX returned malformed words for {utterance_uid}"
+                )
+            flattened.extend(nested_words)
+        word_segments = flattened
+
+    if isinstance(word_segments, (str, bytes)) or not isinstance(
+        word_segments, Sequence
+    ):
+        raise ForcedAlignmentError(
+            f"WhisperX word_segments is malformed for {utterance_uid}"
+        )
+    words: list[Mapping[str, Any]] = []
+    for index, word in enumerate(word_segments, start=1):
+        if not isinstance(word, Mapping):
+            raise ForcedAlignmentError(
+                f"WhisperX word {index} is malformed for {utterance_uid}"
+            )
+        words.append(word)
+    return words
+
+
+def _lexical_raw_positions(raw_words: Sequence[Mapping[str, Any]]) -> list[int]:
+    """Indices of raw records that carry a lexeme.
+
+    ``_validate_word_record`` keeps a standalone punctuation token in the
+    segment text instead of letting it manufacture a subtitle interval, so a
+    joint result can hold more raw records than the source has lexical words.
+    Joint slicing must therefore count the same tokens the independent path
+    counts.  Anything that is not a clean punctuation-only string still counts,
+    so a missing/extra real word or a malformed record is still rejected by the
+    caller instead of being silently absorbed.
+    """
+
+    positions: list[int] = []
+    for index, raw in enumerate(raw_words):
+        value = raw.get("word", raw.get("text")) if isinstance(raw, Mapping) else None
+        if (
+            isinstance(value, str)
+            and value.strip()
+            and not _lexeme(unicodedata.normalize("NFC", value.strip()))
+        ):
+            continue
+        positions.append(index)
+    return positions
+
+
+def _lexical_raw_slice(
+    raw_words: Sequence[Mapping[str, Any]],
+    positions: Sequence[int],
+    offset: int,
+    count: int,
+) -> list[Mapping[str, Any]]:
+    """Raw records carrying lexical words ``offset`` .. ``offset + count``.
+
+    Leading punctuation stays with the first utterance and trailing punctuation
+    with the last, so every raw record is still handed to the validator exactly
+    once.
+    """
+
+    start = positions[offset] if offset else 0
+    end = (
+        positions[offset + count]
+        if offset + count < len(positions)
+        else len(raw_words)
+    )
+    return list(raw_words[start:end])
+
+
+def _normalize_aligned_words(
+    result: Any,
+    coarse: Mapping[str, Any],
+    *,
+    segment_index: int,
+    first_word_index: int,
+    min_word_score: float,
+    max_word_duration_ms: int,
+    vad_regions: Sequence[Mapping[str, Any]],
+    checkpoint_journal: UnitJournal | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    key = None
+    cached = None
+    if checkpoint_journal is not None:
+        key = digest({
+            "raw_result": result, "source": coarse, "segment_index": segment_index,
+            "min_word_score": min_word_score,
+            "max_word_duration_ms": max_word_duration_ms,
+            "vad_regions": [region for region in vad_regions
+                            if int(region["end_ms"]) > int(coarse["start_ms"])
+                            and int(region["start_ms"]) < int(coarse["end_ms"])],
+        })
+        cached = checkpoint_journal.read(key)
+    if cached is None:
+        try:
+            words, punctuation_count = _normalize_aligned_words_uncached(
+                result, coarse, segment_index=segment_index, first_word_index=1,
+                min_word_score=min_word_score,
+                max_word_duration_ms=max_word_duration_ms, vad_regions=vad_regions,
+            )
+        except ForcedAlignmentError as exc:
+            if checkpoint_journal is not None:
+                checkpoint_journal.write(key, {
+                    "status": "REJECTED", "error": str(exc),
+                    "recoverable": isinstance(exc, _RecoverableIndependentAlignmentError),
+                    "utterance_uid": str(coarse["utterance_uid"]),
+                })
+            raise
+        cached = {"status": "VALIDATED", "words": words,
+                  "punctuation_count": punctuation_count}
+        if checkpoint_journal is not None:
+            checkpoint_journal.write(key, cached)
+    if not isinstance(cached, Mapping):
+        raise ForcedAlignmentError("invalid normalized alignment checkpoint payload")
+    if cached.get("status") == "REJECTED":
+        exception_type = (_RecoverableIndependentAlignmentError
+                          if cached["recoverable"] else ForcedAlignmentError)
+        raise exception_type(cached["error"])
+    if cached.get("status") != "VALIDATED":
+        raise ForcedAlignmentError("invalid normalized alignment checkpoint status")
+    return ([dict(word, word_index=first_word_index + offset)
+             for offset, word in enumerate(cached["words"])], cached["punctuation_count"])
+
+
+def _normalize_aligned_words_uncached(
+    result: Any,
+    coarse: Mapping[str, Any],
+    *,
+    segment_index: int,
+    first_word_index: int,
+    min_word_score: float,
+    max_word_duration_ms: int,
+    vad_regions: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    utterance_uid = str(coarse["utterance_uid"])
+    expected_tokens = _canonical_lexical_surfaces(str(coarse["text"]))
+    token_edits, _ = _token_edit_audit(
+        str(coarse["asr_text"]),
+        str(coarse["text"]),
+        deletion_audio_reviewed=bool(coarse["deletion_audio_reviewed"]),
+    )
+    raw_words = _raw_aligned_words(result, utterance_uid)
+    audio_review_supported = (
+        coarse["audio_reviewed"] is True
+        and coarse["review_disposition"] == "confirmed_dialogue"
+    )
+
+    accepted: list[tuple[str, int, int, float | None]] = []
+    punctuation_only_count = 0
+    previous_end_ms: int | None = None
+    for raw_index, raw in enumerate(raw_words, start=1):
+        normalized = _validate_word_record(
+            raw,
+            utterance_uid=utterance_uid,
+            raw_index=raw_index,
+            window_start_ms=int(coarse["start_ms"]),
+            window_end_ms=int(coarse["end_ms"]),
+        )
+        if normalized is None:
+            punctuation_only_count += 1
+            continue
+        text, start_ms, end_ms, score = normalized
+        if previous_end_ms is not None and start_ms < previous_end_ms:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} has overlapping/backward aligned words at {text!r}"
+            )
+        previous_end_ms = end_ms
+        accepted.append((text, start_ms, end_ms, score))
+
+    duration_audits: dict[int, dict[str, Any]] = {}
+    for offset, (_, start_ms, end_ms, _) in enumerate(accepted):
+        if end_ms - start_ms <= max_word_duration_ms:
+            continue
+        next_start_ms = accepted[offset + 1][1] if offset + 1 < len(accepted) else None
+        matching_regions = [
+            region
+            for region in vad_regions
+            if int(region["start_ms"]) <= start_ms < int(region["end_ms"])
+            and int(region["end_ms"]) < end_ms
+            and next_start_ms is not None
+            and int(region["end_ms"]) <= next_start_ms
+        ]
+        trimmed_end_ms = (
+            int(matching_regions[0]["end_ms"])
+            if audio_review_supported and len(matching_regions) == 1
+            else end_ms
+        )
+        if (
+            not audio_review_supported
+            or len(matching_regions) != 1
+            or trimmed_end_ms <= start_ms
+            or trimmed_end_ms - start_ms > max_word_duration_ms
+        ):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} word {accepted[offset][0]!r} duration "
+                f"{end_ms - start_ms} ms exceeds the maximum "
+                f"{max_word_duration_ms} ms"
+            )
+        region = matching_regions[0]
+        duration_audits[offset] = {
+            "duration_context": DURATION_VAD_CONTEXT,
+            "raw_start_ms": start_ms,
+            "raw_end_ms": end_ms,
+            "vad_region_index": int(region["vad_region_index"]),
+            "vad_start_ms": int(region["start_ms"]),
+            "vad_end_ms": trimmed_end_ms,
+            "vad_source": "silero_vad",
+        }
+        text, _, _, score = accepted[offset]
+        accepted[offset] = (text, start_ms, trimmed_end_ms, score)
+
+    expected_lexemes = [
+        _lexeme(_alignment_model_text(token)) for token in expected_tokens
+    ]
+    actual_lexemes = [
+        _lexeme(_alignment_model_text(word[0])) for word in accepted
+    ]
+    if actual_lexemes != expected_lexemes:
+        missing_at = next(
+            (
+                index
+                for index, (expected, actual) in enumerate(
+                    zip(expected_lexemes, actual_lexemes), start=1
+                )
+                if expected != actual
+            ),
+            min(len(expected_lexemes), len(actual_lexemes)) + 1,
+        )
+        raise ForcedAlignmentError(
+            f"{utterance_uid} lexical alignment coverage failed at token "
+            f"{missing_at}: expected {len(expected_lexemes)}, aligned "
+            f"{len(actual_lexemes)}"
+        )
+
+    words: list[dict[str, Any]] = []
+    for offset, ((_, start_ms, end_ms, score), canonical_text, token_edit) in enumerate(
+        zip(accepted, expected_tokens, token_edits)
+    ):
+        edit_kind = str(token_edit["edit_kind"])
+        score_context = None
+        if score < min_word_score:
+            neighbor_scores = [
+                accepted[position][3]
+                for position in (offset - 1, offset + 1)
+                if 0 <= position < len(accepted)
+            ]
+            if audio_review_supported:
+                score_context = AUDIO_REVIEW_SCORE_CONTEXT
+            elif (
+                score < CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
+                or edit_kind != "unchanged"
+                or not any(
+                    neighbor_score >= min_word_score
+                    for neighbor_score in neighbor_scores
+                )
+            ):
+                raise _RecoverableIndependentAlignmentError(
+                    f"{utterance_uid} word {canonical_text!r} alignment score "
+                    f"{score:.6f} is below the required minimum "
+                    f"{min_word_score:.6f} without adjacent unchanged-word support"
+                )
+            else:
+                score_context = "adjacent_unchanged_word"
+        if edit_kind in {"inserted", "replaced"} and score < EDITED_TOKEN_MIN_WORD_SCORE:
+            if audio_review_supported:
+                score_context = AUDIO_REVIEW_SCORE_CONTEXT
+            else:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} edited token {canonical_text!r} alignment score "
+                    f"{score:.6f} is below the edited-token minimum "
+                    f"{EDITED_TOKEN_MIN_WORD_SCORE:.6f}"
+                )
+        words.append(
+            {
+                "word_index": first_word_index + offset,
+                "segment_index": segment_index,
+                "segment_id": segment_index,
+                "utterance_uid": utterance_uid,
+                "text": canonical_text,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "score": score,
+                "probability": score,
+                "edit_kind": edit_kind,
+                "asr_token_index": token_edit["asr_token_index"],
+                "timing_source": TIMING_SOURCE,
+                **duration_audits.get(offset, {}),
+                **(
+                    {"score_context": score_context}
+                    if score_context is not None
+                    else {}
+                ),
+                **(
+                    {"speaker_id": coarse["speaker_id"]}
+                    if "speaker_id" in coarse
+                    else {}
+                ),
+            }
+        )
+    return words, punctuation_only_count
+
+
+def _segment_drift_audit(
+    words: Sequence[Mapping[str, Any]],
+    *,
+    coarse_start_ms: int,
+    coarse_end_ms: int,
+) -> dict[str, int]:
+    """Describe aligned-word drift from the original unpadded ASR bounds."""
+
+    return {
+        "first_word_start_delta_ms": int(words[0]["start_ms"]) - coarse_start_ms,
+        "last_word_end_delta_ms": int(words[-1]["end_ms"]) - coarse_end_ms,
+        "early_outward_drift_ms": max(
+            0, coarse_start_ms - int(words[0]["start_ms"])
+        ),
+        "late_outward_drift_ms": max(
+            0, int(words[-1]["end_ms"]) - coarse_end_ms
+        ),
+        "word_wholly_before_coarse_count": sum(
+            int(word["end_ms"]) <= coarse_start_ms for word in words
+        ),
+        "word_wholly_after_coarse_count": sum(
+            int(word["start_ms"]) >= coarse_end_ms for word in words
+        ),
+        "word_crossing_coarse_start_count": sum(
+            int(word["start_ms"]) < coarse_start_ms < int(word["end_ms"])
+            for word in words
+        ),
+        "word_crossing_coarse_end_count": sum(
+            int(word["start_ms"]) < coarse_end_ms < int(word["end_ms"])
+            for word in words
+        ),
+    }
+
+
+def _bounded_drift_context(
+    words: Sequence[Mapping[str, Any]],
+    drift_audit: Mapping[str, int],
+    *,
+    window_start_ms: int,
+    window_end_ms: int,
+    coarse_start_ms: int,
+    coarse_end_ms: int,
+    max_outward_drift_ms: int,
+) -> str | None:
+    early_drift = int(drift_audit["early_outward_drift_ms"])
+    late_drift = int(drift_audit["late_outward_drift_ms"])
+    if early_drift <= max_outward_drift_ms and late_drift <= max_outward_drift_ms:
+        return None
+    if (
+        early_drift > coarse_start_ms - window_start_ms
+        or late_drift > window_end_ms - coarse_end_ms
+    ):
+        return None
+    if any(
+        word.get("score_context") == "adjacent_unchanged_word" for word in words
+    ):
+        return "contextual_low_score_alignment_window"
+    return None
+
+
+def _computed_report(segments: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    words = [word for segment in segments for word in segment["words"]]
+    edit_audits = [segment["edit_audit"] for segment in segments]
+    input_tokens = [
+        token for segment in segments for token in _surface_tokens(str(segment["text"]))
+    ]
+    lexical_count = sum(bool(_lexeme(token)) for token in input_tokens)
+    punctuation_count = len(input_tokens) - lexical_count
+    edited_token_count = sum(
+        int(audit["edited_token_count"]) for audit in edit_audits
+    )
+    return {
+        "input_segment_count": len(segments),
+        "aligned_segment_count": len(segments),
+        "input_token_count": len(input_tokens),
+        "input_lexical_token_count": lexical_count,
+        "input_punctuation_only_token_count": punctuation_count,
+        "aligned_word_count": len(words),
+        "unaligned_lexical_token_count": 0,
+        "unaligned_word_count": 0,
+        "synthetic_timing_count": 0,
+        "interpolated_timing_count": 0,
+        "overlap_violation_count": 0,
+        "negative_word_gap_count": 0,
+        "missing_alignment_score_count": 0,
+        "low_alignment_score_count": 0,
+        "overlong_alignment_word_count": 0,
+        "outward_drift_violation_count": 0,
+        "low_score_edited_token_count": sum(
+            word["edit_kind"] in {"inserted", "replaced"}
+            and float(word["score"]) < EDITED_TOKEN_MIN_WORD_SCORE
+            and word.get("score_context") != AUDIO_REVIEW_SCORE_CONTEXT
+            for word in words
+        ),
+        "unreviewed_deleted_token_count": sum(
+            int(audit["unreviewed_deleted_token_count"])
+            for audit in edit_audits
+        ),
+        "unchanged_token_count": sum(
+            int(audit["unchanged_token_count"]) for audit in edit_audits
+        ),
+        "replaced_token_count": sum(
+            int(audit["replaced_token_count"]) for audit in edit_audits
+        ),
+        "inserted_token_count": sum(
+            int(audit["inserted_token_count"]) for audit in edit_audits
+        ),
+        "edited_token_count": edited_token_count,
+        "edited_token_ratio": edited_token_count / len(words),
+        "deleted_asr_token_count": sum(
+            int(audit["deleted_asr_token_count"]) for audit in edit_audits
+        ),
+        "review_alignment_score_count": sum(
+            float(word["score"]) < REVIEW_WORD_SCORE for word in words
+        ),
+        "minimum_alignment_score": min(float(word["score"]) for word in words),
+        "maximum_alignment_word_duration_ms": max(
+            int(word["end_ms"]) - int(word["start_ms"]) for word in words
+        ),
+        "maximum_early_outward_drift_ms": max(
+            int(segment["drift_audit"]["early_outward_drift_ms"])
+            for segment in segments
+        ),
+        "maximum_late_outward_drift_ms": max(
+            int(segment["drift_audit"]["late_outward_drift_ms"])
+            for segment in segments
+        ),
+    }
+
+
+def _without_alignment_digest(value: Any) -> Any:
+    """Return a JSON-shaped copy with recursive digest fields removed."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_alignment_digest(item)
+            for key, item in value.items()
+            if key != "alignment_sha256"
+        }
+    if isinstance(value, (list, tuple)):
+        return [_without_alignment_digest(item) for item in value]
+    return value
+
+
+def _alignment_sha256(data: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        _without_alignment_digest(data),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _audio_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_forced_alignment_data(data: Mapping[str, Any]) -> dict[str, int]:
+    """Purely validate a persisted forced-alignment object.
+
+    The function performs no imports, model calls, file reads, or mutation.  It
+    returns freshly computed counts and raises :class:`ForcedAlignmentError` on
+    the first integrity violation.
+    """
+
+    if not isinstance(data, Mapping):
+        raise ForcedAlignmentError("forced alignment data must be an object")
+    if data.get("format_version") != FORCED_ALIGNMENT_FORMAT_VERSION:
+        raise ForcedAlignmentError("unsupported forced alignment format_version")
+    if data.get("language") != SUPPORTED_LANGUAGE:
+        raise ForcedAlignmentError("forced alignment language must be 'tr'")
+    if data.get("timing_source") != TIMING_SOURCE:
+        raise ForcedAlignmentError("forced alignment timing_source is invalid")
+    alignment_sha256 = data.get("alignment_sha256")
+    if (
+        not isinstance(alignment_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", alignment_sha256)
+    ):
+        raise ForcedAlignmentError("forced alignment alignment_sha256 is invalid")
+    audio_sha256 = data.get("audio_sha256")
+    if (
+        not isinstance(audio_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", audio_sha256)
+    ):
+        raise ForcedAlignmentError("forced alignment audio_sha256 is invalid")
+
+    provenance = data.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ForcedAlignmentError("forced alignment provenance must be an object")
+    if provenance.get("timing_source") != TIMING_SOURCE:
+        raise ForcedAlignmentError("provenance timing_source is invalid")
+    if provenance.get("engine") != "whisperx":
+        raise ForcedAlignmentError("provenance engine must be 'whisperx'")
+    if provenance.get("language") != SUPPORTED_LANGUAGE:
+        raise ForcedAlignmentError("provenance language must be 'tr'")
+    _require_nonempty_string(provenance.get("device"), "provenance device")
+    _require_nonempty_string(provenance.get("model_name"), "provenance model_name")
+    persisted_whisperx_version = _require_nonempty_string(
+        provenance.get("whisperx_version"), "provenance whisperx_version"
+    )
+    if persisted_whisperx_version != SUPPORTED_WHISPERX_VERSION:
+        raise ForcedAlignmentError(
+            "provenance whisperx_version must equal "
+            f"{SUPPORTED_WHISPERX_VERSION}"
+        )
+    if provenance.get("interpolation") not in ("disabled:none", "disabled:ignore"):
+        raise ForcedAlignmentError("forced alignment interpolation was not disabled")
+    if provenance.get("text_normalization") != ALIGNMENT_TEXT_NORMALIZATION:
+        raise ForcedAlignmentError("forced alignment text_normalization is invalid")
+    min_word_score = _finite_number(
+        provenance.get("min_word_score"), "provenance min_word_score"
+    )
+    if not DEFAULT_MIN_WORD_SCORE <= min_word_score <= 1.0:
+        raise ForcedAlignmentError(
+            f"provenance min_word_score must be within "
+            f"[{DEFAULT_MIN_WORD_SCORE}, 1]"
+        )
+    contextual_unchanged_min_word_score = _finite_number(
+        provenance.get("contextual_unchanged_min_word_score"),
+        "provenance contextual_unchanged_min_word_score",
+    )
+    if (
+        contextual_unchanged_min_word_score
+        != CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
+    ):
+        raise ForcedAlignmentError(
+            "provenance contextual_unchanged_min_word_score must equal "
+            f"{CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE}"
+        )
+    review_word_score = _finite_number(
+        provenance.get("review_word_score"), "provenance review_word_score"
+    )
+    if review_word_score != REVIEW_WORD_SCORE:
+        raise ForcedAlignmentError(
+            f"provenance review_word_score must equal {REVIEW_WORD_SCORE}"
+        )
+    edited_token_min_word_score = _finite_number(
+        provenance.get("edited_token_min_word_score"),
+        "provenance edited_token_min_word_score",
+    )
+    if edited_token_min_word_score != EDITED_TOKEN_MIN_WORD_SCORE:
+        raise ForcedAlignmentError(
+            "provenance edited_token_min_word_score must equal "
+            f"{EDITED_TOKEN_MIN_WORD_SCORE}"
+        )
+    max_word_duration_ms = _require_integer(
+        provenance.get("max_word_duration_ms"),
+        "provenance max_word_duration_ms",
+        minimum=1,
+    )
+    if max_word_duration_ms > DEFAULT_MAX_WORD_DURATION_MS:
+        raise ForcedAlignmentError(
+            f"provenance max_word_duration_ms cannot exceed "
+            f"{DEFAULT_MAX_WORD_DURATION_MS}"
+        )
+    max_outward_drift_ms = _require_integer(
+        provenance.get("max_outward_drift_ms"),
+        "provenance max_outward_drift_ms",
+    )
+    if max_outward_drift_ms > DEFAULT_MAX_OUTWARD_DRIFT_MS:
+        raise ForcedAlignmentError(
+            f"provenance max_outward_drift_ms cannot exceed "
+            f"{DEFAULT_MAX_OUTWARD_DRIFT_MS}"
+        )
+    overlap_resolution = provenance.get("overlap_resolution")
+    if not isinstance(overlap_resolution, Mapping):
+        raise ForcedAlignmentError("provenance overlap_resolution must be an object")
+    if overlap_resolution.get("policy") != OVERLAP_RESOLUTION_POLICY:
+        raise ForcedAlignmentError("provenance overlap resolution policy is invalid")
+    for field in (
+        "initial_overlap_count",
+        "initial_component_count",
+        "adaptive_candidate_count",
+        "resolved_component_count",
+        "acoustic_component_count",
+        "final_overlap_count",
+    ):
+        _require_integer(
+            overlap_resolution.get(field),
+            f"provenance overlap_resolution {field}",
+        )
+    if overlap_resolution.get("final_overlap_count") != 0:
+        raise ForcedAlignmentError("provenance final overlap count must be zero")
+    selected_mode_counts = overlap_resolution.get("selected_mode_counts")
+    if not isinstance(selected_mode_counts, Mapping) or any(
+        not isinstance(mode, str)
+        or not mode
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 0
+        for mode, count in selected_mode_counts.items()
+    ):
+        raise ForcedAlignmentError(
+            "provenance overlap selected_mode_counts is invalid"
+        )
+    acoustic_components = overlap_resolution.get("acoustic_components")
+    if isinstance(acoustic_components, (str, bytes)) or not isinstance(
+        acoustic_components, Sequence
+    ):
+        raise ForcedAlignmentError(
+            "provenance overlap acoustic_components must be a sequence"
+        )
+    if len(acoustic_components) != overlap_resolution.get("acoustic_component_count"):
+        raise ForcedAlignmentError(
+            "provenance overlap acoustic component count mismatch"
+        )
+    if acoustic_components:
+        raise ForcedAlignmentError(
+            "synthetic acoustic overlap lanes are not independent speaker evidence"
+        )
+
+    segments = data.get("segments")
+    flat_words = data.get("words")
+    if isinstance(segments, (str, bytes)) or not isinstance(segments, Sequence):
+        raise ForcedAlignmentError("forced alignment segments must be a sequence")
+    if isinstance(flat_words, (str, bytes)) or not isinstance(flat_words, Sequence):
+        raise ForcedAlignmentError("forced alignment words must be a sequence")
+    if not segments:
+        raise ForcedAlignmentError("forced alignment segments must not be empty")
+
+    active_top_level_words: list[tuple[int, str | None]] = []
+    previous_top_level_start = -1
+    for position, raw_word in enumerate(flat_words, start=1):
+        if not isinstance(raw_word, Mapping):
+            raise ForcedAlignmentError("top-level aligned word must be an object")
+        word_start = _require_integer(
+            raw_word.get("start_ms"), f"top-level word {position} start_ms"
+        )
+        word_end = _require_integer(
+            raw_word.get("end_ms"), f"top-level word {position} end_ms", minimum=1
+        )
+        if word_start < previous_top_level_start:
+            raise ForcedAlignmentError("top-level aligned words are not chronological")
+        try:
+            current_speaker_id = speaker_id(raw_word, f"top-level word {position}")
+        except ValueError as exc:
+            raise ForcedAlignmentError(str(exc)) from exc
+        active_top_level_words = [
+            item for item in active_top_level_words if item[0] > word_start
+        ]
+        if any(
+            overlap_is_unsafe(prior_speaker, current_speaker_id)
+            for _, prior_speaker in active_top_level_words
+        ):
+            raise ForcedAlignmentError("same/unknown-speaker overlapping aligned words")
+        active_top_level_words.append((word_end, current_speaker_id))
+        previous_top_level_start = word_start
+
+    expected_segment_index = 1
+    word_indices: set[int] = set()
+    seen_uids: set[str] = set()
+    flattened: list[Mapping[str, Any]] = []
+    for raw_segment in segments:
+        if not isinstance(raw_segment, Mapping):
+            raise ForcedAlignmentError("aligned segment must be an object")
+        segment_index = _require_integer(
+            raw_segment.get("segment_index"), "aligned segment_index", minimum=1
+        )
+        if segment_index != expected_segment_index:
+            raise ForcedAlignmentError("aligned segment_index sequence is not contiguous")
+        expected_segment_index += 1
+        utterance_uid = _require_nonempty_string(
+            raw_segment.get("utterance_uid"), "aligned utterance_uid"
+        )
+        try:
+            segment_speaker_id = speaker_id(raw_segment, utterance_uid)
+        except ValueError as exc:
+            raise ForcedAlignmentError(str(exc)) from exc
+        if utterance_uid in seen_uids:
+            raise ForcedAlignmentError(f"duplicate aligned utterance_uid: {utterance_uid}")
+        seen_uids.add(utterance_uid)
+        text = _require_nonempty_string(raw_segment.get("text"), "aligned text")
+        asr_text_value = raw_segment.get("asr_text")
+        if not isinstance(asr_text_value, str):
+            raise ForcedAlignmentError(f"{utterance_uid} asr_text must be a string")
+        asr_text = unicodedata.normalize("NFC", asr_text_value)
+        deletion_audio_reviewed = raw_segment.get("deletion_audio_reviewed")
+        if not isinstance(deletion_audio_reviewed, bool):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} deletion_audio_reviewed must be boolean"
+            )
+        audio_reviewed = raw_segment.get("audio_reviewed", False)
+        review_disposition = raw_segment.get(
+            "review_disposition", "not_applicable"
+        )
+        if not isinstance(audio_reviewed, bool):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} audio_reviewed must be boolean"
+            )
+        if review_disposition not in {"not_applicable", "confirmed_dialogue"}:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} review_disposition is invalid for alignment"
+            )
+        audio_review_supported = (
+            audio_reviewed is True
+            and review_disposition == "confirmed_dialogue"
+        )
+        if audio_reviewed != audio_review_supported:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} audio-review fields are inconsistent"
+            )
+        if segment_speaker_id and segment_speaker_id.startswith("acoustic-overlap-"):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} synthetic lane is not independent speaker evidence"
+            )
+        expected_token_edits, expected_edit_audit = _token_edit_audit(
+            asr_text,
+            text,
+            deletion_audio_reviewed=deletion_audio_reviewed,
+        )
+        if expected_edit_audit["unreviewed_deleted_token_count"] != 0:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} contains unreviewed deleted ASR tokens"
+            )
+        if raw_segment.get("edit_audit") != expected_edit_audit:
+            raise ForcedAlignmentError(f"{utterance_uid} lexical edit audit mismatch")
+        if raw_segment.get("timing_source") != TIMING_SOURCE:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} aligned segment timing_source is invalid"
+            )
+        start_ms = _require_integer(
+            raw_segment.get("start_ms"), f"{utterance_uid} aligned start_ms"
+        )
+        end_ms = _require_integer(
+            raw_segment.get("end_ms"), f"{utterance_uid} aligned end_ms", minimum=1
+        )
+        if end_ms <= start_ms:
+            raise ForcedAlignmentError(f"{utterance_uid} aligned interval is invalid")
+        window_start = _require_integer(
+            raw_segment.get("alignment_window_start_ms"),
+            f"{utterance_uid} alignment_window_start_ms",
+        )
+        window_end = _require_integer(
+            raw_segment.get("alignment_window_end_ms"),
+            f"{utterance_uid} alignment_window_end_ms",
+            minimum=1,
+        )
+        if window_end <= window_start or start_ms < window_start or end_ms > window_end:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} aligned segment lies outside its alignment window"
+            )
+        coarse_start = _require_integer(
+            raw_segment.get("coarse_start_ms"),
+            f"{utterance_uid} coarse_start_ms",
+        )
+        coarse_end = _require_integer(
+            raw_segment.get("coarse_end_ms"),
+            f"{utterance_uid} coarse_end_ms",
+            minimum=1,
+        )
+        if (
+            coarse_start < window_start
+            or coarse_end > window_end
+            or coarse_end <= coarse_start
+        ):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} unpadded coarse bounds are outside its window"
+            )
+
+        segment_words = raw_segment.get("words")
+        if isinstance(segment_words, (str, bytes)) or not isinstance(
+            segment_words, Sequence
+        ):
+            raise ForcedAlignmentError(f"{utterance_uid} words must be a sequence")
+        if not segment_words:
+            raise ForcedAlignmentError(f"{utterance_uid} has no aligned lexical words")
+        if len(segment_words) != len(expected_token_edits):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} lexical text/timing coverage mismatch"
+            )
+        actual_lexemes: list[str] = []
+        actual_surfaces: list[str] = []
+        for segment_word_offset, word in enumerate(segment_words):
+            if not isinstance(word, Mapping):
+                raise ForcedAlignmentError(f"{utterance_uid} word must be an object")
+            word_index = _require_integer(
+                word.get("word_index"), f"{utterance_uid} word_index", minimum=1
+            )
+            if word_index in word_indices:
+                raise ForcedAlignmentError("aligned word_index values are not unique")
+            word_indices.add(word_index)
+            if word.get("segment_index") != segment_index:
+                raise ForcedAlignmentError(f"{utterance_uid} word segment_index mismatch")
+            if word.get("segment_id") != segment_index:
+                raise ForcedAlignmentError(f"{utterance_uid} word segment_id mismatch")
+            if word.get("utterance_uid") != utterance_uid:
+                raise ForcedAlignmentError(f"{utterance_uid} word utterance_uid mismatch")
+            try:
+                word_speaker_id = speaker_id(word, f"{utterance_uid} word")
+            except ValueError as exc:
+                raise ForcedAlignmentError(str(exc)) from exc
+            if word_speaker_id != segment_speaker_id:
+                raise ForcedAlignmentError(f"{utterance_uid} word speaker_id mismatch")
+            word_text = _require_nonempty_string(
+                word.get("text"), f"{utterance_uid} word text"
+            )
+            lexeme = _lexeme(word_text)
+            if not lexeme:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} contains a timed punctuation-only word"
+                )
+            actual_lexemes.append(lexeme)
+            actual_surfaces.append(word_text)
+            token_edit = expected_token_edits[segment_word_offset]
+            if word.get("edit_kind") != token_edit["edit_kind"]:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} edit_kind mismatch"
+                )
+            if word.get("asr_token_index") != token_edit["asr_token_index"]:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} asr_token_index mismatch"
+                )
+            if word.get("timing_source") != TIMING_SOURCE:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} timing_source is invalid"
+                )
+            if word.get("alignment_sha256") != alignment_sha256:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} alignment_sha256 mismatch"
+                )
+            word_start = _require_integer(
+                word.get("start_ms"), f"{utterance_uid} word start_ms"
+            )
+            word_end = _require_integer(
+                word.get("end_ms"), f"{utterance_uid} word end_ms", minimum=1
+            )
+            if word_end <= word_start:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} interval is invalid"
+                )
+            if word_end - word_start > max_word_duration_ms:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} exceeds provenance "
+                    "max_word_duration_ms"
+                )
+            duration_fields = DURATION_VAD_FIELDS.intersection(word)
+            if duration_fields:
+                if duration_fields != DURATION_VAD_FIELDS:
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} has incomplete "
+                        "duration VAD evidence"
+                    )
+                if word.get("duration_context") != DURATION_VAD_CONTEXT:
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} has invalid "
+                        "duration_context"
+                    )
+                if not audio_review_supported:
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} has unreviewed "
+                        "duration VAD evidence"
+                    )
+                raw_start_ms = _require_integer(
+                    word.get("raw_start_ms"),
+                    f"{utterance_uid} word {word_text!r} raw_start_ms",
+                )
+                raw_end_ms = _require_integer(
+                    word.get("raw_end_ms"),
+                    f"{utterance_uid} word {word_text!r} raw_end_ms",
+                    minimum=1,
+                )
+                vad_start_ms = _require_integer(
+                    word.get("vad_start_ms"),
+                    f"{utterance_uid} word {word_text!r} vad_start_ms",
+                )
+                vad_end_ms = _require_integer(
+                    word.get("vad_end_ms"),
+                    f"{utterance_uid} word {word_text!r} vad_end_ms",
+                    minimum=1,
+                )
+                _require_integer(
+                    word.get("vad_region_index"),
+                    f"{utterance_uid} word {word_text!r} vad_region_index",
+                    minimum=1,
+                )
+                if word.get("vad_source") != "silero_vad":
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} duration VAD source "
+                        "is not independent"
+                    )
+                if (
+                    raw_start_ms != word_start
+                    or raw_end_ms <= word_end
+                    or raw_end_ms - raw_start_ms <= max_word_duration_ms
+                    or raw_end_ms > window_end
+                    or vad_start_ms > raw_start_ms
+                    or raw_start_ms >= vad_end_ms
+                    or vad_end_ms != word_end
+                ):
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} duration VAD evidence "
+                        "does not bind the raw interval"
+                    )
+                next_word = (
+                    segment_words[segment_word_offset + 1]
+                    if segment_word_offset + 1 < len(segment_words)
+                    else None
+                )
+                if (
+                    not isinstance(next_word, Mapping)
+                    or vad_end_ms > _require_integer(
+                        next_word.get("start_ms"),
+                        f"{utterance_uid} next word start_ms",
+                    )
+                    or raw_end_ms > int(next_word["start_ms"])
+                ):
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} duration VAD boundary "
+                        "is not bounded by the next aligned word"
+                    )
+            if word_start < window_start or word_end > window_end:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} is outside its window"
+                )
+            score = word.get("score")
+            if score is None:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} alignment score is required"
+                )
+            score = _finite_number(score, f"{utterance_uid} word score")
+            if not 0.0 <= score <= 1.0:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} alignment score must be "
+                    "within [0, 1]"
+                )
+            expected_score_context = None
+            if score < min_word_score:
+                neighbor_scores = [
+                    _finite_number(
+                        segment_words[position].get("score"),
+                        f"{utterance_uid} neighboring word score",
+                    )
+                    for position in (
+                        segment_word_offset - 1,
+                        segment_word_offset + 1,
+                    )
+                    if 0 <= position < len(segment_words)
+                    and isinstance(segment_words[position], Mapping)
+                ]
+                if audio_review_supported:
+                    expected_score_context = AUDIO_REVIEW_SCORE_CONTEXT
+                elif (
+                    score < contextual_unchanged_min_word_score
+                    or token_edit["edit_kind"] != "unchanged"
+                    or not any(
+                        neighbor_score >= min_word_score
+                        for neighbor_score in neighbor_scores
+                    )
+                ):
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} word {word_text!r} alignment score is below "
+                        "provenance min_word_score without contextual support"
+                    )
+                else:
+                    expected_score_context = "adjacent_unchanged_word"
+            if (
+                token_edit["edit_kind"] in {"inserted", "replaced"}
+                and score < edited_token_min_word_score
+            ):
+                if audio_review_supported:
+                    expected_score_context = AUDIO_REVIEW_SCORE_CONTEXT
+                else:
+                    raise ForcedAlignmentError(
+                        f"{utterance_uid} edited token {word_text!r} alignment score "
+                        "is below provenance edited_token_min_word_score"
+                    )
+            if word.get("score_context") != expected_score_context:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word {word_text!r} has unexpected score_context"
+                )
+            probability = word.get("probability")
+            if probability != score:
+                raise ForcedAlignmentError(
+                    f"{utterance_uid} word probability/score mismatch"
+                )
+            flattened.append(word)
+
+        expected_lexemes = [_lexeme(token) for token in _lexical_tokens(text)]
+        if actual_lexemes != expected_lexemes:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} lexical text/timing coverage mismatch"
+            )
+        if actual_surfaces != _canonical_lexical_surfaces(text):
+            raise ForcedAlignmentError(
+                f"{utterance_uid} aligned words do not preserve corrected text surface"
+            )
+        expected_drift_audit = _segment_drift_audit(
+            segment_words,
+            coarse_start_ms=coarse_start,
+            coarse_end_ms=coarse_end,
+        )
+        if raw_segment.get("drift_audit") != expected_drift_audit:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} alignment drift audit mismatch"
+            )
+        exceeds_default_drift = (
+            expected_drift_audit["early_outward_drift_ms"] > max_outward_drift_ms
+            or expected_drift_audit["late_outward_drift_ms"] > max_outward_drift_ms
+        )
+        expected_drift_context = _bounded_drift_context(
+            segment_words,
+            expected_drift_audit,
+            window_start_ms=window_start,
+            window_end_ms=window_end,
+            coarse_start_ms=coarse_start,
+            coarse_end_ms=coarse_end,
+            max_outward_drift_ms=max_outward_drift_ms,
+        )
+        if raw_segment.get("drift_context") != expected_drift_context:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} drift_context does not match acoustic evidence"
+            )
+        if exceeds_default_drift and expected_drift_context is None:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} exceeds provenance max_outward_drift_ms"
+            )
+        if start_ms != segment_words[0]["start_ms"] or end_ms != segment_words[-1]["end_ms"]:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} segment boundaries do not match its aligned words"
+            )
+
+    if word_indices != set(range(1, len(flattened) + 1)):
+        raise ForcedAlignmentError("aligned word_index sequence is not contiguous")
+    chronological = sorted(
+        flattened,
+        key=lambda word: (
+            int(word["start_ms"]),
+            int(word["end_ms"]),
+            int(word["word_index"]),
+        ),
+    )
+    if list(flat_words) != chronological:
+        raise ForcedAlignmentError("top-level words do not match segment words")
+    active_words: list[tuple[int, str | None]] = []
+    for word in flat_words:
+        word_start = int(word["start_ms"])
+        word_end = int(word["end_ms"])
+        current_speaker_id = speaker_id(word, "top-level word")
+        active_words = [item for item in active_words if item[0] > word_start]
+        if any(
+            overlap_is_unsafe(prior_speaker, current_speaker_id)
+            for _, prior_speaker in active_words
+        ):
+            raise ForcedAlignmentError("same/unknown-speaker overlapping aligned words")
+        active_words.append((word_end, current_speaker_id))
+
+    computed = _computed_report(segments)
+    if computed["aligned_word_count"] != computed["input_lexical_token_count"]:
+        raise ForcedAlignmentError("not every lexical token has an aligned word")
+    report = data.get("report")
+    if not isinstance(report, Mapping):
+        raise ForcedAlignmentError("forced alignment report must be an object")
+    if report.get("alignment_sha256") != alignment_sha256:
+        raise ForcedAlignmentError("forced alignment report alignment_sha256 mismatch")
+    for key, expected in computed.items():
+        if report.get(key) != expected:
+            raise ForcedAlignmentError(
+                f"forced alignment report {key} mismatch: "
+                f"expected {expected}, got {report.get(key)!r}"
+            )
+    if _alignment_sha256(data) != alignment_sha256:
+        raise ForcedAlignmentError("forced alignment alignment_sha256 mismatch")
+    try:
+        json.dumps(data, ensure_ascii=False, allow_nan=False, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ForcedAlignmentError(f"forced alignment data is not JSON-safe: {exc}") from exc
+    return computed
+
+
+def _import_whisperx() -> Any:
+    try:
+        import whisperx  # type: ignore
+    except ImportError as exc:  # pragma: no cover - exercised in the runtime
+        raise ForcedAlignmentError(
+            "WhisperX is missing. Install the pinned whisperx==3.8.6 dependency first."
+        ) from exc
+    return whisperx
+
+
+def _whisperx_version(module: Any, explicit_version: str | None) -> str:
+    if explicit_version is not None:
+        return _require_nonempty_string(explicit_version, "whisperx_version")
+    module_version = getattr(module, "__version__", None)
+    if isinstance(module_version, str) and module_version.strip():
+        return module_version.strip()
+    try:
+        return importlib.metadata.version("whisperx")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise ForcedAlignmentError(
+            "Cannot determine the installed WhisperX version for provenance"
+        ) from exc
+
+
+def _allows_none(parameter: inspect.Parameter) -> bool:
+    if parameter.default is None:
+        return True
+    annotation = parameter.annotation
+    if annotation is inspect.Parameter.empty:
+        return False
+    if isinstance(annotation, str):
+        lowered = annotation.casefold()
+        return "none" in lowered or "optional" in lowered
+    origin = get_origin(annotation)
+    return origin in (Union, types.UnionType) and type(None) in get_args(annotation)
+
+
+def _supports_keyword(signature: inspect.Signature, name: str) -> bool:
+    return name in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _align_call_kwargs(align_function: Any) -> tuple[dict[str, Any], str]:
+    try:
+        signature = inspect.signature(align_function)
+    except (TypeError, ValueError):
+        # WhisperX 3.8.6 exposes a normal Python callable.  For unusual
+        # compatible wrappers, ``ignore`` is its documented no-interpolation
+        # mode and is safer than accepting the default ``nearest``.
+        return {"interpolate_method": "ignore"}, "disabled:ignore"
+
+    if not _supports_keyword(signature, "interpolate_method"):
+        raise ForcedAlignmentError(
+            "WhisperX align API cannot disable interpolation; refusing unsafe timing"
+        )
+    parameter = signature.parameters.get("interpolate_method")
+    interpolation: str | None = None
+    mode = "disabled:none"
+    if parameter is None or not _allows_none(parameter):
+        # WhisperX 3.8.6 uses the explicit ``ignore`` compatibility value.
+        interpolation = "ignore"
+        mode = "disabled:ignore"
+    kwargs: dict[str, Any] = {"interpolate_method": interpolation}
+    if _supports_keyword(signature, "return_char_alignments"):
+        kwargs["return_char_alignments"] = False
+    if _supports_keyword(signature, "print_progress"):
+        kwargs["print_progress"] = False
+    return kwargs, mode
+
+
+def _execute_alignment_call(
+    align: Any,
+    transcript: Any,
+    model: Any,
+    metadata: Any,
+    audio: Any,
+    device: str,
+    kwargs: Mapping[str, Any],
+) -> Any:
+    result = align(transcript, model, metadata, audio, device, **kwargs)
+    _raw_aligned_words(result, "alignment checkpoint")
+    return result
+
+
+def _raw_alignment_producer_sha256() -> str:
+    functions = (
+        _alignment_model_text,
+        _allows_none,
+        _supports_keyword,
+        _align_call_kwargs,
+        _raw_aligned_words,
+        _execute_alignment_call,
+    )
+    return digest(
+        {
+            function.__name__: inspect.getsource(function)
+            for function in functions
+        }
+    )
+
+
+def _unsafe_word_overlaps(
+    words: Sequence[Mapping[str, Any]],
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    ordered = sorted(
+        words,
+        key=lambda word: (int(word["start_ms"]), int(word["end_ms"])),
+    )
+    active: list[Mapping[str, Any]] = []
+    overlaps: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    for word in ordered:
+        word_start = int(word["start_ms"])
+        active = [prior for prior in active if int(prior["end_ms"]) > word_start]
+        current_speaker = speaker_id(word, "aligned word")
+        for prior in active:
+            if overlap_is_unsafe(
+                speaker_id(prior, "prior aligned word"), current_speaker
+            ):
+                overlaps.append((prior, word))
+        active.append(word)
+    return overlaps
+
+
+def _overlap_components(
+    overlaps: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    order: Mapping[str, int],
+) -> list[list[str]]:
+    graph: dict[str, set[str]] = {}
+    for prior, current in overlaps:
+        prior_uid = str(prior["utterance_uid"])
+        current_uid = str(current["utterance_uid"])
+        if prior_uid == current_uid:
+            continue
+        graph.setdefault(prior_uid, set()).add(current_uid)
+        graph.setdefault(current_uid, set()).add(prior_uid)
+    pending = set(graph)
+    result: list[list[str]] = []
+    while pending:
+        root = min(pending, key=order.__getitem__)
+        pending.remove(root)
+        component = {root}
+        stack = [root]
+        while stack:
+            uid = stack.pop()
+            for neighbor in graph[uid]:
+                if neighbor in component:
+                    continue
+                component.add(neighbor)
+                pending.discard(neighbor)
+                stack.append(neighbor)
+        result.append(sorted(component, key=order.__getitem__))
+    return sorted(result, key=lambda component: order[component[0]])
+
+
+def _alignment_candidate(
+    coarse: Mapping[str, Any],
+    *,
+    window_start_ms: int,
+    window_end_ms: int,
+    segment_index: int,
+    align: Any,
+    align_model: Any,
+    align_metadata: Mapping[str, Any],
+    audio: Any,
+    device: str,
+    call_kwargs: Mapping[str, Any],
+    min_word_score: float,
+    max_word_duration_ms: int,
+    max_outward_drift_ms: int,
+    vad_regions: Sequence[Mapping[str, Any]],
+    normalized_journal: UnitJournal | None = None,
+) -> list[dict[str, Any]]:
+    candidate = dict(coarse)
+    candidate["start_ms"] = window_start_ms
+    candidate["end_ms"] = window_end_ms
+    raw_result = align(
+        [
+            {
+                "start": window_start_ms / 1000.0,
+                "end": window_end_ms / 1000.0,
+                "text": _alignment_model_text(str(coarse["text"])),
+            }
+        ],
+        align_model,
+        align_metadata,
+        audio,
+        device,
+        **(
+            {"_mas_component_uids": [str(coarse["utterance_uid"])]}
+            if getattr(align, "_mas_scope_wrapper", False)
+            else {}
+        ),
+        **call_kwargs,
+    )
+    words, _ = _normalize_aligned_words(
+        raw_result,
+        candidate,
+        segment_index=segment_index,
+        first_word_index=1,
+        min_word_score=min_word_score,
+        max_word_duration_ms=max_word_duration_ms,
+        vad_regions=vad_regions,
+        checkpoint_journal=normalized_journal,
+    )
+    drift = _segment_drift_audit(
+        words,
+        coarse_start_ms=int(coarse["coarse_start_ms"]),
+        coarse_end_ms=int(coarse["coarse_end_ms"]),
+    )
+    exceeds = (
+        drift["early_outward_drift_ms"] > max_outward_drift_ms
+        or drift["late_outward_drift_ms"] > max_outward_drift_ms
+    )
+    context = _bounded_drift_context(
+        words,
+        drift,
+        window_start_ms=window_start_ms,
+        window_end_ms=window_end_ms,
+        coarse_start_ms=int(coarse["coarse_start_ms"]),
+        coarse_end_ms=int(coarse["coarse_end_ms"]),
+        max_outward_drift_ms=max_outward_drift_ms,
+    )
+    if exceeds and context is None:
+        raise ForcedAlignmentError(
+            f"{coarse['utterance_uid']} adaptive alignment exceeds outward drift"
+        )
+    return words
+
+
+def _timings_conflict(first, second=None):
+    ordered = ((start, end, speaker, 0) for start, end, speaker in first)
+    if second is not None:
+        ordered = heapq.merge(
+            ordered, ((start, end, speaker, 1) for start, end, speaker in second),
+            key=lambda item: item[:2],
+        )
+    active = []
+    for start, end, speaker, side in ordered:
+        active = [prior for prior in active if prior[0] > start]
+        if any((second is None or prior_side != side)
+               and overlap_is_unsafe(prior_speaker, speaker)
+               for _, prior_speaker, prior_side in active):
+            return True
+        active.append((end, speaker, side))
+    return False
+
+
+def _candidate_compatibility(component_uids, options, selected, work_check=None):
+    timings = {
+        (uid, index): sorted(
+            ((int(word["start_ms"]), int(word["end_ms"]), speaker_id(word, "candidate word"))
+             for word in words), key=lambda item: item[:2])
+        for uid in component_uids for index, (_, words) in enumerate(options[uid])
+    }
+    envelope_start = min(start for words in timings.values() for start, _, _ in words)
+    envelope_end = max(end for words in timings.values() for _, end, _ in words)
+    outside = sorted(
+        ((int(word["start_ms"]), int(word["end_ms"]), speaker_id(word, "neighbor word"))
+         for uid, words in selected.items() if uid not in component_uids for word in words
+         if int(word["end_ms"]) > envelope_start and int(word["start_ms"]) < envelope_end),
+        key=lambda item: item[:2],
+    )
+    fixed, pairs = {}, {}
+
+    def compatible(uid, index, chosen):
+        key = (uid, index)
+        if key not in fixed:
+            if work_check is not None:
+                work_check(search_checks=1)
+            fixed[key] = not (_timings_conflict(timings[key])
+                              or _timings_conflict(timings[key], outside))
+        if not fixed[key]:
+            return False
+        for other_uid, other_index in chosen.items():
+            other = (other_uid, other_index)
+            pair = tuple(sorted((key, other)))
+            if pair not in pairs:
+                if work_check is not None:
+                    work_check(search_checks=1)
+                pairs[pair] = not _timings_conflict(timings[key], timings[other])
+            if not pairs[pair]:
+                return False
+        return True
+
+    return compatible
+
+
+def _bounded_overlap_search(
+    component_uids: Sequence[str],
+    options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
+    selected: Mapping[str, list[dict[str, Any]]],
+    order: Mapping[str, int],
+    max_attempts: int,
+    work_check: Any = None,
+) -> tuple[dict[str, tuple[str, list[dict[str, Any]]]] | None, int]:
+    pair_compatible = _candidate_compatibility(component_uids, options, selected, work_check)
+    ranked_options = {
+        uid: sorted(
+            range(len(options[uid])),
+            key=lambda index: (
+                0 if options[uid][index][0] == "joint" else
+                1 if options[uid][index][0] == "independent" else
+                2 if options[uid][index][0].startswith("padding-") else 3
+            ),
+        )
+        for uid in component_uids
+    }
+    search_attempts = 0
+
+    def compatible(
+        uid: str,
+        option: int,
+        chosen: Mapping[str, int],
+    ) -> bool:
+        nonlocal search_attempts
+        if search_attempts >= max_attempts:
+            raise ForcedAlignmentError(
+                "overlap candidate search budget exceeded: "
+                f"{search_attempts + 1} candidates for {', '.join(component_uids)}; "
+                f"limit {max_attempts}"
+            )
+        search_attempts += 1
+        if work_check is not None:
+            work_check(search_checks=1)
+        return pair_compatible(uid, option, chosen)
+
+    search_uids = sorted(
+        component_uids,
+        key=lambda uid: (len(ranked_options[uid]), order[uid]),
+    )
+    greedy: dict[str, int] = {}
+    for uid in search_uids:
+        for option in ranked_options[uid]:
+            if compatible(uid, option, greedy):
+                greedy[uid] = option
+                break
+        else:
+            break
+    if len(greedy) == len(component_uids):
+        return {uid: options[uid][index] for uid, index in greedy.items()}, search_attempts
+
+    def search(
+        chosen: dict[str, int],
+        remaining: Sequence[str],
+    ) -> dict[str, int] | None:
+        if not remaining:
+            return dict(chosen)
+        viable_by_uid: dict[str, list[int]] = {}
+        for uid in sorted(remaining, key=order.__getitem__):
+            viable = [
+                option
+                for option in ranked_options[uid]
+                if compatible(uid, option, chosen)
+            ]
+            if not viable:
+                return None
+            viable_by_uid[uid] = viable
+        uid = min(
+            remaining,
+            key=lambda candidate: (len(viable_by_uid[candidate]), order[candidate]),
+        )
+        next_remaining = [candidate for candidate in remaining if candidate != uid]
+        for option in viable_by_uid[uid]:
+            chosen[uid] = option
+            result = search(chosen, next_remaining)
+            if result is not None:
+                return result
+            del chosen[uid]
+        return None
+
+    chosen = search({}, component_uids)
+    return (None if chosen is None else {uid: options[uid][index] for uid, index in chosen.items()},
+            search_attempts)
+
+
+def _overlap_pair_signature(
+    selected: Mapping[str, list[dict[str, Any]]],
+    order: Mapping[str, int],
+) -> frozenset[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    words = [word for aligned in selected.values() for word in aligned]
+    for left, right in _unsafe_word_overlaps(words):
+        left_uid = str(left["utterance_uid"])
+        right_uid = str(right["utterance_uid"])
+        if (order[left_uid], left_uid) > (order[right_uid], right_uid):
+            left_uid, right_uid = right_uid, left_uid
+        pairs.add((left_uid, right_uid))
+    return frozenset(pairs)
+
+
+def _strict_existing_option_selection(
+    component_uids: Sequence[str],
+    options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
+    selected: Mapping[str, list[dict[str, Any]]],
+    order: Mapping[str, int],
+    *,
+    checkpoint_journal: UnitJournal | None = None,
+    work_check: Any = None,
+    objective: str = "preferred",
+) -> dict[str, tuple[str, list[dict[str, Any]]]] | None:
+    key = None
+    if checkpoint_journal is not None:
+        candidate_words = [word for uid in component_uids
+                           for _, words in options[uid] for word in words]
+        envelope_start = min(int(word["start_ms"]) for word in candidate_words)
+        envelope_end = max(int(word["end_ms"]) for word in candidate_words)
+        key = digest({
+            "phase": "component-selection",
+            "objective": objective,
+            "uids": list(component_uids),
+            "options": {uid: [(mode, [{key: value for key, value in word.items()
+                                      if key != "word_index"} for word in words])
+                              for mode, words in options[uid]] for uid in component_uids},
+            "order": {uid: order[uid] for uid in component_uids},
+            "neighbors": [{key: value for key, value in word.items() if key != "word_index"}
+                          for uid, words in selected.items()
+                          if uid not in component_uids for word in words
+                          if int(word["end_ms"]) > envelope_start
+                          and int(word["start_ms"]) < envelope_end],
+        })
+        cached = checkpoint_journal.read(key)
+        if isinstance(cached, Mapping) and cached.get("status") == "EXHAUSTED":
+            return None
+        if isinstance(cached, Mapping) and cached.get("status") == "SELECTED":
+            indices = cached.get("indices")
+            if (isinstance(indices, Mapping) and set(indices) == set(component_uids)
+                    and all(type(index) is int and 0 <= index < len(options[uid])
+                            for uid, index in indices.items())):
+                chosen = {uid: options[uid][indices[uid]] for uid in component_uids}
+                trial = dict(selected)
+                trial.update({uid: words for uid, (_, words) in chosen.items()})
+                if not any(str(left["utterance_uid"]) in component_uids
+                           or str(right["utterance_uid"]) in component_uids
+                           for left, right in _unsafe_word_overlaps(
+                               [word for words in trial.values() for word in words])):
+                    return chosen
+    chosen = _strict_existing_option_selection_uncached(
+        component_uids, options, selected, order, work_check=work_check, objective=objective,
+    )
+    if checkpoint_journal is not None:
+        checkpoint_journal.write(key, {
+            "status": "EXHAUSTED" if chosen is None else "SELECTED",
+            "component_uids": list(component_uids),
+            "indices": None if chosen is None else {
+                uid: list(options[uid]).index(chosen[uid]) for uid in component_uids
+            },
+        })
+    return chosen
+
+
+def _strict_existing_option_selection_uncached(
+    component_uids: Sequence[str],
+    options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
+    selected: Mapping[str, list[dict[str, Any]]],
+    order: Mapping[str, int],
+    *,
+    work_check: Any = None,
+    objective: str = "preferred",
+) -> dict[str, tuple[str, list[dict[str, Any]]]] | None:
+    if objective not in ("preferred", "joint"):
+        raise ValueError("unknown component selection objective")
+    option_sets = [options[uid] for uid in component_uids]
+    combination_count = math.prod(len(option_set) for option_set in option_sets)
+    if combination_count > MAX_OVERLAP_COMBINATIONS:
+        chosen, _ = _bounded_overlap_search(
+            component_uids,
+            options,
+            selected,
+            order,
+            MAX_OVERLAP_COMBINATIONS,
+            work_check=work_check,
+        )
+        return chosen
+    compatible = _candidate_compatibility(component_uids, options, selected, work_check)
+    weights = [[(int(mode == "joint"),) if objective == "joint" else
+                (int(mode == "joint"), int(mode == "independent"), int(mode.startswith("padding-")))
+                for mode, _ in option_set] for option_set in option_sets]
+    width = 1 if objective == "joint" else 3
+    upper = [(0,) * width for _ in range(len(component_uids) + 1)]
+    for position in range(len(component_uids) - 1, -1, -1):
+        upper[position] = tuple(upper[position + 1][axis]
+                                + max(weight[axis] for weight in weights[position])
+                                for axis in range(width))
+    best, best_score = None, None
+
+    def search(position, chosen, score):
+        nonlocal best, best_score
+        if work_check is not None:
+            work_check(search_checks=1)
+        if best_score is not None and tuple(a + b for a, b in zip(score, upper[position])) <= best_score:
+            return
+        if position == len(component_uids):
+            best, best_score = dict(chosen), score
+            return
+        uid = component_uids[position]
+        for index, weight in enumerate(weights[position]):
+            if compatible(uid, index, chosen):
+                chosen[uid] = index
+                search(position + 1, chosen, tuple(a + b for a, b in zip(score, weight)))
+                del chosen[uid]
+
+    search(0, {}, (0,) * width)
+    return None if best is None else {uid: options[uid][index] for uid, index in best.items()}
+
+
+def _stabilize_overlap_selection(
+    selected: dict[str, list[dict[str, Any]]],
+    options: Mapping[str, Sequence[tuple[str, list[dict[str, Any]]]]],
+    selected_mode_by_uid: dict[str, str],
+    order: Mapping[str, int],
+    contextual_component_uids: Any,
+    *,
+    checkpoint_journal: UnitJournal | None = None,
+    work_check: Any = None,
+    work_activate: Any = None,
+) -> None:
+    for _ in range(MAX_FINAL_STABILIZATION_ROUNDS):
+        round_signature = _overlap_pair_signature(selected, order)
+        if not round_signature:
+            return
+        overlaps = _unsafe_word_overlaps(
+            [word for words in selected.values() for word in words]
+        )
+        components = _overlap_components(overlaps, order)
+        changed = False
+        for seed_uids in components:
+            current_signature = _overlap_pair_signature(selected, order)
+            if not any(
+                left in seed_uids or right in seed_uids
+                for left, right in current_signature
+            ):
+                continue
+            if work_activate is not None:
+                work_activate(seed_uids, "stabilization")
+            component_uids = contextual_component_uids(seed_uids)
+            candidate_options = {
+                uid: list(options[uid]) for uid in component_uids
+            }
+            for uid in component_uids:
+                selected_option = (
+                    selected_mode_by_uid[uid],
+                    selected[uid],
+                )
+                if not any(
+                    mode == selected_option[0] and words == selected_option[1]
+                    for mode, words in candidate_options[uid]
+                ):
+                    candidate_options[uid].append(selected_option)
+            chosen = _strict_existing_option_selection(
+                component_uids,
+                candidate_options,
+                selected,
+                order,
+                checkpoint_journal=checkpoint_journal,
+                work_check=work_check,
+            )
+            if chosen is None:
+                continue
+            trial = dict(selected)
+            trial.update({uid: option[1] for uid, option in chosen.items()})
+            trial_signature = _overlap_pair_signature(trial, order)
+            if not trial_signature < current_signature:
+                continue
+            for uid, (mode, words) in chosen.items():
+                selected[uid] = words
+                selected_mode_by_uid[uid] = mode
+            changed = True
+        if not changed or not _overlap_pair_signature(selected, order) < round_signature:
+            return
+
+
+def _component_cache_shape_valid(cached, component_uids, diagnostic_keys):
+    if not isinstance(cached, Mapping):
+        return False
+    try:
+        for field in ("selected", "options", "modes"):
+            if not isinstance(cached[field], Mapping) or set(cached[field]) != set(component_uids):
+                return False
+        if (not isinstance(cached["diagnostics"], Mapping)
+                or set(cached["diagnostics"]) != set(diagnostic_keys)
+                or not isinstance(cached["raw_results"], Mapping)):
+            return False
+        for value in [cached["candidate_count"], *cached["diagnostics"].values()]:
+            _require_integer(value, "component checkpoint count")
+        for key, sha256 in cached["raw_results"].items():
+            if (not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key)
+                    or not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256)):
+                return False
+        if not isinstance(cached["failure_examples"], list) or len(cached["failure_examples"]) > 5:
+            return False
+        for message in cached["failure_examples"]:
+            _require_nonempty_string(message, "component checkpoint failure")
+        if not isinstance(cached["joint_calls"], list):
+            return False
+        for start, end, text in cached["joint_calls"]:
+            _require_integer(start, "component checkpoint window start")
+            _require_integer(end, "component checkpoint window end", minimum=start + 1)
+            _require_nonempty_string(text, "component checkpoint transcript")
+        required_word_fields = {
+            "word_index", "segment_index", "segment_id", "utterance_uid", "text",
+            "start_ms", "end_ms", "score", "probability", "edit_kind",
+            "asr_token_index", "timing_source",
+        }
+        for uid in component_uids:
+            _require_nonempty_string(cached["modes"][uid], "component checkpoint mode")
+            if not isinstance(cached["options"][uid], list) or not cached["options"][uid]:
+                return False
+            for mode, words in [(cached["modes"][uid], cached["selected"][uid]),
+                                *cached["options"][uid]]:
+                _require_nonempty_string(mode, "component checkpoint option mode")
+                if not isinstance(words, list) or not words:
+                    return False
+                for word in words:
+                    if (not isinstance(word, dict) or not required_word_fields <= word.keys()
+                            or word["utterance_uid"] != uid):
+                        return False
+                    for field in ("word_index", "segment_index", "segment_id", "start_ms", "end_ms"):
+                        _require_integer(word[field], f"component checkpoint {field}")
+                    _finite_number(word["score"], "component checkpoint score")
+                    _finite_number(word["probability"], "component checkpoint probability")
+                    _require_nonempty_string(word["text"], "component checkpoint word")
+                    speaker_id(word, "component checkpoint word")
+    except (KeyError, TypeError, ValueError, ForcedAlignmentError):
+        return False
+    return True
+
+
+def _resolve_alignment_overlaps(
+    source: Sequence[Mapping[str, Any]],
+    independent: Mapping[str, list[dict[str, Any]]],
+    *,
+    align: Any,
+    align_model: Any,
+    align_metadata: Mapping[str, Any],
+    audio: Any,
+    device: str,
+    call_kwargs: Mapping[str, Any],
+    min_word_score: float,
+    max_word_duration_ms: int,
+    max_outward_drift_ms: int,
+    vad_regions: Sequence[Mapping[str, Any]],
+    normalized_journal: UnitJournal | None = None,
+    initial_modes: Mapping[str, str] | None = None,
+    component_journal: UnitJournal | None = None,
+    raw_journal: UnitJournal | None = None,
+    raw_call_keys: list[str] | None = None,
+    prior_conflict_seconds: Mapping[str, float] | None = None,
+    max_recovery_seconds: int = MAX_RECOVERY_SECONDS,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str], dict[str, Any]]:
+    by_uid = {str(item["utterance_uid"]): item for item in source}
+    order = {str(item["utterance_uid"]): index for index, item in enumerate(source)}
+    selected = dict(independent)
+    initial_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    initial_components = _overlap_components(initial_overlaps, order)
+    failure_basis = digest({
+        "source": source, "independent": independent,
+        "journal_binding": component_journal.binding if component_journal else None,
+        "limits": [MAX_CONFLICT_ALIGNMENT_CALLS, MAX_CONFLICT_SEARCH_CHECKS,
+                   MAX_CONFLICT_SECONDS, max_recovery_seconds],
+    })
+    if component_journal is not None:
+        failure_path = component_journal.root.parent / "latest-conflict-failure.json"
+        if failure_path.is_file():
+            saved = json.loads(failure_path.read_text(encoding="utf-8"))
+            details = saved.get("data")
+            if not isinstance(details, dict) or saved.get("sha256") != digest(details):
+                raise ForcedAlignmentError("conflict failure receipt checksum mismatch")
+            if not isinstance(details.get("raw_results"), Mapping):
+                raise ForcedAlignmentError("conflict failure raw evidence is invalid")
+            if details.get("failure_basis") == failure_basis and all(
+                raw_journal is not None and digest(raw_journal.read(key)) == sha256
+                for key, sha256 in details.get("raw_results", {}).items()
+            ):
+                raise AlignmentConflictBlocked(details)
+    conflict_budgets = [{"uids": {uid}, "seconds": seconds,
+                         "alignment_calls": 0, "search_checks": 0}
+                        for uid, seconds in (prior_conflict_seconds or {}).items()]
+    active_budget = None
+    active_started = None
+    total_recovery_seconds = sum((prior_conflict_seconds or {}).values())
+    active_phase = "initial"
+
+    def pause_work():
+        nonlocal active_started, total_recovery_seconds
+        if active_started is not None:
+            elapsed = time.monotonic() - active_started
+            active_budget["seconds"] += elapsed
+            total_recovery_seconds += elapsed
+            active_started = None
+
+    def block_conflict(reason, message):
+        pause_work()
+        unresolved = _unsafe_word_overlaps(
+            [word for words in selected.values() for word in words]
+        )
+        component_uids = sorted(active_budget["uids"], key=order.__getitem__)
+        details = {
+            "status": "BLOCKED", "reason": reason, "message": message,
+            "phase": active_phase, "component_uids": component_uids,
+            "unresolved_components": _overlap_components(unresolved, order),
+            "work": {key: active_budget[key]
+                     for key in ("seconds", "alignment_calls", "search_checks")},
+            "total_recovery_seconds": total_recovery_seconds,
+            "limits": {"seconds": MAX_CONFLICT_SECONDS,
+                       "alignment_calls": MAX_CONFLICT_ALIGNMENT_CALLS,
+                       "search_checks": MAX_CONFLICT_SEARCH_CHECKS,
+                       "total_recovery_seconds": max_recovery_seconds},
+            "source_sha256": digest([by_uid[uid] for uid in component_uids]),
+            "candidate_state_sha256": digest({uid: selected[uid] for uid in component_uids}),
+            "failure_basis": failure_basis,
+            "raw_results": ({key: digest(raw_journal.read(key))
+                             for key in set(raw_call_keys or ())}
+                            if raw_journal is not None else {}),
+        }
+        details["failure_invariant"] = digest({
+            "reason": reason, "phase": active_phase, "component_uids": component_uids,
+            "source_sha256": details["source_sha256"],
+            "candidate_state_sha256": details["candidate_state_sha256"],
+            "limits": details["limits"],
+            "journal_binding": component_journal.binding if component_journal else None,
+            "raw_results": details["raw_results"],
+        })
+        if component_journal is not None:
+            component_journal.write(details["failure_invariant"], details)
+            atomic_json(component_journal.root.parent / "latest-conflict-failure.json",
+                        {"data": details, "sha256": digest(details)})
+        raise AlignmentConflictBlocked(details)
+
+    def activate_work(component_uids, phase):
+        nonlocal active_budget, active_started, active_phase
+        pause_work()
+        uid_set = set(component_uids)
+        matching = [budget for budget in conflict_budgets if budget["uids"] & uid_set]
+        if matching:
+            active_budget = matching[0]
+            for other in matching[1:]:
+                active_budget["uids"].update(other["uids"])
+                for key in ("seconds", "alignment_calls", "search_checks"):
+                    active_budget[key] += other[key]
+                conflict_budgets.remove(other)
+            active_budget["uids"].update(uid_set)
+        else:
+            active_budget = {"uids": uid_set, "seconds": 0.0,
+                             "alignment_calls": 0, "search_checks": 0}
+            conflict_budgets.append(active_budget)
+        active_phase = phase
+        active_started = time.monotonic()
+        check_work()
+
+    def check_work(*, alignment_calls=0, search_checks=0):
+        if active_budget is None:
+            return
+        if active_budget["alignment_calls"] + alignment_calls > MAX_CONFLICT_ALIGNMENT_CALLS:
+            block_conflict("conflict_alignment_budget", "fresh acoustic call limit reached")
+        if active_budget["search_checks"] + search_checks > MAX_CONFLICT_SEARCH_CHECKS:
+            block_conflict("conflict_search_budget", "candidate search limit reached")
+        active_budget["alignment_calls"] += alignment_calls
+        active_budget["search_checks"] += search_checks
+        elapsed = time.monotonic() - active_started if active_started is not None else 0.0
+        if active_budget["seconds"] + elapsed >= MAX_CONFLICT_SECONDS:
+            block_conflict("conflict_time_budget", "acoustic conflict time limit reached")
+        if total_recovery_seconds + elapsed >= max_recovery_seconds:
+            block_conflict("recovery_time_budget", "episode acoustic recovery limit reached")
+
+    unbounded_align = align
+
+    def align(transcript, model, metadata, audio, device, **kwargs):
+        request_uids = kwargs.pop("_mas_component_uids", None)
+        key = digest({"transcript": transcript, "kwargs": kwargs})
+        cached = raw_journal is not None and raw_journal.read(key) is not None
+        check_work(alignment_calls=0 if cached else 1)
+        result = unbounded_align(
+            transcript,
+            model,
+            metadata,
+            audio,
+            device,
+            **(
+                {
+                    # Budget accounting merges components; request
+                    # authorization identity must stay the caller's own
+                    # replaceable targets. Only a caller that passes no UIDs at
+                    # all falls back to the merged budget.
+                    "_mas_component_uids": request_uids
+                    if request_uids is not None
+                    else sorted(active_budget["uids"], key=order.__getitem__),
+                    **kwargs,
+                }
+                if (active_budget is not None or request_uids is not None)
+                and getattr(unbounded_align, "_mas_scope_wrapper", False)
+                else kwargs
+            ),
+        )
+        check_work()
+        return result
+
+    align._mas_scope_wrapper = getattr(
+        unbounded_align, "_mas_scope_wrapper", False
+    )
+    initial_modes = initial_modes or {}
+    options: dict[str, list[tuple[str, list[dict[str, Any]]]]] = {
+        uid: [(initial_modes.get(uid, "independent"), words)]
+        for uid, words in independent.items()
+    }
+    selected_mode_by_uid = {
+        uid: initial_modes.get(uid, "independent") for uid in selected
+    }
+    joint_diagnostics: dict[str, Any] = {
+        "attempts": 0,
+        "align_failures": 0,
+        "raw_word_count_mismatches": 0,
+        "candidate_validation_failures": 0,
+        "candidate_options_added": 0,
+        "atomic_selections": 0,
+        "failure_examples": [],
+    }
+    component_failures: list[str] = []
+
+    def record_joint_failure(message: str) -> None:
+        if len(component_failures) < 5:
+            component_failures.append(message)
+        examples = joint_diagnostics["failure_examples"]
+        if len(examples) < 5:
+            examples.append(message)
+
+    def add_option(uid: str, mode: str, words: list[dict[str, Any]]) -> None:
+        signature = tuple(
+            (int(word["start_ms"]), int(word["end_ms"])) for word in words
+        )
+        if any(
+            signature
+            == tuple(
+                (int(word["start_ms"]), int(word["end_ms"]))
+                for word in existing
+            )
+            for _, existing in options[uid]
+        ):
+            return
+        options[uid].append((mode, words))
+
+    def select_component(component_uids: Sequence[str]) -> bool:
+        option_sets = [options[uid] for uid in component_uids]
+        combination_count = math.prod(len(option_set) for option_set in option_sets)
+        if combination_count > MAX_OVERLAP_COMBINATIONS:
+            raise ForcedAlignmentError(
+                f"overlap candidate budget exceeded: {combination_count} combinations "
+                f"for {', '.join(component_uids)}; limit {MAX_OVERLAP_COMBINATIONS}"
+            )
+        chosen = _strict_existing_option_selection(
+            component_uids, options, selected, order,
+            checkpoint_journal=component_journal, work_check=check_work, objective="joint",
+        )
+        if chosen is None:
+            return False
+        for uid, (mode, words) in chosen.items():
+            selected[uid] = words
+            selected_mode_by_uid[uid] = mode
+        return True
+
+    adaptive_candidate_count = 0
+    attempted_joint_calls: set[tuple[int, int, str]] = set()
+
+    def add_joint_component_options(
+        target_uids: Sequence[str],
+        context_uids: Sequence[str],
+        component_index: str,
+        *,
+        padding_ms: int | None = None,
+        require_complete: bool = False,
+    ) -> bool:
+        nonlocal adaptive_candidate_count
+        if not component_has_unsafe_overlap(target_uids):
+            return True
+        target_uid_set = set(target_uids)
+        group = [by_uid[uid] for uid in context_uids]
+        if any(int(right["coarse_start_ms"]) - int(left["coarse_end_ms"])
+               > MAX_RECOVERY_CONTEXT_GAP_MS for left, right in zip(group, group[1:])):
+            return False
+        joint_start = min(int(item["start_ms"]) for item in group)
+        joint_end = max(int(item["end_ms"]) for item in group)
+        if padding_ms is not None:
+            joint_start = max(
+                joint_start,
+                min(int(item["coarse_start_ms"]) for item in group) - padding_ms,
+            )
+            joint_end = min(
+                joint_end,
+                max(int(item["coarse_end_ms"]) for item in group) + padding_ms,
+            )
+        joint_text = " ".join(str(item["text"]) for item in group)
+        joint_model_text = _alignment_model_text(joint_text)
+        joint_call = (joint_start, joint_end, joint_model_text)
+        if joint_call in attempted_joint_calls:
+            return False
+        attempted_joint_calls.add(joint_call)
+        joint_diagnostics["attempts"] += 1
+        try:
+            joint_raw = align(
+                [
+                    {
+                        "start": joint_start / 1000.0,
+                        "end": joint_end / 1000.0,
+                        "text": joint_model_text,
+                    }
+                ],
+                align_model,
+                align_metadata,
+                audio,
+                device,
+                _mas_component_uids=list(target_uids),
+                **call_kwargs,
+            )
+            raw_words = _raw_aligned_words(
+                joint_raw, f"overlap-component-{component_index}"
+            )
+            expected_count = sum(
+                len(_canonical_lexical_surfaces(str(item["text"])))
+                for item in group
+            )
+            lexical_positions = _lexical_raw_positions(raw_words)
+            if len(lexical_positions) != expected_count:
+                joint_diagnostics["raw_word_count_mismatches"] += 1
+                record_joint_failure(
+                    f"{component_index}: expected {expected_count} joint words, "
+                    f"received {len(lexical_positions)}"
+                )
+                return False
+            offset = 0
+            joint_candidates: dict[str, list[dict[str, Any]]] = {}
+            for item in group:
+                uid = str(item["utterance_uid"])
+                word_count = len(_canonical_lexical_surfaces(str(item["text"])))
+                raw_word_slice = _lexical_raw_slice(
+                    raw_words, lexical_positions, offset, word_count
+                )
+                offset += word_count
+                if uid not in target_uid_set:
+                    continue
+                try:
+                    expanded = dict(item)
+                    expanded["start_ms"] = joint_start
+                    expanded["end_ms"] = joint_end
+                    words, _ = _normalize_aligned_words(
+                        {"word_segments": raw_word_slice},
+                        expanded,
+                        segment_index=order[uid] + 1,
+                        first_word_index=1,
+                        min_word_score=min_word_score,
+                        max_word_duration_ms=max_word_duration_ms,
+                        vad_regions=vad_regions,
+                        checkpoint_journal=normalized_journal,
+                    )
+                    drift = _segment_drift_audit(
+                        words,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                    )
+                    context = _bounded_drift_context(
+                        words,
+                        drift,
+                        window_start_ms=joint_start,
+                        window_end_ms=joint_end,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                        max_outward_drift_ms=max_outward_drift_ms,
+                    )
+                    if (
+                        drift["early_outward_drift_ms"] > max_outward_drift_ms
+                        or drift["late_outward_drift_ms"] > max_outward_drift_ms
+                    ) and context is None:
+                        continue
+                except AlignmentConflictBlocked:
+                    raise
+                except Exception as exc:
+                    joint_diagnostics["candidate_validation_failures"] += 1
+                    record_joint_failure(f"{component_index}/{uid}: {exc}")
+                    continue
+                joint_candidates[uid] = words
+        except AlignmentConflictBlocked:
+            raise
+        except Exception as exc:
+            joint_diagnostics["align_failures"] += 1
+            record_joint_failure(f"{component_index}: {exc}")
+            return False
+        if not joint_candidates:
+            return False
+        if require_complete and set(joint_candidates) != target_uid_set:
+            return False
+        if not require_complete:
+            for uid, words in joint_candidates.items():
+                before = len(options[uid])
+                add_option(uid, "joint", words)
+                added = len(options[uid]) - before
+                adaptive_candidate_count += added
+                joint_diagnostics["candidate_options_added"] += added
+        active_coarse: list[Mapping[str, Any]] = []
+        for item in sorted(
+            (by_uid[uid] for uid in joint_candidates),
+            key=lambda value: int(value["coarse_start_ms"]),
+        ):
+            item_start = int(item["coarse_start_ms"])
+            active_coarse = [
+                prior
+                for prior in active_coarse
+                if int(prior["coarse_end_ms"]) > item_start
+            ]
+            current_speaker = speaker_id(item, str(item["utterance_uid"]))
+            if any(
+                current_speaker is None
+                or speaker_id(prior, str(prior["utterance_uid"])) != current_speaker
+                for prior in active_coarse
+            ):
+                return False
+            active_coarse.append(item)
+        candidate_uid_set = set(joint_candidates)
+        outside_words = [
+            word
+            for uid, words in selected.items()
+            if uid not in candidate_uid_set
+            for word in words
+        ]
+        trial_words = outside_words + [
+            word for words in joint_candidates.values() for word in words
+        ]
+        if any(
+            str(left["utterance_uid"]) in candidate_uid_set
+            or str(right["utterance_uid"]) in candidate_uid_set
+            for left, right in _unsafe_word_overlaps(trial_words)
+        ):
+            return False
+        if require_complete:
+            for uid, words in joint_candidates.items():
+                before = len(options[uid])
+                add_option(uid, "joint", words)
+                added = len(options[uid]) - before
+                adaptive_candidate_count += added
+                joint_diagnostics["candidate_options_added"] += added
+        for uid, words in joint_candidates.items():
+            selected[uid] = words
+            selected_mode_by_uid[uid] = "joint"
+        joint_diagnostics["atomic_selections"] += 1
+        return not any(
+            str(left["utterance_uid"]) in target_uid_set
+            or str(right["utterance_uid"]) in target_uid_set
+            for left, right in _unsafe_word_overlaps(
+                [word for words in selected.values() for word in words]
+            )
+        )
+
+    def contextual_component_uids(
+        component_uids: Sequence[str], *, radius: int = 2
+    ) -> list[str]:
+        positions = [order[uid] for uid in component_uids]
+        start = max(0, min(positions) - radius)
+        end = min(len(source), max(positions) + radius + 1)
+        for position in range(min(positions), start, -1):
+            if (int(source[position]["coarse_start_ms"])
+                    - int(source[position - 1]["coarse_end_ms"])) > MAX_RECOVERY_CONTEXT_GAP_MS:
+                start = position
+                break
+        for position in range(max(positions) + 1, end):
+            if (int(source[position]["coarse_start_ms"])
+                    - int(source[position - 1]["coarse_end_ms"])) > MAX_RECOVERY_CONTEXT_GAP_MS:
+                end = position
+                break
+        return [str(item["utterance_uid"]) for item in source[start:end]]
+
+    def component_has_unsafe_overlap(component_uids: Sequence[str]) -> bool:
+        uid_set = set(component_uids)
+        return any(
+            str(left["utterance_uid"]) in uid_set
+            or str(right["utterance_uid"]) in uid_set
+            for left, right in _unsafe_word_overlaps(
+                [word for words in selected.values() for word in words]
+            )
+        )
+
+    for component_index, component_uids in enumerate(initial_components, start=1):
+        if not component_has_unsafe_overlap(component_uids):
+            continue
+        group = [by_uid[uid] for uid in component_uids]
+        component_key = None
+        raw_call_start = len(raw_call_keys or ())
+        prior_joint_calls = set(attempted_joint_calls)
+        prior_candidate_count = adaptive_candidate_count
+        prior_diagnostics = {
+            key: value for key, value in joint_diagnostics.items()
+            if key != "failure_examples"
+        }
+        component_failures.clear()
+        if component_journal is not None and raw_journal is not None:
+            envelope_start = min(int(item["start_ms"]) for item in group)
+            envelope_end = max(int(item["end_ms"]) for item in group)
+            component_key = digest({
+                "component_index": component_index,
+                "source": group,
+                "order": {uid: order[uid] for uid in component_uids},
+                "modes": {uid: selected_mode_by_uid[uid] for uid in component_uids},
+                "words": {
+                    uid: [{key: value for key, value in word.items()
+                           if key != "word_index"} for word in words]
+                    for uid, words in selected.items()
+                    if uid in component_uids or any(
+                        int(word["end_ms"]) > envelope_start
+                        and int(word["start_ms"]) < envelope_end for word in words
+                    )
+                },
+                "vad_regions": [region for region in vad_regions
+                                if int(region["end_ms"]) > envelope_start
+                                and int(region["start_ms"]) < envelope_end],
+            })
+            cached = component_journal.read(component_key)
+            if _component_cache_shape_valid(cached, component_uids, prior_diagnostics) and all(
+                digest(raw_journal.read(key)) == sha256
+                for key, sha256 in cached["raw_results"].items()
+            ):
+                trial = dict(selected)
+                trial.update(cached["selected"])
+                if not any(
+                    str(left["utterance_uid"]) in component_uids
+                    or str(right["utterance_uid"]) in component_uids
+                    for left, right in _unsafe_word_overlaps(
+                        [word for words in trial.values() for word in words]
+                    )
+                ):
+                    selected.update(cached["selected"])
+                    selected_mode_by_uid.update(cached["modes"])
+                    options.update(cached["options"])
+                    attempted_joint_calls.update(
+                        tuple(call) for call in cached["joint_calls"]
+                    )
+                    adaptive_candidate_count += cached["candidate_count"]
+                    for key, count in cached["diagnostics"].items():
+                        joint_diagnostics[key] += count
+                    for message in cached["failure_examples"]:
+                        record_joint_failure(message)
+                    continue
+        activate_work(component_uids, "initial")
+        atomically_selected = add_joint_component_options(
+            component_uids, component_uids, str(component_index)
+        )
+        component_resolved = atomically_selected or select_component(component_uids)
+        for item in (() if component_resolved else group):
+            uid = str(item["utterance_uid"])
+            for padding_ms in (400, 300, 200, 100, 0):
+                window_start = max(
+                    int(item["start_ms"]),
+                    int(item["coarse_start_ms"]) - padding_ms,
+                )
+                window_end = min(
+                    int(item["end_ms"]),
+                    int(item["coarse_end_ms"]) + padding_ms,
+                )
+                try:
+                    words = _alignment_candidate(
+                        item,
+                        window_start_ms=window_start,
+                        window_end_ms=window_end,
+                        segment_index=order[uid] + 1,
+                        align=align,
+                        align_model=align_model,
+                        align_metadata=align_metadata,
+                        audio=audio,
+                        device=device,
+                        call_kwargs=call_kwargs,
+                        min_word_score=min_word_score,
+                        max_word_duration_ms=max_word_duration_ms,
+                        max_outward_drift_ms=max_outward_drift_ms,
+                        vad_regions=vad_regions,
+                        normalized_journal=normalized_journal,
+                    )
+                except AlignmentConflictBlocked:
+                    raise
+                except Exception:
+                    continue
+                add_option(uid, f"padding-{padding_ms}", words)
+                adaptive_candidate_count += 1
+        component_resolved = component_resolved or select_component(component_uids)
+        if component_resolved and component_key is not None:
+            component_journal.write(component_key, {
+                "selected": {uid: selected[uid] for uid in component_uids},
+                "modes": {uid: selected_mode_by_uid[uid] for uid in component_uids},
+                "options": {uid: options[uid] for uid in component_uids},
+                "joint_calls": sorted(attempted_joint_calls - prior_joint_calls),
+                "candidate_count": adaptive_candidate_count - prior_candidate_count,
+                "diagnostics": {key: joint_diagnostics[key] - count
+                                for key, count in prior_diagnostics.items()},
+                "failure_examples": list(component_failures),
+                "raw_results": {key: digest(raw_journal.read(key))
+                                for key in (raw_call_keys or [])[raw_call_start:]},
+            })
+
+    pause_work()
+    anchors: list[int] = []
+    for item in source:
+        anchor = (int(item["coarse_start_ms"]) + int(item["coarse_end_ms"])) // 2
+        if anchors:
+            anchor = max(anchor, anchors[-1] + 2)
+        anchors.append(anchor)
+    boundaries = [
+        (anchors[position - 1] + anchors[position]) // 2
+        for position in range(1, len(anchors))
+    ]
+    edge_boundaries: list[int] = []
+    for position in range(1, len(source)):
+        boundary = (
+            int(source[position - 1]["coarse_end_ms"])
+            + int(source[position]["coarse_start_ms"])
+        ) // 2
+        if edge_boundaries:
+            boundary = max(boundary, edge_boundaries[-1] + 2)
+        edge_boundaries.append(boundary)
+    residual_before_partition = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    residual_components = _overlap_components(residual_before_partition, order)
+    for component_index, seed_uids in enumerate(residual_components, start=1):
+        activate_work(seed_uids, "residual-context")
+        component_resolved = not component_has_unsafe_overlap(seed_uids)
+        seen_contexts: set[tuple[tuple[str, ...], int | None]] = set()
+        for radius in (1, 2, 4, 8):
+            if component_resolved:
+                break
+            context_uids = contextual_component_uids(seed_uids, radius=radius)
+            context_key = (tuple(context_uids), None)
+            if context_key in seen_contexts:
+                continue
+            seen_contexts.add(context_key)
+            selected_joint = add_joint_component_options(
+                context_uids,
+                context_uids,
+                f"residual-{component_index}-radius-{radius}",
+            )
+            component_resolved = (
+                selected_joint and not component_has_unsafe_overlap(seed_uids)
+            )
+        if component_resolved:
+            continue
+        for uid in sorted(seed_uids, key=order.__getitem__):
+            if component_resolved:
+                break
+            position = order[uid]
+            for start, end, label in (
+                (max(0, position - 1), position + 1, "left"),
+                (max(0, position - 1), min(len(source), position + 2), "center"),
+                (position, min(len(source), position + 2), "right"),
+            ):
+                if component_resolved:
+                    break
+                context_uids = [
+                    str(item["utterance_uid"]) for item in source[start:end]
+                ]
+                for padding_ms in (None, 300, 100, 0):
+                    context_key = (tuple(context_uids), padding_ms)
+                    if len(context_uids) < 2 or context_key in seen_contexts:
+                        continue
+                    seen_contexts.add(context_key)
+                    selected_joint = add_joint_component_options(
+                        context_uids,
+                        context_uids,
+                        f"residual-{component_index}-{order[uid] + 1}-{label}"
+                        f"-padding-{padding_ms}",
+                        padding_ms=padding_ms,
+                    )
+                    component_resolved = (
+                        selected_joint
+                        and not component_has_unsafe_overlap(seed_uids)
+                    )
+                    if component_resolved:
+                        break
+    live_residual_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    live_pairs: list[tuple[str, str]] = []
+    seen_pair_edges: set[tuple[str, str]] = set()
+    for left_word, right_word in live_residual_overlaps:
+        left_uid = str(left_word["utterance_uid"])
+        right_uid = str(right_word["utterance_uid"])
+        if order[left_uid] > order[right_uid]:
+            left_uid, right_uid = right_uid, left_uid
+        pair = (left_uid, right_uid)
+        if left_uid == right_uid or pair in seen_pair_edges:
+            continue
+        seen_pair_edges.add(pair)
+        live_pairs.append(pair)
+    for left_uid, right_uid in live_pairs:
+        if (left_uid, right_uid) not in _overlap_pair_signature(selected, order):
+            continue
+        activate_work((left_uid, right_uid), "pair-edge")
+        left_item = by_uid[left_uid]
+        right_item = by_uid[right_uid]
+        left_coarse_end = int(left_item["coarse_end_ms"])
+        right_coarse_start = int(right_item["coarse_start_ms"])
+        if left_coarse_end <= right_coarse_start:
+            left_window_end = left_coarse_end
+            right_window_start = right_coarse_start
+        else:
+            left_window_end = right_coarse_start
+            right_window_start = left_coarse_end
+        for uid, window_start, window_end, side in (
+            (
+                left_uid,
+                int(left_item["start_ms"]),
+                min(int(left_item["end_ms"]), left_window_end),
+                "right",
+            ),
+            (
+                right_uid,
+                max(int(right_item["start_ms"]), right_window_start),
+                int(right_item["end_ms"]),
+                "left",
+            ),
+        ):
+            if window_end <= window_start:
+                continue
+            try:
+                words = _alignment_candidate(
+                    by_uid[uid],
+                    window_start_ms=window_start,
+                    window_end_ms=window_end,
+                    segment_index=order[uid] + 1,
+                    align=align,
+                    align_model=align_model,
+                    align_metadata=align_metadata,
+                    audio=audio,
+                    device=device,
+                    call_kwargs=call_kwargs,
+                    min_word_score=min_word_score,
+                    max_word_duration_ms=max_word_duration_ms,
+                    max_outward_drift_ms=max_outward_drift_ms,
+                    vad_regions=vad_regions,
+                    normalized_journal=normalized_journal,
+                )
+            except AlignmentConflictBlocked:
+                raise
+            except Exception:
+                continue
+            add_option(
+                uid,
+                f"pair-edge-{side}-{order[left_uid] + 1}-{order[right_uid] + 1}",
+                words,
+            )
+            adaptive_candidate_count += 1
+        chosen = _strict_existing_option_selection(
+            (left_uid, right_uid), options, selected, order,
+            checkpoint_journal=component_journal, work_check=check_work,
+        )
+        if chosen is not None and any(
+            mode.startswith("pair-edge-") for mode, _ in chosen.values()
+        ):
+            for uid, (mode, words) in chosen.items():
+                selected[uid] = words
+                selected_mode_by_uid[uid] = mode
+    live_residual_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    live_residual_components = _overlap_components(live_residual_overlaps, order)
+    component_edge_selected = False
+    for component_index, component_uids in enumerate(
+        live_residual_components, start=1
+    ):
+        if len(component_uids) < 3:
+            continue
+        activate_work(component_uids, "component-edge")
+        component_uid_set = set(component_uids)
+        windows = {
+            uid: [int(by_uid[uid]["start_ms"]), int(by_uid[uid]["end_ms"])]
+            for uid in component_uids
+        }
+        for left_uid, right_uid in live_pairs:
+            if left_uid not in component_uid_set or right_uid not in component_uid_set:
+                continue
+            left_coarse_end = int(by_uid[left_uid]["coarse_end_ms"])
+            right_coarse_start = int(by_uid[right_uid]["coarse_start_ms"])
+            if left_coarse_end <= right_coarse_start:
+                left_window_end = left_coarse_end
+                right_window_start = right_coarse_start
+            else:
+                left_window_end = right_coarse_start
+                right_window_start = left_coarse_end
+            windows[left_uid][1] = min(windows[left_uid][1], left_window_end)
+            windows[right_uid][0] = max(windows[right_uid][0], right_window_start)
+        for uid in sorted(component_uids, key=order.__getitem__):
+            window_start, window_end = windows[uid]
+            if window_end <= window_start:
+                continue
+            try:
+                words = _alignment_candidate(
+                    by_uid[uid],
+                    window_start_ms=window_start,
+                    window_end_ms=window_end,
+                    segment_index=order[uid] + 1,
+                    align=align,
+                    align_model=align_model,
+                    align_metadata=align_metadata,
+                    audio=audio,
+                    device=device,
+                    call_kwargs=call_kwargs,
+                    min_word_score=min_word_score,
+                    max_word_duration_ms=max_word_duration_ms,
+                    max_outward_drift_ms=max_outward_drift_ms,
+                    vad_regions=vad_regions,
+                    normalized_journal=normalized_journal,
+                )
+            except AlignmentConflictBlocked:
+                raise
+            except Exception:
+                continue
+            add_option(uid, f"component-edge-{component_index}", words)
+            adaptive_candidate_count += 1
+        chosen = _strict_existing_option_selection(
+            component_uids, options, selected, order,
+            checkpoint_journal=component_journal, work_check=check_work,
+        )
+        if chosen is not None and any(
+            mode.startswith("component-edge-") for mode, _ in chosen.values()
+        ):
+            for uid, (mode, words) in chosen.items():
+                selected[uid] = words
+                selected_mode_by_uid[uid] = mode
+            component_edge_selected = True
+    if component_edge_selected:
+        live_residual_overlaps = _unsafe_word_overlaps(
+            [word for words in selected.values() for word in words]
+        )
+        live_residual_components = _overlap_components(live_residual_overlaps, order)
+    conflict_uids = {
+        str(word["utterance_uid"])
+        for overlap in live_residual_overlaps
+        for word in overlap
+    }
+    partition_uids = set(conflict_uids)
+    for component_uids in live_residual_components:
+        partition_uids.update(contextual_component_uids(component_uids))
+    for mode, partition_boundaries in (
+        ("partition", boundaries),
+        ("edge-partition", edge_boundaries),
+    ):
+        for uid in sorted(partition_uids, key=order.__getitem__):
+            owners = [seed for seed in live_residual_components
+                      if uid in contextual_component_uids(seed)]
+            activate_work([item for seed in owners for item in seed] or [uid], mode)
+            position = order[uid]
+            item = by_uid[uid]
+            window_start = max(
+                int(item["start_ms"]),
+                partition_boundaries[position - 1] if position else 0,
+            )
+            window_end = min(
+                int(item["end_ms"]),
+                partition_boundaries[position]
+                if position < len(partition_boundaries)
+                else int(item["end_ms"]),
+            )
+            if window_end <= window_start:
+                continue
+            try:
+                words = _alignment_candidate(
+                    item,
+                    window_start_ms=window_start,
+                    window_end_ms=window_end,
+                    segment_index=position + 1,
+                    align=align,
+                    align_model=align_model,
+                    align_metadata=align_metadata,
+                    audio=audio,
+                    device=device,
+                    call_kwargs=call_kwargs,
+                    min_word_score=min_word_score,
+                    max_word_duration_ms=max_word_duration_ms,
+                    max_outward_drift_ms=max_outward_drift_ms,
+                    vad_regions=vad_regions,
+                    normalized_journal=normalized_journal,
+                )
+            except AlignmentConflictBlocked:
+                raise
+            except Exception:
+                continue
+            add_option(uid, mode, words)
+            adaptive_candidate_count += 1
+
+    resolved_component_count = 0
+    for seed_uids in live_residual_components:
+        if not component_has_unsafe_overlap(seed_uids):
+            continue
+        component_uids = contextual_component_uids(seed_uids)
+        activate_work(seed_uids, "final-selection")
+        chosen = _strict_existing_option_selection(
+            component_uids, options, selected, order,
+            checkpoint_journal=component_journal,
+            work_check=check_work,
+        )
+        if chosen is None:
+            continue
+        for uid, (mode, words) in chosen.items():
+            selected[uid] = words
+            selected_mode_by_uid[uid] = mode
+        resolved_component_count += 1
+
+    _stabilize_overlap_selection(
+        selected,
+        options,
+        selected_mode_by_uid,
+        order,
+        contextual_component_uids,
+        checkpoint_journal=component_journal,
+        work_check=check_work,
+        work_activate=activate_work,
+    )
+
+    final_residual_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    if final_residual_overlaps:
+        final_residual_components = _overlap_components(
+            final_residual_overlaps, order
+        )
+        for component_index, seed_uids in enumerate(
+            final_residual_components, start=1
+        ):
+            if not component_has_unsafe_overlap(seed_uids):
+                continue
+            activate_work(seed_uids, "final-residual")
+            component_uids = sorted(seed_uids, key=order.__getitem__)
+            context_uids = contextual_component_uids(component_uids, radius=1)
+            candidate_groups = [component_uids]
+            if context_uids != component_uids:
+                candidate_groups.append(context_uids)
+            for group_index, group_uids in enumerate(candidate_groups, start=1):
+                if not component_has_unsafe_overlap(seed_uids):
+                    break
+                selected_joint = add_joint_component_options(
+                    group_uids,
+                    group_uids,
+                    f"final-residual-{component_index}-{group_index}",
+                    padding_ms=200,
+                    require_complete=True,
+                )
+                if selected_joint and not component_has_unsafe_overlap(seed_uids):
+                    resolved_component_count += 1
+                    break
+        _stabilize_overlap_selection(
+            selected,
+            options,
+            selected_mode_by_uid,
+            order,
+            contextual_component_uids,
+            checkpoint_journal=component_journal,
+            work_check=check_work,
+            work_activate=activate_work,
+        )
+
+    assigned_speakers: dict[str, str] = {}
+    acoustic_components: list[dict[str, Any]] = []
+
+    final_overlaps = _unsafe_word_overlaps(
+        [word for words in selected.values() for word in words]
+    )
+    if final_overlaps:
+        prior, current = final_overlaps[0]
+        pairs = sorted({
+            (str(left["utterance_uid"]), str(right["utterance_uid"]))
+            for left, right in final_overlaps
+        })
+        block_conflict(
+            "unresolved_overlap", "same/unknown-speaker alignment overlap remains between "
+            f"{prior['utterance_uid']} and {current['utterance_uid']}; "
+            f"joint diagnostics: {joint_diagnostics}; "
+            f"all {len(pairs)} unresolved UID pairs: {pairs}"
+        )
+    pause_work()
+    return selected, assigned_speakers, {
+        "policy": OVERLAP_RESOLUTION_POLICY,
+        "initial_overlap_count": len(initial_overlaps),
+        "initial_component_count": len(initial_components),
+        "adaptive_candidate_count": adaptive_candidate_count,
+        "resolved_component_count": resolved_component_count,
+        "acoustic_component_count": len(acoustic_components),
+        "acoustic_components": acoustic_components,
+        "selected_mode_counts": {
+            mode: list(selected_mode_by_uid.values()).count(mode)
+            for mode in sorted(set(selected_mode_by_uid.values()))
+        },
+        "final_overlap_count": 0,
+    }
+
+
+def _model_state_sha256(model, metadata):
+    state_dict = getattr(model, "state_dict", None)
+    if not callable(state_dict):
+        raise ForcedAlignmentError("alignment checkpoint requires actual model weights")
+    state = state_dict()
+    if not state:
+        raise ForcedAlignmentError("alignment model state is empty")
+    config = getattr(model, "config", None)
+    hasher = hashlib.sha256()
+    hasher.update(digest({
+        "metadata": dict(metadata),
+        "config": config.to_dict() if config is not None else None,
+    }).encode("ascii"))
+    for name in sorted(state):
+        tensor = state[name].detach().cpu().contiguous()
+        hasher.update(digest({"name": name, "dtype": str(tensor.dtype),
+                              "shape": list(tensor.shape)}).encode("ascii"))
+        hasher.update(tensor.numpy().tobytes())
+    return hasher.hexdigest()
+
+
+def _alignment_resume_groups(scope, source, identity):
+    required = {"stage", "target_uids", "context_uids", *identity}
+    optional = {
+        "continuation_component_limit",
+        "discovery_component_limit",
+        "recovery_seconds_limit",
+        "recovery_plan",
+    }
+    if (
+        not isinstance(scope, Mapping)
+        or not required <= set(scope)
+        or not set(scope) <= required | optional
+    ):
+        raise ForcedAlignmentError("alignment resume scope fields are invalid")
+    if "discovery_component_limit" in scope and (
+        type(scope["discovery_component_limit"]) is not int
+        or not 1 <= scope["discovery_component_limit"] <= 3
+    ):
+        raise ForcedAlignmentError("alignment resume discovery limit is invalid")
+    if "continuation_component_limit" in scope and (
+        type(scope["continuation_component_limit"]) is not int
+        or not 1 <= scope["continuation_component_limit"] <= 256
+    ):
+        raise ForcedAlignmentError("alignment resume continuation limit is invalid")
+    if "recovery_seconds_limit" in scope and (
+        type(scope["recovery_seconds_limit"]) is not int
+        or not MAX_RECOVERY_SECONDS <= scope["recovery_seconds_limit"] <= 10800
+    ):
+        raise ForcedAlignmentError("alignment resume recovery seconds limit is invalid")
+    if scope["stage"] != "forced_alignment" or any(
+        scope[key] != value for key, value in identity.items()
+    ):
+        raise ForcedAlignmentError("alignment resume scope identity mismatch")
+    if "recovery_plan" in scope:
+        from .alignment_recovery import validate_recovery_plan
+        if {"continuation_component_limit", "discovery_component_limit"} & set(scope):
+            raise ForcedAlignmentError("closure recovery cannot mix dynamic discovery authority")
+        validate_recovery_plan(scope["recovery_plan"], source, scope["target_uids"])
+    source_uids = [str(item["utterance_uid"]) for item in source]
+    for field in ("target_uids", "context_uids"):
+        values = scope[field]
+        if (not isinstance(values, list) or not values
+                or any(not isinstance(uid, str) for uid in values)
+                or values != [uid for uid in source_uids if uid in values]):
+            raise ForcedAlignmentError(f"alignment resume {field} must be exact ordered unique UIDs")
+    targets = set(scope["target_uids"])
+    if len(targets) > MAX_INDEPENDENT_CONTEXT_RECOVERIES or not targets <= set(scope["context_uids"]):
+        raise ForcedAlignmentError("alignment resume target/context scope is not bounded")
+    positions = {uid: index for index, uid in enumerate(source_uids)}
+    target_positions = [positions[uid] for uid in targets]
+    for uid in scope["context_uids"]:
+        position = positions[uid]
+        if not any(abs(position - target) <= 8 and all(
+            int(source[index]["coarse_start_ms"])
+            - int(source[index - 1]["coarse_end_ms"]) <= MAX_RECOVERY_CONTEXT_GAP_MS
+            for index in range(min(position, target) + 1, max(position, target) + 1)
+        ) for target in target_positions):
+            raise ForcedAlignmentError("alignment resume context crosses an unrelated scene")
+    groups = []
+    context_positions = {positions[uid] for uid in scope["context_uids"]}
+    for start in sorted(context_positions):
+        for end in range(start + 1, len(source) + 1):
+            if end - 1 not in context_positions:
+                break
+            if end - start > 1 and (
+                int(source[end - 1]["coarse_start_ms"])
+                - int(source[end - 2]["coarse_end_ms"]) > MAX_RECOVERY_CONTEXT_GAP_MS
+            ):
+                break
+            group = source[start:end]
+            if not any(str(item["utterance_uid"]) in targets for item in group):
+                continue
+            groups.append({
+                "start": min(int(item["start_ms"]) for item in group) / 1000.0,
+                "end": max(int(item["end_ms"]) for item in group) / 1000.0,
+                "text": _alignment_model_text(" ".join(str(item["text"]) for item in group)),
+            })
+    return groups
+
+
+def _alignment_resume_context_uids(source, target_uids):
+    source_uids = [str(item["utterance_uid"]) for item in source]
+    positions = {uid: index for index, uid in enumerate(source_uids)}
+    target_positions = [positions[uid] for uid in target_uids]
+    return [
+        uid
+        for position, uid in enumerate(source_uids)
+        if any(
+            abs(position - target) <= 8
+            and all(
+                int(source[index]["coarse_start_ms"])
+                - int(source[index - 1]["coarse_end_ms"])
+                <= MAX_RECOVERY_CONTEXT_GAP_MS
+                for index in range(
+                    min(position, target) + 1, max(position, target) + 1
+                )
+            )
+            for target in target_positions
+        )
+    ]
+
+
+def _alignment_request_matches_scope(
+    transcript,
+    request_uids,
+    source,
+    scope,
+    identity,
+):
+    from .alignment_recovery import valid_request, request_matches_plan
+    groups = _alignment_resume_groups(scope, source, identity)
+    if not valid_request(transcript, request_uids):
+        return False
+    if "recovery_plan" in scope:
+        return request_matches_plan(transcript, request_uids, source, scope["recovery_plan"])
+    if not isinstance(transcript, list) or len(transcript) != 1:
+        return False
+    request = transcript[0]
+    if not isinstance(request, Mapping):
+        return False
+    if any(
+        request.get(name) is None for name in ("start", "end", "text")
+    ):
+        return False
+    if (
+        not isinstance(request_uids, list)
+        or not request_uids
+        or not set(request_uids) <= set(scope["target_uids"])
+    ):
+        return False
+    if any(
+        request["text"] == group["text"]
+        and request["start"] >= group["start"]
+        and request["end"] <= group["end"]
+        for group in groups
+    ):
+        return True
+    by_uid = {str(item["utterance_uid"]): item for item in source}
+    context = [by_uid[uid] for uid in scope["context_uids"]]
+    if (
+        request["start"] < min(int(item["start_ms"]) for item in context) / 1000.0
+        or request["end"] > max(int(item["end_ms"]) for item in context) / 1000.0
+    ):
+        return False
+    context_positions = {
+        index for index, item in enumerate(source)
+        if str(item["utterance_uid"]) in set(scope["context_uids"])
+    }
+    for start in sorted(context_positions):
+        for end in range(start + 1, len(source) + 1):
+            if end - 1 not in context_positions:
+                break
+            if end - start > 1 and (
+                int(source[end - 1]["coarse_start_ms"])
+                - int(source[end - 2]["coarse_end_ms"])
+                > MAX_RECOVERY_CONTEXT_GAP_MS
+            ):
+                break
+            group = source[start:end]
+            if (
+                request["text"] == _alignment_model_text(
+                    " ".join(str(item["text"]) for item in group)
+                )
+                and request["start"]
+                >= min(int(item["start_ms"]) for item in group) / 1000.0
+                and request["end"]
+                <= max(int(item["end_ms"]) for item in group) / 1000.0
+            ):
+                return True
+    return request["text"] in {
+        _alignment_model_text(str(by_uid[uid]["text"])) for uid in request_uids
+    }
+
+
+def _expanded_continuation_scope(request_uids, scope, source):
+    if not isinstance(request_uids, list) or not request_uids:
+        return None
+    source_uids = [str(item["utterance_uid"]) for item in source]
+    requested = [uid for uid in source_uids if uid in request_uids]
+    requested_set = set(requested)
+    if (
+        len(requested) != len(request_uids)
+        or not set(scope["target_uids"]) <= requested_set
+        or not requested_set <= set(scope["context_uids"])
+    ):
+        return None
+    return {**scope, "target_uids": requested}
+
+
+def _expanded_discovery_scope(request_uids, scopes, limit, scope, source):
+    if not isinstance(request_uids, list) or not request_uids:
+        return None
+    source_uids = [str(item["utterance_uid"]) for item in source]
+    requested = [uid for uid in source_uids if uid in request_uids]
+    if (
+        len(requested) != len(set(request_uids))
+        or not 0 < len(requested) <= limit
+        or set(requested) <= set(scope["target_uids"])
+    ):
+        return None
+    overlaps = [
+        index
+        for index, discovered in enumerate(scopes)
+        if set(requested) & set(discovered["target_uids"])
+    ]
+    if len(overlaps) > 1:
+        return None
+    if overlaps:
+        index = overlaps[0]
+        targets = [
+            uid
+            for uid in source_uids
+            if uid in set(requested) | set(scopes[index]["target_uids"])
+        ]
+        if len(targets) > limit:
+            return None
+    else:
+        if len(scopes) >= limit:
+            return None
+        index = None
+        targets = requested
+    return {
+        "scope": {
+            "stage": "forced_alignment",
+            "target_uids": targets,
+            "context_uids": _alignment_resume_context_uids(source, targets),
+            **{key: scope[key] for key in (
+                "audio_sha256",
+                "model_state_sha256",
+                "raw_alignment_binding",
+                "source_sha256",
+            )},
+        },
+        "index": index,
+    }
+
+
+def _archive_authorized_recovery_failure(
+    checkpoint_dir: str | Path,
+    resume_scope: Mapping[str, Any],
+    source: Sequence[Mapping[str, Any]],
+    raw_journal: UnitJournal,
+) -> Path:
+    failure_path = (
+        Path(checkpoint_dir) / "components" / "latest-conflict-failure.json"
+    )
+    already_archived = False
+    if not failure_path.exists() and "recovery_plan" in resume_scope:
+        matches = []
+        for authorization_path in sorted((failure_path.parent / "resumed-failures").glob("*.authorization.json")):
+            authorization = json.loads(authorization_path.read_text(encoding="utf-8"))
+            body = authorization.get("data")
+            if (isinstance(body, dict) and authorization.get("sha256") == digest(body)
+                    and body.get("scope_sha256") == digest(dict(resume_scope))
+                    and body.get("source_sha256") == digest(source)):
+                candidate = authorization_path.with_name(authorization_path.name.replace(".authorization.json", ".json"))
+                saved_candidate = json.loads(candidate.read_text(encoding="utf-8"))
+                if saved_candidate.get("sha256") != body.get("failure_sha256"):
+                    raise ForcedAlignmentError("archived closure predecessor identity changed")
+                matches.append(candidate)
+        if len(matches) == 1:
+            failure_path = matches[0]
+            already_archived = True
+    if not failure_path.is_file() or failure_path.is_symlink():
+        raise ForcedAlignmentError(
+            "bounded alignment resume requires the retained conflict failure"
+        )
+    saved = json.loads(failure_path.read_text(encoding="utf-8"))
+    details = saved.get("data")
+    targets = list(resume_scope["target_uids"])
+    targeted_source = [
+        item for item in source if str(item["utterance_uid"]) in set(targets)
+    ]
+    raw_results = details.get("raw_results") if isinstance(details, dict) else None
+    limits = details.get("limits") if isinstance(details, dict) else None
+    total_limit = (
+        limits.get("total_recovery_seconds")
+        if isinstance(limits, Mapping)
+        else None
+    )
+    if (
+        not isinstance(details, dict)
+        or saved.get("sha256") != digest(details)
+        or details.get("status") != "BLOCKED"
+        or details.get("reason") != "recovery_time_budget"
+        or details.get("component_uids") != targets
+        or details.get("source_sha256") != digest(targeted_source)
+        or not isinstance(raw_results, Mapping)
+        or not raw_results
+        or type(total_limit) not in (int, float)
+        or type(details.get("total_recovery_seconds")) not in (int, float)
+        or details["total_recovery_seconds"] < total_limit
+    ):
+        raise ForcedAlignmentError(
+            "bounded alignment resume conflict evidence does not match its scope"
+        )
+    for key, expected_sha256 in raw_results.items():
+        cached = raw_journal.read(key)
+        if cached is None or digest(cached) != expected_sha256:
+            raise ForcedAlignmentError(
+                "bounded alignment resume raw acoustic evidence is missing or changed"
+            )
+    if already_archived:
+        return failure_path
+    archive = (
+        failure_path.parent
+        / "resumed-failures"
+        / f"{saved['sha256']}.json"
+    )
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    if archive.is_file():
+        if archive.read_bytes() != failure_path.read_bytes():
+            raise ForcedAlignmentError(
+                "bounded alignment resume archive evidence changed"
+            )
+        failure_path.unlink()
+    else:
+        failure_path.replace(archive)
+    authorization = {
+        "format": "mas-alignment-recovery-resume-1",
+        "failure_sha256": saved["sha256"],
+        "scope_sha256": digest(dict(resume_scope)),
+        "source_sha256": digest(source),
+    }
+    atomic_json(
+        archive.with_suffix(".authorization.json"),
+        {"data": authorization, "sha256": digest(authorization)},
+    )
+    return archive
+
+
+def align_corrected_segments(
+    audio_path: str | Path,
+    coarse_segments: Sequence[Mapping[str, Any]],
+    *,
+    language: str = SUPPORTED_LANGUAGE,
+    device: str = "cuda",
+    model_name: str = DEFAULT_TURKISH_ALIGNMENT_MODEL,
+    min_word_score: float = DEFAULT_MIN_WORD_SCORE,
+    max_word_duration_ms: int = DEFAULT_MAX_WORD_DURATION_MS,
+    max_outward_drift_ms: int = DEFAULT_MAX_OUTWARD_DRIFT_MS,
+    vad_regions: Sequence[Mapping[str, Any]] = (),
+    whisperx_module: Any | None = None,
+    whisperx_version: str | None = None,
+    checkpoint_dir: str | Path | None = None,
+    resume_scope: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Force-align corrected Turkish text and return strict JSON-ready data.
+
+    The model and audio are loaded once.  Each coarse utterance is aligned in a
+    separate WhisperX call so sentence splitting cannot detach timestamps from
+    its stable ``utterance_uid``.  The source audio is hashed before it is
+    loaded and again after all model calls; any mid-run byte change rejects the
+    entire result before an alignment digest can be issued.
+    """
+
+    if language != SUPPORTED_LANGUAGE:
+        raise ForcedAlignmentError(
+            f"unsupported alignment language {language!r}; only 'tr' is supported"
+        )
+    model_name = _require_nonempty_string(model_name, "model_name")
+    device = _require_nonempty_string(device, "device")
+    min_word_score = _finite_number(min_word_score, "min_word_score")
+    if not DEFAULT_MIN_WORD_SCORE <= min_word_score <= 1.0:
+        raise ForcedAlignmentError(
+            f"min_word_score must be within [{DEFAULT_MIN_WORD_SCORE}, 1]"
+        )
+    max_word_duration_ms = _require_integer(
+        max_word_duration_ms, "max_word_duration_ms", minimum=1
+    )
+    if max_word_duration_ms > DEFAULT_MAX_WORD_DURATION_MS:
+        raise ForcedAlignmentError(
+            f"max_word_duration_ms cannot exceed {DEFAULT_MAX_WORD_DURATION_MS}"
+        )
+    max_outward_drift_ms = _require_integer(
+        max_outward_drift_ms, "max_outward_drift_ms"
+    )
+    if max_outward_drift_ms > DEFAULT_MAX_OUTWARD_DRIFT_MS:
+        raise ForcedAlignmentError(
+            f"max_outward_drift_ms cannot exceed {DEFAULT_MAX_OUTWARD_DRIFT_MS}"
+        )
+    trusted_vad_regions = _trusted_vad_regions(vad_regions)
+    source = validate_coarse_segments(coarse_segments)
+    if resume_scope is not None and checkpoint_dir is None:
+        raise ForcedAlignmentError("bounded alignment resume requires retained raw checkpoints")
+    path = Path(audio_path)
+    if not path.is_file():
+        raise ForcedAlignmentError(f"alignment audio does not exist: {path}")
+    audio_sha256 = _audio_sha256(path)
+
+    whisperx = whisperx_module if whisperx_module is not None else _import_whisperx()
+    version = _whisperx_version(whisperx, whisperx_version)
+    if version != SUPPORTED_WHISPERX_VERSION:
+        raise ForcedAlignmentError(
+            f"WhisperX {SUPPORTED_WHISPERX_VERSION} is required; got {version!r}"
+        )
+    load_audio = getattr(whisperx, "load_audio", None)
+    load_align_model = getattr(whisperx, "load_align_model", None)
+    align = getattr(whisperx, "align", None)
+    if not callable(load_audio) or not callable(load_align_model) or not callable(align):
+        raise ForcedAlignmentError(
+            "WhisperX module must expose load_audio, load_align_model, and align"
+        )
+
+    try:
+        audio = load_audio(str(path))
+    except Exception as exc:
+        raise ForcedAlignmentError(f"WhisperX could not load alignment audio: {exc}") from exc
+    try:
+        loaded = load_align_model(
+            language_code=language,
+            device=device,
+            model_name=model_name,
+        )
+    except Exception as exc:
+        raise ForcedAlignmentError(
+            f"WhisperX could not load Turkish alignment model {model_name!r}: {exc}"
+        ) from exc
+    if not isinstance(loaded, tuple) or len(loaded) != 2:
+        raise ForcedAlignmentError(
+            "WhisperX load_align_model must return (model, metadata)"
+        )
+    align_model, align_metadata = loaded
+    if not isinstance(align_metadata, Mapping):
+        raise ForcedAlignmentError("WhisperX alignment metadata must be an object")
+    metadata_language = align_metadata.get("language")
+    if metadata_language != language:
+        raise ForcedAlignmentError(
+            f"WhisperX alignment model language mismatch: {metadata_language!r}"
+        )
+
+    call_kwargs, interpolation_mode = _align_call_kwargs(align)
+    model_state_sha256 = None
+    journal = None
+    component_journal = None
+    normalized_journal = None
+    raw_call_keys: list[str] = []
+    if checkpoint_dir is not None:
+        model_state_sha256 = _model_state_sha256(align_model, align_metadata)
+        journal = UnitJournal(Path(checkpoint_dir), {
+            "audio_sha256": audio_sha256,
+            "model_name": model_name,
+            "model_state_sha256": model_state_sha256,
+            "whisperx_version": version,
+            "device": device,
+            "language": language,
+            "interpolation": interpolation_mode,
+            "producer_sha256": _raw_alignment_producer_sha256(),
+            "dependencies_sha256": _audio_sha256(
+                Path(__file__).resolve().parents[3] / "requirements.lock"
+            ),
+        })
+        component_journal = UnitJournal(Path(checkpoint_dir) / "components", {
+            "raw_binding": journal.binding,
+            "resolver_sha256": _audio_sha256(Path(__file__)),
+            "speaker_policy_sha256": _audio_sha256(Path(__file__).with_name("speaker.py")),
+            "policy": OVERLAP_RESOLUTION_POLICY,
+            "min_word_score": min_word_score,
+            "max_word_duration_ms": max_word_duration_ms,
+            "max_outward_drift_ms": max_outward_drift_ms,
+            "max_combinations": MAX_OVERLAP_COMBINATIONS,
+            "max_stabilization_rounds": MAX_FINAL_STABILIZATION_ROUNDS,
+        })
+        model_align = align
+        normalized_journal = UnitJournal(Path(checkpoint_dir) / "normalized", {
+            "raw_binding": journal.binding,
+            "producer_sha256": _audio_sha256(Path(__file__)),
+        })
+        resume_identity = {
+            "audio_sha256": audio_sha256,
+            "model_state_sha256": model_state_sha256,
+            "raw_alignment_binding": journal.binding,
+            "source_sha256": digest(source),
+        }
+        allowed_groups = (_alignment_resume_groups(resume_scope, source, resume_identity)
+                          if resume_scope is not None else None)
+        recovery_call_budget = None
+        if resume_scope is not None and "recovery_plan" in resume_scope:
+            from .alignment_recovery import RecoveryCallBudget
+            recovery_call_budget = RecoveryCallBudget(checkpoint_dir, dict(resume_scope))
+        identity_record = {
+            "stage": "forced_alignment", **resume_identity,
+            "source_uids": [str(item["utterance_uid"]) for item in source],
+            "source": source,
+        }
+        atomic_json(Path(checkpoint_dir) / "resume-identity.json", {
+            "data": identity_record, "sha256": digest(identity_record),
+        })
+        continuation_scopes = []
+        continuation_failure_sha256 = None
+        if resume_scope is not None:
+            archived_failure = _archive_authorized_recovery_failure(
+                checkpoint_dir, resume_scope, source, journal
+            )
+            continuation_limit = resume_scope.get("continuation_component_limit", 0)
+            if continuation_limit:
+                saved_failure = json.loads(archived_failure.read_text(encoding="utf-8"))
+                failure_details = saved_failure["data"]
+                unresolved = failure_details.get("unresolved_components")
+                targets = list(resume_scope["target_uids"])
+                if (
+                    not isinstance(unresolved, list)
+                    or sum(component == targets for component in unresolved) != 1
+                ):
+                    raise ForcedAlignmentError(
+                        "bounded continuation requires the exact retained unresolved queue"
+                    )
+                current_index = unresolved.index(targets)
+                continuation_failure_sha256 = saved_failure["sha256"]
+                for component in unresolved[
+                    current_index + 1 : current_index + 1 + continuation_limit
+                ]:
+                    scope = {
+                        "stage": "forced_alignment",
+                        "target_uids": component,
+                        "context_uids": _alignment_resume_context_uids(source, component),
+                        **resume_identity,
+                    }
+                    _alignment_resume_groups(scope, source, resume_identity)
+                    continuation_scopes.append(scope)
+        alignment_call_count = 0
+        discovered_scopes = []
+        discovery_requests = []
+        continuation_requests = []
+
+        def align(transcript, model, metadata, audio, device, **kwargs):
+            nonlocal alignment_call_count
+            request_uids = kwargs.pop("_mas_component_uids", None)
+            key = digest({"transcript": transcript, "kwargs": kwargs})
+            cached = journal.read(key)
+            if cached is None:
+                authorized = allowed_groups is None or _alignment_request_matches_scope(
+                    transcript,
+                    request_uids,
+                    source,
+                    resume_scope,
+                    resume_identity,
+                )
+                if not authorized:
+                    authorized = any(
+                        _alignment_request_matches_scope(
+                            transcript,
+                            request_uids,
+                            source,
+                            discovered_scope,
+                            resume_identity,
+                        )
+                        for discovered_scope in discovered_scopes
+                    )
+                if not authorized:
+                    for continuation_scope in continuation_scopes:
+                        request_scope = _expanded_continuation_scope(
+                            request_uids, continuation_scope, source
+                        )
+                        if request_scope is None:
+                            continue
+                        if not _alignment_request_matches_scope(
+                            transcript,
+                            request_uids,
+                            source,
+                            request_scope,
+                            resume_identity,
+                        ):
+                            continue
+                        authorized = True
+                        continuation_requests.append({
+                            "request_sha256": key,
+                            "component_uids": list(request_scope["target_uids"]),
+                        })
+                        evidence = {
+                            "format": "mas-alignment-authorized-continuation-1",
+                            "failure_sha256": continuation_failure_sha256,
+                            "authorized_scope_sha256": digest(dict(resume_scope)),
+                            "requests": continuation_requests,
+                        }
+                        atomic_json(
+                            Path(checkpoint_dir)
+                            / "components/authorized-continuation.json",
+                            {"data": evidence, "sha256": digest(evidence)},
+                        )
+                        break
+                discovery_limit = (
+                    resume_scope.get("discovery_component_limit", 0)
+                    if resume_scope is not None
+                    else 0
+                )
+                if not authorized and discovery_limit and isinstance(request_uids, list):
+                    expanded = _expanded_discovery_scope(
+                        request_uids,
+                        discovered_scopes,
+                        discovery_limit,
+                        resume_scope,
+                        source,
+                    )
+                    if expanded is not None:
+                        discovered_scope = expanded["scope"]
+                        authorized = _alignment_request_matches_scope(
+                            transcript,
+                            request_uids,
+                            source,
+                            discovered_scope,
+                            resume_identity,
+                        )
+                        if authorized:
+                            if expanded["index"] is None:
+                                discovered_scopes.append(discovered_scope)
+                            else:
+                                discovered_scopes[expanded["index"]] = discovered_scope
+                            discovery_requests.append({
+                                "request_sha256": key,
+                                "component_uids": list(discovered_scope["target_uids"]),
+                            })
+                            evidence = {
+                                "format": "mas-alignment-discovered-resume-1",
+                                "authorized_scope_sha256": digest(dict(resume_scope)),
+                                "discovered_scope": discovered_scope,
+                                "discovered_scopes": discovered_scopes,
+                                "requests": discovery_requests,
+                            }
+                            atomic_json(
+                                Path(checkpoint_dir)
+                                / "components/discovered-resume-scope.json",
+                                {"data": evidence, "sha256": digest(evidence)},
+                            )
+                if not authorized:
+                    details = {
+                        "status": "BLOCKED", "reason": "resume_scope_violation",
+                        "message": "uncached CTC request is outside authorized target/context",
+                        "component_uids": list(resume_scope["target_uids"]),
+                        "requested_component_uids": request_uids,
+                        "requested_transcript": transcript,
+                        "request_sha256": key,
+                        "authorized_scope_sha256": digest(dict(resume_scope)),
+                    }
+                    atomic_json(
+                        Path(checkpoint_dir)
+                        / "components/latest-resume-scope-violation.json",
+                        {"data": details, "sha256": digest(details)},
+                    )
+                    raise AlignmentConflictBlocked(details)
+                if recovery_call_budget is not None:
+                    recovery_call_budget.reserve(key)
+                result = _execute_alignment_call(
+                    model_align,
+                    transcript,
+                    model,
+                    metadata,
+                    audio,
+                    device,
+                    kwargs,
+                )
+                journal.write(key, result)
+            else:
+                result = cached
+            raw_call_keys.append(key)
+            alignment_call_count += 1
+            mark_work_progress(
+                "forced_alignment:ctc", completed=alignment_call_count
+            )
+            return result
+
+        align._mas_scope_wrapper = True
+
+    aligned_segments: list[dict[str, Any]] = []
+    flat_words: list[dict[str, Any]] = []
+    independent_by_uid: dict[str, list[dict[str, Any]]] = {}
+    raw_punctuation_only_count = 0
+    next_word_index = 1
+    alignment_issues: dict[str, str] = {}
+    recoverable_issues: set[str] = set()
+    for segment_index, coarse in enumerate(source, start=1):
+        if segment_index > 1:
+            mark_work_progress("forced_alignment", completed=segment_index - 1)
+        transcript = [
+            {
+                "start": coarse["start_ms"] / 1000.0,
+                "end": coarse["end_ms"] / 1000.0,
+                "text": _alignment_model_text(str(coarse["text"])),
+            }
+        ]
+        try:
+            raw_result = align(
+                transcript,
+                align_model,
+                align_metadata,
+                audio,
+                device,
+                **(
+                    {"_mas_component_uids": [str(coarse["utterance_uid"])]}
+                    if getattr(align, "_mas_scope_wrapper", False)
+                    else {}
+                ),
+                **call_kwargs,
+            )
+        except AlignmentConflictBlocked:
+            raise
+        except Exception as exc:
+            raise ForcedAlignmentError(
+                f"WhisperX alignment failed for {coarse['utterance_uid']}: {exc}"
+            ) from exc
+        try:
+            words, punctuation_count = _normalize_aligned_words(
+                raw_result,
+                coarse,
+                segment_index=segment_index,
+                first_word_index=next_word_index,
+                min_word_score=min_word_score,
+                max_word_duration_ms=max_word_duration_ms,
+                vad_regions=trusted_vad_regions,
+                checkpoint_journal=normalized_journal,
+            )
+        except ForcedAlignmentError as exc:
+            utterance_uid = str(coarse["utterance_uid"])
+            alignment_issues[utterance_uid] = f"{utterance_uid}: {exc}"
+            if isinstance(exc, _RecoverableIndependentAlignmentError):
+                recoverable_issues.add(utterance_uid)
+            continue
+        raw_punctuation_only_count += punctuation_count
+        next_word_index += len(words)
+        independent_by_uid[str(coarse["utterance_uid"])] = words
+        flat_words.extend(words)
+        drift_audit = _segment_drift_audit(
+            words,
+            coarse_start_ms=coarse["coarse_start_ms"],
+            coarse_end_ms=coarse["coarse_end_ms"],
+        )
+        exceeds_default_drift = (
+            drift_audit["early_outward_drift_ms"] > max_outward_drift_ms
+            or drift_audit["late_outward_drift_ms"] > max_outward_drift_ms
+        )
+        drift_context = _bounded_drift_context(
+            words,
+            drift_audit,
+            window_start_ms=coarse["start_ms"],
+            window_end_ms=coarse["end_ms"],
+            coarse_start_ms=coarse["coarse_start_ms"],
+            coarse_end_ms=coarse["coarse_end_ms"],
+            max_outward_drift_ms=max_outward_drift_ms,
+        )
+        _, edit_audit = _token_edit_audit(
+            str(coarse["asr_text"]),
+            str(coarse["text"]),
+            deletion_audio_reviewed=bool(coarse["deletion_audio_reviewed"]),
+        )
+        if exceeds_default_drift and drift_context is None:
+            utterance_uid = str(coarse["utterance_uid"])
+            alignment_issues[utterance_uid] = (
+                f"{utterance_uid} exceeds max_outward_drift_ms "
+                f"{max_outward_drift_ms}: {drift_audit}"
+            )
+            continue
+        aligned_segments.append(
+            {
+                "segment_index": segment_index,
+                "utterance_uid": coarse["utterance_uid"],
+                "start_ms": words[0]["start_ms"],
+                "end_ms": words[-1]["end_ms"],
+                "alignment_window_start_ms": coarse["start_ms"],
+                "alignment_window_end_ms": coarse["end_ms"],
+                "coarse_start_ms": coarse["coarse_start_ms"],
+                "coarse_end_ms": coarse["coarse_end_ms"],
+                "drift_audit": drift_audit,
+                **(
+                    {"drift_context": drift_context}
+                    if drift_context is not None
+                    else {}
+                ),
+                "text": coarse["text"],
+                "asr_text": coarse["asr_text"],
+                "deletion_audio_reviewed": coarse["deletion_audio_reviewed"],
+                "audio_reviewed": coarse["audio_reviewed"],
+                "review_disposition": coarse["review_disposition"],
+                "edit_audit": edit_audit,
+                "timing_source": TIMING_SOURCE,
+                "words": words,
+                **(
+                    {"speaker_id": coarse["speaker_id"]}
+                    if "speaker_id" in coarse
+                    else {}
+                ),
+            }
+        )
+
+    initial_modes = {uid: "independent" for uid in independent_by_uid}
+    prior_conflict_seconds = {}
+    recovery_seconds_limit = (
+        resume_scope.get("recovery_seconds_limit", MAX_RECOVERY_SECONDS)
+        if resume_scope is not None
+        else MAX_RECOVERY_SECONDS
+    )
+    if 0 < len(recoverable_issues) <= MAX_INDEPENDENT_CONTEXT_RECOVERIES:
+        recovery_started = time.monotonic()
+        failure_basis = digest({
+            "phase": "independent-context", "source": source,
+            "journal_binding": component_journal.binding if component_journal else None,
+            "limits": [MAX_CONFLICT_SECONDS, recovery_seconds_limit],
+        })
+        if component_journal is not None:
+            failure_path = component_journal.root.parent / "latest-conflict-failure.json"
+            if failure_path.is_file():
+                saved = json.loads(failure_path.read_text(encoding="utf-8"))
+                details = saved.get("data")
+                if not isinstance(details, dict) or saved.get("sha256") != digest(details):
+                    raise ForcedAlignmentError("conflict failure receipt checksum mismatch")
+                if not isinstance(details.get("raw_results"), Mapping):
+                    raise ForcedAlignmentError("conflict failure raw evidence is invalid")
+                if details.get("failure_basis") == failure_basis and all(
+                    digest(journal.read(key)) == sha256
+                    for key, sha256 in details["raw_results"].items()
+                ):
+                    raise AlignmentConflictBlocked(details)
+
+        def check_independent_context_budget(uid, started):
+            elapsed = time.monotonic() - started
+            total_elapsed = time.monotonic() - recovery_started
+            if elapsed < MAX_CONFLICT_SECONDS and total_elapsed < recovery_seconds_limit:
+                return
+            details = {
+                "status": "BLOCKED", "phase": "independent-context",
+                "reason": ("conflict_time_budget" if elapsed >= MAX_CONFLICT_SECONDS
+                           else "recovery_time_budget"),
+                "message": "independent acoustic context recovery time limit reached",
+                "component_uids": [uid], "unresolved_components": [[uid]],
+                "work": {"seconds": elapsed}, "total_recovery_seconds": total_elapsed,
+                "failure_basis": failure_basis,
+                "raw_results": ({key: digest(journal.read(key)) for key in set(raw_call_keys)}
+                                if journal is not None else {}),
+            }
+            details["failure_invariant"] = digest({
+                "failure_basis": failure_basis, "reason": details["reason"],
+                "component_uids": [uid], "raw_results": details["raw_results"],
+            })
+            if component_journal is not None:
+                component_journal.write(details["failure_invariant"], details)
+                atomic_json(component_journal.root.parent / "latest-conflict-failure.json",
+                            {"data": details, "sha256": digest(details)})
+            raise AlignmentConflictBlocked(details)
+
+        source_order = {
+            str(item["utterance_uid"]): index for index, item in enumerate(source)
+        }
+        for utterance_uid in sorted(recoverable_issues, key=source_order.__getitem__):
+            context_started = time.monotonic()
+            position = source_order[utterance_uid]
+            item = source[position]
+            ranges = [
+                (max(0, position - 1), position + 1),
+                (position, min(len(source), position + 2)),
+                (max(0, position - 1), min(len(source), position + 2)),
+            ]
+            for radius in (2, 4, 8):
+                ranges.append(
+                    (max(0, position - radius), min(len(source), position + radius + 1))
+                )
+            seen_ranges: set[tuple[int, int]] = set()
+            for start, end in ranges:
+                if (start, end) in seen_ranges or end - start < 2:
+                    continue
+                seen_ranges.add((start, end))
+                group = source[start:end]
+                if any(
+                    int(left["coarse_end_ms"]) > int(right["coarse_start_ms"])
+                    or int(right["coarse_start_ms"]) - int(left["coarse_end_ms"])
+                    > MAX_RECOVERY_CONTEXT_GAP_MS
+                    for left, right in zip(group, group[1:])
+                ):
+                    continue
+                joint_start = min(int(context["start_ms"]) for context in group)
+                joint_end = max(int(context["end_ms"]) for context in group)
+                try:
+                    check_independent_context_budget(utterance_uid, context_started)
+                    raw_result = align(
+                        [
+                            {
+                                "start": joint_start / 1000.0,
+                                "end": joint_end / 1000.0,
+                                "text": _alignment_model_text(
+                                    " ".join(str(context["text"]) for context in group)
+                                ),
+                            }
+                        ],
+                        align_model,
+                        align_metadata,
+                        audio,
+                        device,
+                        **(
+                            {"_mas_component_uids": [utterance_uid]}
+                            if getattr(align, "_mas_scope_wrapper", False)
+                            else {}
+                        ),
+                        **call_kwargs,
+                    )
+                    check_independent_context_budget(utterance_uid, context_started)
+                    raw_words = _raw_aligned_words(
+                        raw_result, f"independent-context-{utterance_uid}"
+                    )
+                    counts = [
+                        len(_canonical_lexical_surfaces(str(context["text"])))
+                        for context in group
+                    ]
+                    lexical_positions = _lexical_raw_positions(raw_words)
+                    if len(lexical_positions) != sum(counts):
+                        continue
+                    target_offset = sum(counts[: position - start])
+                    expanded = dict(item)
+                    expanded["start_ms"] = joint_start
+                    expanded["end_ms"] = joint_end
+                    words, punctuation_count = _normalize_aligned_words(
+                        {
+                            "word_segments": _lexical_raw_slice(
+                                raw_words,
+                                lexical_positions,
+                                target_offset,
+                                counts[position - start],
+                            )
+                        },
+                        expanded,
+                        segment_index=position + 1,
+                        first_word_index=1,
+                        min_word_score=min_word_score,
+                        max_word_duration_ms=max_word_duration_ms,
+                        vad_regions=trusted_vad_regions,
+                        checkpoint_journal=normalized_journal,
+                    )
+                    drift = _segment_drift_audit(
+                        words,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                    )
+                    context = _bounded_drift_context(
+                        words,
+                        drift,
+                        window_start_ms=joint_start,
+                        window_end_ms=joint_end,
+                        coarse_start_ms=int(item["coarse_start_ms"]),
+                        coarse_end_ms=int(item["coarse_end_ms"]),
+                        max_outward_drift_ms=max_outward_drift_ms,
+                    )
+                    if (
+                        drift["early_outward_drift_ms"] > max_outward_drift_ms
+                        or drift["late_outward_drift_ms"] > max_outward_drift_ms
+                    ) and context is None:
+                        continue
+                except AlignmentConflictBlocked:
+                    raise
+                except Exception:
+                    continue
+                independent_by_uid[utterance_uid] = words
+                initial_modes[utterance_uid] = "joint-recovery"
+                raw_punctuation_only_count += punctuation_count
+                alignment_issues.pop(utterance_uid, None)
+                break
+            prior_conflict_seconds[utterance_uid] = time.monotonic() - context_started
+
+    if alignment_issues:
+        raise ForcedAlignmentError(
+            f"independent alignment failed for {len(alignment_issues)} utterances:\n"
+            + "\n".join(alignment_issues.values())
+        )
+
+    selected_by_uid, assigned_speakers, overlap_resolution = (
+        _resolve_alignment_overlaps(
+            source,
+            independent_by_uid,
+            align=align,
+            align_model=align_model,
+            align_metadata=align_metadata,
+            audio=audio,
+            device=device,
+            call_kwargs=call_kwargs,
+            min_word_score=min_word_score,
+            max_word_duration_ms=max_word_duration_ms,
+            max_outward_drift_ms=max_outward_drift_ms,
+            vad_regions=trusted_vad_regions,
+            initial_modes=initial_modes,
+            component_journal=component_journal,
+            raw_journal=journal,
+            raw_call_keys=raw_call_keys,
+            normalized_journal=normalized_journal,
+            prior_conflict_seconds=prior_conflict_seconds,
+            max_recovery_seconds=recovery_seconds_limit,
+        )
+    )
+    aligned_segments = []
+    flat_words = []
+    for segment_index, coarse in enumerate(source, start=1):
+        if segment_index > 1:
+            mark_work_progress("forced_alignment", completed=segment_index - 1)
+        utterance_uid = str(coarse["utterance_uid"])
+        words = selected_by_uid[utterance_uid]
+        segment_speaker = coarse.get("speaker_id", assigned_speakers.get(utterance_uid))
+        if segment_speaker is not None:
+            for word in words:
+                word["speaker_id"] = segment_speaker
+        drift_audit = _segment_drift_audit(
+            words,
+            coarse_start_ms=int(coarse["coarse_start_ms"]),
+            coarse_end_ms=int(coarse["coarse_end_ms"]),
+        )
+        alignment_window_start_ms = min(
+            int(coarse["start_ms"]), int(words[0]["start_ms"])
+        )
+        alignment_window_end_ms = max(
+            int(coarse["end_ms"]), int(words[-1]["end_ms"])
+        )
+        drift_context = _bounded_drift_context(
+            words,
+            drift_audit,
+            window_start_ms=alignment_window_start_ms,
+            window_end_ms=alignment_window_end_ms,
+            coarse_start_ms=int(coarse["coarse_start_ms"]),
+            coarse_end_ms=int(coarse["coarse_end_ms"]),
+            max_outward_drift_ms=max_outward_drift_ms,
+        )
+        exceeds_default_drift = (
+            drift_audit["early_outward_drift_ms"] > max_outward_drift_ms
+            or drift_audit["late_outward_drift_ms"] > max_outward_drift_ms
+        )
+        if exceeds_default_drift and drift_context is None:
+            raise ForcedAlignmentError(
+                f"{utterance_uid} exceeds max_outward_drift_ms "
+                f"{max_outward_drift_ms}: {drift_audit}"
+            )
+        _, edit_audit = _token_edit_audit(
+            str(coarse["asr_text"]),
+            str(coarse["text"]),
+            deletion_audio_reviewed=bool(coarse["deletion_audio_reviewed"]),
+        )
+        aligned_segments.append(
+            {
+                "segment_index": segment_index,
+                "utterance_uid": utterance_uid,
+                "start_ms": words[0]["start_ms"],
+                "end_ms": words[-1]["end_ms"],
+                "alignment_window_start_ms": alignment_window_start_ms,
+                "alignment_window_end_ms": alignment_window_end_ms,
+                "coarse_start_ms": coarse["coarse_start_ms"],
+                "coarse_end_ms": coarse["coarse_end_ms"],
+                "drift_audit": drift_audit,
+                **(
+                    {"drift_context": drift_context}
+                    if drift_context is not None
+                    else {}
+                ),
+                "text": coarse["text"],
+                "asr_text": coarse["asr_text"],
+                "deletion_audio_reviewed": coarse["deletion_audio_reviewed"],
+                "audio_reviewed": coarse["audio_reviewed"],
+                "review_disposition": coarse["review_disposition"],
+                "edit_audit": edit_audit,
+                "timing_source": TIMING_SOURCE,
+                "words": words,
+                **(
+                    {"speaker_id": segment_speaker}
+                    if segment_speaker is not None
+                    else {}
+                ),
+            }
+        )
+        flat_words.extend(words)
+
+    flat_words.sort(
+        key=lambda word: (
+            int(word["start_ms"]),
+            int(word["end_ms"]),
+            int(word["word_index"]),
+        )
+    )
+    for word_index, word in enumerate(flat_words, start=1):
+        word["word_index"] = word_index
+
+    if _audio_sha256(path) != audio_sha256:
+        raise ForcedAlignmentError(
+            "alignment audio changed while forced alignment was running"
+        )
+
+    report = _computed_report(aligned_segments)
+    report["raw_punctuation_only_word_count"] = raw_punctuation_only_count
+    data: dict[str, Any] = {
+        "format_version": FORCED_ALIGNMENT_FORMAT_VERSION,
+        "language": language,
+        "audio_sha256": audio_sha256,
+        "timing_source": TIMING_SOURCE,
+        "provenance": {
+            "timing_source": TIMING_SOURCE,
+            "engine": "whisperx",
+            "whisperx_version": version,
+            "model_name": model_name,
+            "model_type": align_metadata.get("type"),
+            "model_state_sha256": model_state_sha256,
+            "language": language,
+            "device": device,
+            "interpolation": interpolation_mode,
+            "text_normalization": ALIGNMENT_TEXT_NORMALIZATION,
+            "min_word_score": min_word_score,
+            "contextual_unchanged_min_word_score": (
+                CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE
+            ),
+            "review_word_score": REVIEW_WORD_SCORE,
+            "edited_token_min_word_score": EDITED_TOKEN_MIN_WORD_SCORE,
+            "max_word_duration_ms": max_word_duration_ms,
+            "max_outward_drift_ms": max_outward_drift_ms,
+            "overlap_resolution": overlap_resolution,
+        },
+        "segments": aligned_segments,
+        "words": flat_words,
+        "report": report,
+    }
+    alignment_sha256 = _alignment_sha256(data)
+    data["alignment_sha256"] = alignment_sha256
+    report["alignment_sha256"] = alignment_sha256
+    for word in flat_words:
+        word["alignment_sha256"] = alignment_sha256
+    validate_forced_alignment_data(data)
+    return data
+
+
+__all__ = [
+    "ALIGNMENT_TEXT_NORMALIZATION",
+    "AUDIO_REVIEW_SCORE_CONTEXT",
+    "CONTEXTUAL_UNCHANGED_WORD_MIN_SCORE",
+    "DEFAULT_MAX_OUTWARD_DRIFT_MS",
+    "DEFAULT_MAX_WORD_DURATION_MS",
+    "DEFAULT_MIN_WORD_SCORE",
+    "DEFAULT_TURKISH_ALIGNMENT_MODEL",
+    "EDITED_TOKEN_MIN_WORD_SCORE",
+    "FORCED_ALIGNMENT_FORMAT_VERSION",
+    "ForcedAlignmentError",
+    "REVIEW_WORD_SCORE",
+    "SUPPORTED_LANGUAGE",
+    "SUPPORTED_WHISPERX_VERSION",
+    "TIMING_SOURCE",
+    "align_corrected_segments",
+    "correction_deletes_lexical_tokens",
+    "validate_coarse_segments",
+    "validate_forced_alignment_data",
+]

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 1 || ! "$1" =~ ^[0-9]+$ ]]; then
+  echo "usage: ./runpod/run-episode.sh EPISODE [--source-url URL] [--alignment-recovery]" >&2
+  exit 64
+fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PATH="${MAS_VENV_DIR:-$ROOT/.venv}/bin:${MAS_BIN_DIR:-/workspace/.local/bin}:$PATH"
+EPISODE="$1"
+MAX_RUNTIME_SECONDS="${MAS_MAX_RUNTIME_SECONDS:-14400}"
+IDLE_TIMEOUT_SECONDS="${MAS_IDLE_TIMEOUT_SECONDS:-1800}"
+CHECK_SECONDS="${MAS_WATCHDOG_CHECK_SECONDS:-15}"
+RUNTIME_DIR="$ROOT/EPISODES/Muhtemel Ask ${EPISODE}.Bolum/.mas"
+export MAS_PROGRESS_FILE="$RUNTIME_DIR/progress.json"
+
+for value in "$MAX_RUNTIME_SECONDS" "$IDLE_TIMEOUT_SECONDS" "$CHECK_SECONDS"; do
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
+    echo "watchdog values must be positive integer seconds" >&2
+    exit 64
+  }
+done
+
+mkdir -p "$RUNTIME_DIR"
+cd "$ROOT"
+touch "$MAS_PROGRESS_FILE"
+
+pipeline_pid=""
+stop_on_exit() {
+  rc=$?
+  trap - EXIT INT TERM HUP
+  if [[ -n "$pipeline_pid" ]] && kill -0 "$pipeline_pid" 2>/dev/null; then
+    kill -TERM -- "-$pipeline_pid" 2>/dev/null || true
+  fi
+  if [[ "$rc" -ne 0 && -n "${RUNPOD_POD_ID:-}" && "${MAS_EXTERNAL_RUNPOD_CONTROLLER:-0}" != "1" ]]; then
+    "$ROOT/runpod/stop-pod.sh" || {
+      echo "RunPod stop request failed. Stop the pod from an external controller now." >&2
+      rc=70
+    }
+  fi
+  exit "$rc"
+}
+trap stop_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+bash "$ROOT/runpod/preflight.sh"
+
+setsid env PYTHONUNBUFFERED=1 stdbuf -oL -eL ./mas run "$@" --local &
+pipeline_pid=$!
+started="$(date +%s)"
+stop_reason=""
+
+while kill -0 "$pipeline_pid" 2>/dev/null; do
+  now="$(date +%s)"
+  last_output="$(stat -c %Y "$MAS_PROGRESS_FILE")"
+  if (( now - started >= MAX_RUNTIME_SECONDS )); then
+    stop_reason="maximum runtime ${MAX_RUNTIME_SECONDS}s exceeded"
+    break
+  fi
+  if (( now - last_output >= IDLE_TIMEOUT_SECONDS )); then
+    stop_reason="no completed-work progress for ${IDLE_TIMEOUT_SECONDS}s"
+    break
+  fi
+  sleep "$CHECK_SECONDS"
+done
+
+if [[ -n "$stop_reason" ]]; then
+  echo "WATCHDOG: $stop_reason" >&2
+  kill -TERM -- "-$pipeline_pid" 2>/dev/null || true
+  for _ in {1..6}; do
+    kill -0 "$pipeline_pid" 2>/dev/null || break
+    sleep 5
+  done
+  kill -KILL -- "-$pipeline_pid" 2>/dev/null || true
+fi
+
+set +e
+wait "$pipeline_pid"
+rc=$?
+set -e
+
+if [[ -n "$stop_reason" ]]; then
+  exit 124
+fi
+exit "$rc"

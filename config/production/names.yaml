@@ -1,0 +1,83 @@
+canonical_names:
+  - Defne
+  - Kadir
+  - Tolga
+  - Levent
+  - Levent Bartıner
+  - Bartıner
+  - Mine
+  - Melis
+  - Özlem
+  - Selim
+  - Selma
+  - Sultan
+  - Zeynep
+  - Zeyno
+  - Suzi
+  - Leyla
+  - Oğuz
+  - Yavuz
+  - Zeliha
+  - Emindağ
+forbidden_variants:
+  Emindağ:
+    - "Emin Dağ"
+    - "Emin dag"
+  Bartıner:
+    - "Bartiner"
+    - "Bartınar"
+source_variants:
+  Defne:
+    - "Def"
+    - "Defneciğim"
+    - "Defter"
+    - "Medefne"
+  Kadir:
+    - "Kader"
+    - "Kadeh"
+    - "Katiş"
+  Tolga:
+    - "Tolgacım"
+    - "Tolgacığım"
+    - "Dolgu"
+  Levent:
+    - "Levan"
+    - "Levhat"
+    - "Elifat"
+  Mine:
+    - "Emine"
+    - "Mina"
+    - "Müniş"
+    - "müniş"
+    - "minişlere"
+    - "İlmi"
+    - "Minna"
+    - "Nina"
+    - "Emineş"
+  Melis:
+    - "Melisa"
+    - "Menis"
+    - "Gelirse"
+  Selim:
+    - "Selam"
+    - "Selvi"
+  Selma:
+    - "Selman"
+    - "Selva"
+  Özlem:
+    - "özlemle"
+  Emindağ:
+    - "Kadir Emin"
+    - "Emin da"
+  Bartıner:
+    - "Bartner"
+    - "Bartilerin"
+    - "Bartilere"
+    - "partenere"
+    - "partnere"
+    - "partner"
+    - "Atner"
+  Suzi:
+    - "Suzy"
+  Oğuz:
+    - "Oğuzhan"

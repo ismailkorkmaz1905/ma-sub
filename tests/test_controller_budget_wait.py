@@ -177,7 +177,7 @@ def test_expired_budget_extension_requires_reason(tmp_path, monkeypatch):
         )
 
 
-def test_second_explicit_extension_can_replace_insufficient_active_window(
+def test_third_explicit_extension_can_replace_insufficient_active_window(
         tmp_path, monkeypatch):
     monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "400")
     started = datetime(2026, 9, 7, tzinfo=timezone.utc)
@@ -197,7 +197,16 @@ def test_second_explicit_extension_can_replace_insufficient_active_window(
         (tmp_path / "work/controller_budget.json").read_text(encoding="utf-8")
     )["data"]
     assert len(ledger["operator_extensions"]) == 2
-    with pytest.raises(runpod_controller.RunPodControllerError, match="two operator"):
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_EXTENSION_REASON", "third bounded completion window")
+    third = second + timedelta(seconds=401)
+    budget = runpod_controller._episode_budget(tmp_path, 14, now=third)
+
+    assert budget.remaining(third) == pytest.approx(400)
+    ledger = json.loads(
+        (tmp_path / "work/controller_budget.json").read_text(encoding="utf-8")
+    )["data"]
+    assert len(ledger["operator_extensions"]) == 3
+    with pytest.raises(runpod_controller.RunPodControllerError, match="three operator"):
         runpod_controller._episode_budget(
-            tmp_path, 14, now=second + timedelta(seconds=401)
+            tmp_path, 14, now=third + timedelta(seconds=401)
         )

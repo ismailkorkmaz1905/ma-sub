@@ -141,7 +141,7 @@ def _episode_budget(local_root, episode, *, now=None):
         if not isinstance(excluded_wait, (int, float)) or not math.isfinite(excluded_wait) or excluded_wait < 0:
             raise RunPodControllerError("invalid excluded wait duration")
         operator_extensions = body.get("operator_extensions", [])
-        if not isinstance(operator_extensions, list) or len(operator_extensions) > 2:
+        if not isinstance(operator_extensions, list) or len(operator_extensions) > 3:
             raise RunPodControllerError("invalid operator budget extension ledger")
         for extension in operator_extensions:
             if (not isinstance(extension, dict)
@@ -206,8 +206,8 @@ def _episode_budget(local_root, episode, *, now=None):
     early_extension = os.getenv("MAS_EPISODE_BUDGET_EXTENSION_EARLY") == "1"
     if extension_approved and (budget.remaining(now) <= 0 or early_extension):
         reason = os.getenv("MAS_EPISODE_BUDGET_EXTENSION_REASON", "").strip()
-        if len(operator_extensions) >= 2:
-            raise RunPodControllerError("the two operator budget extensions are already consumed")
+        if len(operator_extensions) >= 3:
+            raise RunPodControllerError("the three operator budget extensions are already consumed")
         if not reason or len(reason) > 500:
             raise RunPodControllerError(
                 "MAS_EPISODE_BUDGET_EXTENSION_REASON must record the operator approval"

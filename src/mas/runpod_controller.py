@@ -2792,9 +2792,13 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
             ))
             if runtime_seconds < 1:
                 raise BudgetExceeded("less than one second remains in episode runtime budget")
-            exit_code = _monitor_remote_job(ssh, scp, host, episode, commit, local_root,
-                                            source_url, runtime_seconds, budget,
-                                            alignment_recovery=alignment_recovery)
+            try:
+                exit_code = _monitor_remote_job(ssh, scp, host, episode, commit, local_root,
+                                                source_url, runtime_seconds, budget,
+                                                alignment_recovery=alignment_recovery)
+            except BaseException:
+                _record_failed_remote_evidence(1, local_root, source_url, commit)
+                raise
             try:
                 _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, scp, host, budget, temporary)
             finally:

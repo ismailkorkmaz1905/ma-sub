@@ -123,6 +123,12 @@ def _local_encoder_preflight(local_root, episode, budget):
 
 def _episode_budget(local_root, episode, *, now=None):
     now = now or datetime.now(timezone.utc)
+    try:
+        extension_limit = int(os.getenv("MAS_EPISODE_MAX_OPERATOR_EXTENSIONS", "3"))
+    except ValueError as exc:
+        raise RunPodControllerError("MAS_EPISODE_MAX_OPERATOR_EXTENSIONS must be an integer") from exc
+    if not 3 <= extension_limit <= 12:
+        raise RunPodControllerError("MAS_EPISODE_MAX_OPERATOR_EXTENSIONS must be between 3 and 12")
     budget_path = Path(local_root) / "work" / "controller_budget.json"
     starts = []
     excluded_wait = 0.0
@@ -142,7 +148,7 @@ def _episode_budget(local_root, episode, *, now=None):
         if not isinstance(excluded_wait, (int, float)) or not math.isfinite(excluded_wait) or excluded_wait < 0:
             raise RunPodControllerError("invalid excluded wait duration")
         operator_extensions = body.get("operator_extensions", [])
-        if not isinstance(operator_extensions, list) or len(operator_extensions) > 3:
+        if not isinstance(operator_extensions, list) or len(operator_extensions) > extension_limit:
             raise RunPodControllerError("invalid operator budget extension ledger")
         for extension in operator_extensions:
             if (not isinstance(extension, dict)
@@ -207,8 +213,9 @@ def _episode_budget(local_root, episode, *, now=None):
     early_extension = os.getenv("MAS_EPISODE_BUDGET_EXTENSION_EARLY") == "1"
     if extension_approved and (budget.remaining(now) <= 0 or early_extension):
         reason = os.getenv("MAS_EPISODE_BUDGET_EXTENSION_REASON", "").strip()
-        if len(operator_extensions) >= 3:
-            raise RunPodControllerError("the three operator budget extensions are already consumed")
+        if len(operator_extensions) >= extension_limit:
+            label = "three" if extension_limit == 3 else str(extension_limit)
+            raise RunPodControllerError(f"the {label} operator budget extensions are already consumed")
         if not reason or len(reason) > 500:
             raise RunPodControllerError(
                 "MAS_EPISODE_BUDGET_EXTENSION_REASON must record the operator approval"

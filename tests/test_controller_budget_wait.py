@@ -210,3 +210,17 @@ def test_third_explicit_extension_can_replace_insufficient_active_window(
         runpod_controller._episode_budget(
             tmp_path, 14, now=third + timedelta(seconds=401)
         )
+
+
+def test_authorized_extension_limit_can_allow_a_fourth_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "400")
+    monkeypatch.setenv("MAS_EPISODE_MAX_OPERATOR_EXTENSIONS", "4")
+    monkeypatch.setenv("MAS_EPISODE_BUDGET_EXTENSION_APPROVED", "1")
+    started = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    runpod_controller._episode_budget(tmp_path, 14, now=started)
+    for index in range(4):
+        monkeypatch.setenv("MAS_EPISODE_BUDGET_EXTENSION_REASON", f"approved retry {index}")
+        point = started + timedelta(seconds=401 * (index + 1))
+        runpod_controller._episode_budget(tmp_path, 14, now=point)
+    ledger = json.loads((tmp_path / "work/controller_budget.json").read_text(encoding="utf-8"))["data"]
+    assert len(ledger["operator_extensions"]) == 4

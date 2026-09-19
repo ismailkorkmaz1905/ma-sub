@@ -79,6 +79,25 @@ def test_alignment_recovery_uses_the_extended_bounded_poll_watchdog(monkeypatch,
     assert poll["total_timeout"] == 240
 
 
+def test_alignment_recovery_never_downloads_live_checkpoints(monkeypatch, tmp_path):
+    def response(command, **kwargs):
+        payload = json.loads(_remote_response(command))
+        if " poll " in command[-1]:
+            payload["checkpoints"]["files"] = [{
+                "relative_path": "prepare/raw_asr_v2.json",
+                "sha256": "a" * 64,
+                "size_bytes": 1,
+            }]
+        return json.dumps(payload)
+
+    monkeypatch.setattr(controller, "_network_retry", response)
+    monkeypatch.setattr(controller, "_download_record",
+                        lambda *args, **kwargs: pytest.fail("alignment recovery downloaded a live checkpoint"))
+    assert controller._monitor_remote_job(
+        ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
+        "https://example.invalid/episode", 500, Budget(), alignment_recovery=True) == 0
+
+
 def test_resume_only_never_sends_start(monkeypatch, tmp_path):
     request = {"commit": "a" * 40, "episode": 13, "input_sha256": "b" * 64}
     atomic_json(tmp_path / "work" / "remote-job-request.json",

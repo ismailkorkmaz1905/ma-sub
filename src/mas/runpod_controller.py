@@ -2369,37 +2369,38 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
         checkpoints = poll["checkpoints"]
         if checkpoints.get("identity") != expected_identity:
             raise RunPodControllerError("remote checkpoint identity mismatch")
-        for record in checkpoints.get("files", []):
-            record_key = (record["relative_path"], record["sha256"], record["size_bytes"])
-            cached = downloaded.get(record_key)
-            if cached and cached[0].is_file():
-                current = cached[0].stat()
-                if (current.st_size, current.st_mtime_ns) == cached[1]:
-                    continue
-            snapshot = _download_record(record, local_root, remote_root, scp, host, budget, checkpoint=True)
-            current = snapshot.stat()
-            downloaded[record_key] = (snapshot, (current.st_size, current.st_mtime_ns))
-            if (record["relative_path"] in {'work/state.json', 'work/current-part.json'} or re.fullmatch(
-                    r'parts/part-[0-9]{3}/work/state\.json', record['relative_path']) or re.fullmatch(
-                    r"work/notification-outbox/[0-9a-f]{64}\.json", record["relative_path"])):
-                state_path = safe_relative(local_root, record["relative_path"])
-                if state_path.is_file():
-                    if record["relative_path"].startswith("work/notification-outbox/"):
-                        prior_event = json.loads(state_path.read_text(encoding="utf-8"))
-                        remote_event = json.loads(snapshot.read_text(encoding="utf-8"))
-                        prior_data, remote_data = prior_event.get("data"), remote_event.get("data")
-                        if (not isinstance(prior_data, dict) or prior_event.get("sha256") != digest(prior_data)
-                                or not isinstance(remote_data, dict) or remote_event.get("sha256") != digest(remote_data)):
-                            raise RunPodControllerError("notification checkpoint integrity mismatch")
-                        if all(prior_data.get(key) == remote_data.get(key) for key in ("episode", "event", "kind", "details")):
-                            continue  # Local SMTP outcome/attempts remain authoritative.
-                    retained = local_root / "work" / "remote-checkpoints" / sha256_file(state_path) / state_path.name
-                    retained.parent.mkdir(parents=True, exist_ok=True)
-                    if not retained.exists():
-                        shutil.copyfile(state_path, retained)
-                from .engine.download import atomic_write_bytes
-                atomic_write_bytes(state_path, snapshot.read_bytes())
-        atomic_json(local_root / "work" / "remote-checkpoint-manifest.json", checkpoints)
+        if not alignment_recovery:
+            for record in checkpoints.get("files", []):
+                record_key = (record["relative_path"], record["sha256"], record["size_bytes"])
+                cached = downloaded.get(record_key)
+                if cached and cached[0].is_file():
+                    current = cached[0].stat()
+                    if (current.st_size, current.st_mtime_ns) == cached[1]:
+                        continue
+                snapshot = _download_record(record, local_root, remote_root, scp, host, budget, checkpoint=True)
+                current = snapshot.stat()
+                downloaded[record_key] = (snapshot, (current.st_size, current.st_mtime_ns))
+                if (record["relative_path"] in {'work/state.json', 'work/current-part.json'} or re.fullmatch(
+                        r'parts/part-[0-9]{3}/work/state\.json', record['relative_path']) or re.fullmatch(
+                        r"work/notification-outbox/[0-9a-f]{64}\.json", record["relative_path"])):
+                    state_path = safe_relative(local_root, record["relative_path"])
+                    if state_path.is_file():
+                        if record["relative_path"].startswith("work/notification-outbox/"):
+                            prior_event = json.loads(state_path.read_text(encoding="utf-8"))
+                            remote_event = json.loads(snapshot.read_text(encoding="utf-8"))
+                            prior_data, remote_data = prior_event.get("data"), remote_event.get("data")
+                            if (not isinstance(prior_data, dict) or prior_event.get("sha256") != digest(prior_data)
+                                    or not isinstance(remote_data, dict) or remote_event.get("sha256") != digest(remote_data)):
+                                raise RunPodControllerError("notification checkpoint integrity mismatch")
+                            if all(prior_data.get(key) == remote_data.get(key) for key in ("episode", "event", "kind", "details")):
+                                continue  # Local SMTP outcome/attempts remain authoritative.
+                        retained = local_root / "work" / "remote-checkpoints" / sha256_file(state_path) / state_path.name
+                        retained.parent.mkdir(parents=True, exist_ok=True)
+                        if not retained.exists():
+                            shutil.copyfile(state_path, retained)
+                    from .engine.download import atomic_write_bytes
+                    atomic_write_bytes(state_path, snapshot.read_bytes())
+            atomic_json(local_root / "work" / "remote-checkpoint-manifest.json", checkpoints)
         if status.get("status") in {"COMPLETED", "EXITED", "FAILED"} and type(status.get("exit_code")) is int:
             if not log.get("eof", True):
                 continue

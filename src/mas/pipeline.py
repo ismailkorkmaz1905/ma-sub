@@ -32,6 +32,7 @@ from .engine.download import (
     atomic_write_json,
     download_source,
     load_valid_stage_marker,
+    validate_download,
     write_stage_marker,
 )
 from .engine.forced_align import (

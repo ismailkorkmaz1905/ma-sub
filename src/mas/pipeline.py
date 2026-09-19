@@ -51,7 +51,8 @@ from .engine.timing_qa import TimingQAV2Config, run_timing_qa_v2, assert_timing_
 from .engine.burned_mp4 import (burn_indonesian_mp4, SUBTITLE_STYLE, plan_encoding_settings,
                                inspect_encoding_storage, create_encoding_samples, qualify_encoding)
 from .engine.episode_archive import file_record
-from .delivery import READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE, write_delivery_export
+from .delivery import (ALIGNMENT_RECOVERY_COMPLETE, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE,
+                       WAIT_MP4_SAMPLE, write_delivery_export)
 from .engine.tr_correction import create_tr_correction_pack, read_tr_correction_pack, validate_tr_correction_output
 
 
@@ -592,7 +593,7 @@ def _validate_id_quality(artifacts, validation, series, names, religious):
     return qa_report
 
 
-def run(episode, source_url=None, fixture=False, stop_after=None):
+def run(episode, source_url=None, fixture=False, stop_after=None, alignment_recovery=False):
     if fixture:
         return run_fixture(episode, stop_after=stop_after)
     root, name, dirs = _paths(episode)
@@ -614,6 +615,22 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         for relative in retry_predecessor_paths(episode, resume_scope, root):
             if not (root / relative).is_file():
                 raise RuntimeError(f"Scoped alignment retry lacks required checkpoint: {relative}")
+    if alignment_recovery:
+        if resume_scope is None:
+            raise RuntimeError("alignment recovery requires a validated code-fix resume scope")
+        required = (
+            dirs["source"] / "download.done.json",
+            dirs["prepare"] / "audio.done.json",
+            dirs["prepare"] / "raw_asr_v2.done.json",
+            dirs["translation_input"] / f"{name}_TR_CORRECTION_PACK.zip",
+            dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip",
+            dirs["translation_output"] / f"{name}_TR_CORRECTED.zip",
+            dirs["prepare"] / "audio_review_v2.json",
+        )
+        if any(not path.is_file() for path in required):
+            raise RuntimeError("alignment recovery requires retained remote checkpoints; no source download is allowed")
+        if not validate_download(dirs["source"] / "download.done.json", url=url, allowed_root=dirs["source"]):
+            raise RuntimeError("alignment recovery source checkpoint is invalid; no source download is allowed")
     encoder = os.getenv("MAS_MP4_ENCODER", "h264_nvenc")
     target = float(os.getenv("MAS_MP4_TARGET_GB", "3"))
     encoder_options = json.loads(os.environ["MAS_MP4_ENCODER_OPTIONS"]) if os.getenv("MAS_MP4_ENCODER_OPTIONS") else None
@@ -791,6 +808,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None):
         return {"path": str(alignment_path), "sha256": sha256_file(alignment_path), "device": "cuda", "resumed": resumed}
     _stage(state_path, state, "forced_alignment", align)
     aligned = holder["aligned"]
+    if alignment_recovery:
+        return ALIGNMENT_RECOVERY_COMPLETE
 
     schema_path = dirs["prepare"] / "aligned_tr_schema_v2.json"
     id_pack = dirs["translation_input"] / f"{name}_ID_TRANSLATION_PACK.zip"

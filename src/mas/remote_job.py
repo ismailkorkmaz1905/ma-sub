@@ -499,6 +499,7 @@ def main(argv=None):
         command.add_argument("--input-sha256")
     commands.choices["start"].add_argument("--source-url")
     commands.choices["start"].add_argument("--recover-lost", action="store_true")
+    commands.choices["start"].add_argument("--alignment-recovery", action="store_true")
     commands.choices["logs"].add_argument("--offset", type=int, default=0)
     commands.choices["logs"].add_argument("--max-bytes", type=int, default=65536)
     commands.choices["checkpoints"].add_argument("--deadline-seconds", type=int, default=60)
@@ -512,6 +513,8 @@ def main(argv=None):
         command = ["bash", str(Path(args.root).resolve() / "runpod" / "run-episode.sh"), str(args.episode)]
         if args.source_url:
             command += ["--source-url", args.source_url]
+        if args.alignment_recovery:
+            command.append("--alignment-recovery")
         result = start_job(args.root, args.episode, args.commit, command, args.input_sha256,
                            recover_lost=args.recover_lost)
     elif args.action == "status":

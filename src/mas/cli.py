@@ -227,6 +227,7 @@ def main(argv=None):
     run_parser.add_argument("--fixture", action="store_true")
     run_parser.add_argument("--local", action="store_true", help=argparse.SUPPRESS)
     run_parser.add_argument("--stop-after", type=int, choices=(1, 2, 3), help=argparse.SUPPRESS)
+    run_parser.add_argument("--alignment-recovery", action="store_true", help=argparse.SUPPRESS)
     status_parser = commands.add_parser("status")
     status_parser.add_argument("episode", type=int)
     doctor_parser = commands.add_parser("doctor")
@@ -269,9 +270,16 @@ def main(argv=None):
         try:
             if args.command == "run":
                 if args.fixture or args.local or args.stop_after is not None:
-                    result = run(args.episode, args.source_url, args.fixture, args.stop_after)
+                    if args.alignment_recovery:
+                        result = run(args.episode, args.source_url, args.fixture, args.stop_after,
+                                     alignment_recovery=True)
+                    else:
+                        result = run(args.episode, args.source_url, args.fixture, args.stop_after)
                 else:
-                    result = run_remote_episode(args.episode, args.source_url)
+                    if args.alignment_recovery:
+                        result = run_remote_episode(args.episode, args.source_url, alignment_recovery=True)
+                    else:
+                        result = run_remote_episode(args.episode, args.source_url)
             elif args.command == "status":
                 result = status(args.episode)
             elif args.command == "doctor":

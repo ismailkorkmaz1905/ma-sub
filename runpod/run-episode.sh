@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || ! "$1" =~ ^[0-9]+$ ]]; then
-  echo "usage: ./runpod/run-episode.sh EPISODE [--source-url URL]" >&2
+  echo "usage: ./runpod/run-episode.sh EPISODE [--source-url URL] [--alignment-recovery]" >&2
   exit 64
 fi
 

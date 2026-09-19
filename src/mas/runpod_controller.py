@@ -23,7 +23,8 @@ from .engine.download import _validated_cookie_file, validate_download
 from .remote import RemoteVerificationError, _run_watchdog, drive_preflight
 from .reliability import BudgetExceeded, RunBudget, atomic_json, digest
 from .delivery import (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE, WAIT_PART_RETURN,
-                       READY_FOR_PARTIAL_ENCODE, NEXT_PART, publish_local_delivery, safe_relative, validate_delivery)
+                       ALIGNMENT_RECOVERY_COMPLETE, READY_FOR_PARTIAL_ENCODE, NEXT_PART,
+                       publish_local_delivery, safe_relative, validate_delivery)
 from .hashing import sha256_file
 from .source_discovery import discover_episode_metadata
 from .runpod_capacity import (DEFAULT_GPU_TYPE_IDS, CapacityLease, CapacityPlan,
@@ -1477,7 +1478,9 @@ def _part_resume_files(local_root, episode):
     return paths
 
 
-def run_remote_episode(episode, source_url=None):
+def run_remote_episode(episode, source_url=None, *, alignment_recovery=False):
+    if alignment_recovery:
+        return _run_remote_episode_once(episode, source_url, alignment_recovery=True)
     for _ in range(65):
         result = _run_remote_episode_once(episode, source_url)
         if result != NEXT_PART:
@@ -1485,17 +1488,20 @@ def run_remote_episode(episode, source_url=None):
     raise RunPodControllerError('progressive episode continuation count exceeded')
 
 
-def _run_remote_episode_once(episode, source_url=None):
+def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=False):
     if type(episode) is not int or episode <= 0:
         raise RunPodControllerError("episode must be a positive integer")
+    if alignment_recovery and _production_priority() != "whole-episode-v1":
+        raise RunPodControllerError("alignment recovery requires whole-episode-v1 to match its retained scope")
     with _controller_lock(ROOT / "var" / "production-controller.lock"), \
             _cleanup_on_controller_failure(episode_dir(episode), episode):
         local_root = episode_dir(episode)
-        partial_result = _resume_partial_delivery(local_root, episode)
-        if partial_result is not None:
-            return partial_result
+        if not alignment_recovery:
+            partial_result = _resume_partial_delivery(local_root, episode)
+            if partial_result is not None:
+                return partial_result
         released_path = local_root / "work" / "gpu-released-for-delivery.json"
-        if released_path.is_file():
+        if released_path.is_file() and not alignment_recovery:
             _validate_delivery_release(local_root, episode, released_path)
             remote = os.getenv("MAS_DRIVE_STRICT_REMOTE")
             if not remote:
@@ -1511,15 +1517,16 @@ def _run_remote_episode_once(episode, source_url=None):
                 return publish_local_delivery(local_root, episode, remote, total_timeout=budget.check())
             finally:
                 _drain_notifications(local_root)
-        if (local_root / "work/gpu-released-for-encode.json").is_file():
+        if (local_root / "work/gpu-released-for-encode.json").is_file() and not alignment_recovery:
             return _finish_local_encode(local_root, episode, _episode_budget(local_root, episode))
         values = _required_environment()
         commit, rclone_config = _local_preflight(values)
         _validate_local_tr_return(local_root, f"Muhtemel Ask {episode}.Bolum")
-        preflight_local_id_return(local_root, episode, ROOT / "config" / "production")
-        _preflight_part_return(local_root, episode)
+        if not alignment_recovery:
+            preflight_local_id_return(local_root, episode, ROOT / "config" / "production")
+            _preflight_part_return(local_root, episode)
         last_status = local_root / "work" / "remote-job-status.json"
-        if last_status.is_file():
+        if last_status.is_file() and not alignment_recovery:
             previous_job = json.loads(last_status.read_text(encoding="utf-8"))
             expected_returns = {
                 20: local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_TR_TEXT_CORRECTED.zip",
@@ -1540,9 +1547,18 @@ def _run_remote_episode_once(episode, source_url=None):
                     print(f"[WAIT] local return required: {expected_returns[code]}; no GPU acquired")
                     return code
         try:
-            source_url = _prepare_official_source(
-                local_root, episode, source_url, values.get("MAS_YTDLP_COOKIES")
-            )
+            if alignment_recovery:
+                retained_source = local_root / "source" / "source.url"
+                if not retained_source.is_file():
+                    raise RunPodControllerError("alignment recovery requires the retained source URL")
+                retained_url = retained_source.read_text(encoding="utf-8").strip()
+                if not retained_url or (source_url and source_url != retained_url):
+                    raise RunPodControllerError("alignment recovery source identity mismatch")
+                source_url = retained_url
+            else:
+                source_url = _prepare_official_source(
+                    local_root, episode, source_url, values.get("MAS_YTDLP_COOKIES")
+                )
         except Exception:
             # Source preflight cannot spend compute; retain that distinction without resetting a run.
             latest = local_root / "logs" / "LATEST"
@@ -1598,7 +1614,7 @@ def _run_remote_episode_once(episode, source_url=None):
             if not resume_lease:
                 raise
             runtime_image, registry_auth_id, runtime_error = None, None, exc
-        if not resume_lease:
+        if not resume_lease and not alignment_recovery:
             _local_encoder_preflight(local_root, episode, episode_budget)
             drive_readiness = drive_preflight(values["MAS_DRIVE_STRICT_REMOTE"], required_bytes=0,
                                               config_path=rclone_config,
@@ -1626,7 +1642,7 @@ def _run_remote_episode_once(episode, source_url=None):
                                 else DEFAULT_GPU_TYPE_IDS
                             ),
                             total_seconds=int(episode_budget.check()) if episode_budget else 14400,
-                            startup_seconds=900,
+                            startup_seconds=900 if not alignment_recovery else 600,
                             storage_quote=storage_quote, resume=resume_lease)
 
         def ready(pod, remaining):
@@ -1667,7 +1683,8 @@ def _run_remote_episode_once(episode, source_url=None):
             result = _run_remote_session(episode, source_url, values=runtime_values,
                                          commit=commit,
                                          budget=_PaidBudget(episode_budget, lease), pod=lease.pod,
-                                         resume_only=resume_lease)
+                                         resume_only=resume_lease,
+                                         alignment_recovery=alignment_recovery)
         if result == READY_FOR_PARTIAL_ENCODE:
             from .partial_delivery import _read_bound, write_part_release, complete_local_part
             part_id = json.loads((local_root / 'work/partial-export.json').read_text(encoding='utf-8'))['part_id']
@@ -1689,6 +1706,8 @@ def _run_remote_episode_once(episode, source_url=None):
             _write_delivery_release(local_root, episode, lease.pod["id"], audit)
             return publish_local_delivery(local_root, episode, values["MAS_DRIVE_STRICT_REMOTE"],
                                           total_timeout=episode_budget.check())
+        if result == ALIGNMENT_RECOVERY_COMPLETE and alignment_recovery:
+            return result
         if result in (20, 21, WAIT_MP4_SAMPLE):
             evidence = (local_root / "work" / "sample-export.json" if result == WAIT_MP4_SAMPLE else
                         local_root / "translation_input" / (f"Muhtemel Ask {episode}.Bolum_" +
@@ -2226,7 +2245,7 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
 
 def _record_failed_remote_evidence(exit_code, local_root, source_url, commit):
     if exit_code in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
-                     WAIT_PART_RETURN, READY_FOR_PARTIAL_ENCODE):
+                     WAIT_PART_RETURN, READY_FOR_PARTIAL_ENCODE, ALIGNMENT_RECOVERY_COMPLETE):
         return
     work = local_root / "work"
     request = json.loads((work / "remote-job-request.json").read_text(encoding="utf-8"))
@@ -2282,7 +2301,7 @@ def _partial_failure_identity(local_root, episode):
 
 
 def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url, runtime_seconds, budget,
-                        *, resume_only=False):
+                        *, resume_only=False, alignment_recovery=False):
     release = f"/workspace/ma-sub/releases/{commit}"
     remote_root = f"/workspace/ma-sub/EPISODES/Muhtemel Ask {episode}.Bolum"
     prefix = ("source /workspace/.mas-secrets/runtime.env; "
@@ -2309,6 +2328,8 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
         atomic_json(request_path, {"data": request, "sha256": digest(request)})
     common = f" --root {release} --episode {episode} --commit {commit} --input-sha256 {input_sha}"
     start = prefix + "start" + common + " --recover-lost --source-url " + shlex.quote(source_url)
+    if alignment_recovery:
+        start += " --alignment-recovery"
     if not resume_only:
         try:
             _network_retry(ssh + [start], capture=True, attempts=3, idle_timeout=30,
@@ -2537,6 +2558,12 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
     if exit_code == NEXT_PART:
         raise RunPodControllerError('worker has no unpublished part but local completion evidence is incomplete; '
                                     'refusing a no-progress GPU continuation')
+    if exit_code == ALIGNMENT_RECOVERY_COMPLETE:
+        for relative in ("prepare/forced_alignment_v2.json", "prepare/forced_alignment_v2.done.json", "work/state.json"):
+            size, signature = _remote_file_signature(ssh, f"{remote_root}/{relative}", budget=budget)
+            _download_record({"relative_path": relative, "size_bytes": size, "sha256": signature},
+                             local_root, remote_root, scp, host, budget)
+        return
     if exit_code in (READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE):
         export_name = {READY_FOR_DELIVERY: "delivery-export.json", READY_FOR_LOCAL_ENCODE: "subtitle-export.json",
                        WAIT_MP4_SAMPLE: "sample-export.json"}[exit_code]
@@ -2565,7 +2592,8 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
                 _record_result_collection_failure(local_root, exit_code, current_record)
             raise
 
-    if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE):
+    if exit_code not in (0, 20, 21, READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE,
+                         ALIGNMENT_RECOVERY_COMPLETE):
         try:
             _collect_diagnostics(episode, local_root, remote_root, ssh, scp, host, retrieval_deadline)
         except RunPodControllerError as exc:
@@ -2596,7 +2624,8 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
         raise RunPodControllerError(f"remote pipeline failed with exit code {exit_code}")
 
 
-def _run_remote_session(episode, source_url, *, values, commit, budget, pod, resume_only=False):
+def _run_remote_session(episode, source_url, *, values, commit, budget, pod, resume_only=False,
+                        alignment_recovery=False):
     name = f"Muhtemel Ask {episode}.Bolum"
     local_root = episode_dir(episode)
     code_fix_path = local_root / "review/code-fix-resume.json"
@@ -2618,7 +2647,8 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
         if resume_only:
             ssh, scp = _ssh_args(key, host, port), _scp_args(key, host, port)
             exit_code = _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
-                                            int(budget.check()), budget, resume_only=True)
+                                            int(budget.check()), budget, resume_only=True,
+                                            alignment_recovery=alignment_recovery)
             with tempfile.TemporaryDirectory(prefix="ma-sub-resume-") as folder:
                 try:
                     _collect_remote_results(exit_code, episode, local_root,
@@ -2679,68 +2709,40 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                 relative = part_file.relative_to(local_root).as_posix()
                 _upload_episode_file_verified(part_file, f'{remote_root}/{relative}',
                     ssh=ssh, scp=scp, host=host, budget=budget, reuse_verified=True)
-            for filename in ("source.url", "official-source.json"):
-                _upload_episode_file_verified(local_root / "source" / filename,
-                    f"{remote_root}/source/{filename}", ssh=ssh, scp=scp, host=host, budget=budget, immutable=True)
-            source_receipts = _upload_verified_local_source(
-                local_root,
-                remote_root,
-                source_url,
-                ssh=ssh,
-                scp=scp,
-                host=host,
-                temporary=temporary,
-                budget=budget,
-            )
-            if source_receipts is not None:
-                print(
-                    "[RUNPOD] local source seed verified: "
-                    f"video_bytes={source_receipts['video']['bytes']} "
-                    f"video_sha256={source_receipts['video']['sha256']}"
-                )
-            for filename in (f"{name}_TR_TEXT_CORRECTED.zip", f"{name}_ID_TRANSLATED.zip"):
-                local_return = local_root / "translation_output" / filename
-                if local_return.is_file():
-                    destination = f"{remote_root}/translation_output/{filename}"
-                    receipt = _upload_episode_file_verified(
-                        local_return, destination, ssh=ssh, scp=scp, host=host,
-                        budget=budget, reuse_verified=True,
-                    )
-                    print(f"[RUNPOD] return upload verified: {filename}; "
-                          f"bytes={receipt['bytes']} sha256={receipt['sha256']}")
-                    workspace_receipt = Path(str(local_return) + ".workspace.json")
-                    if workspace_receipt.is_file():
-                        _upload_episode_file_verified(workspace_receipt, destination + ".workspace.json",
-                                                     ssh=ssh, scp=scp, host=host, budget=budget, reuse_verified=True)
-
-            override_receipt = _upload_audio_review_overrides(
-                local_root,
-                remote_root,
-                ssh=ssh,
-                scp=scp,
-                host=host,
-                budget=budget,
-            )
-            reset_receipt = _upload_audio_review_reset(
-                local_root,
-                remote_root,
-                ssh=ssh,
-                scp=scp,
-                host=host,
-                budget=budget,
-            )
-            speaker_receipt = _upload_speaker_evidence(
-                local_root,
-                remote_root,
-                ssh=ssh,
-                scp=scp,
-                host=host,
-                budget=budget,
-            )
-            approval = local_root / "review" / "mp4-sample-approval.json"
-            if approval.is_file():
-                _upload_episode_file_verified(approval, f"{remote_root}/review/{approval.name}",
-                                               ssh=ssh, scp=scp, host=host, budget=budget)
+            override_receipt = reset_receipt = speaker_receipt = None
+            if not alignment_recovery:
+                for filename in ("source.url", "official-source.json"):
+                    _upload_episode_file_verified(local_root / "source" / filename,
+                        f"{remote_root}/source/{filename}", ssh=ssh, scp=scp, host=host, budget=budget, immutable=True)
+                source_receipts = _upload_verified_local_source(
+                    local_root, remote_root, source_url, ssh=ssh, scp=scp, host=host,
+                    temporary=temporary, budget=budget)
+                if source_receipts is not None:
+                    print("[RUNPOD] local source seed verified: "
+                          f"video_bytes={source_receipts['video']['bytes']} "
+                          f"video_sha256={source_receipts['video']['sha256']}")
+                for filename in (f"{name}_TR_TEXT_CORRECTED.zip", f"{name}_ID_TRANSLATED.zip"):
+                    local_return = local_root / "translation_output" / filename
+                    if local_return.is_file():
+                        destination = f"{remote_root}/translation_output/{filename}"
+                        receipt = _upload_episode_file_verified(local_return, destination, ssh=ssh, scp=scp, host=host,
+                                                                budget=budget, reuse_verified=True)
+                        print(f"[RUNPOD] return upload verified: {filename}; "
+                              f"bytes={receipt['bytes']} sha256={receipt['sha256']}")
+                        workspace_receipt = Path(str(local_return) + ".workspace.json")
+                        if workspace_receipt.is_file():
+                            _upload_episode_file_verified(workspace_receipt, destination + ".workspace.json",
+                                                         ssh=ssh, scp=scp, host=host, budget=budget, reuse_verified=True)
+                override_receipt = _upload_audio_review_overrides(local_root, remote_root, ssh=ssh, scp=scp,
+                                                                   host=host, budget=budget)
+                reset_receipt = _upload_audio_review_reset(local_root, remote_root, ssh=ssh, scp=scp,
+                                                            host=host, budget=budget)
+                speaker_receipt = _upload_speaker_evidence(local_root, remote_root, ssh=ssh, scp=scp,
+                                                            host=host, budget=budget)
+                approval = local_root / "review" / "mp4-sample-approval.json"
+                if approval.is_file():
+                    _upload_episode_file_verified(approval, f"{remote_root}/review/{approval.name}",
+                                                   ssh=ssh, scp=scp, host=host, budget=budget)
             if code_fix_path.is_file():
                 from .retry_authorization import validate_code_fix_resume
                 validate_code_fix_resume(local_root, episode, commit, code_fix_path)
@@ -2781,7 +2783,8 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
             if runtime_seconds < 1:
                 raise BudgetExceeded("less than one second remains in episode runtime budget")
             exit_code = _monitor_remote_job(ssh, scp, host, episode, commit, local_root,
-                                            source_url, runtime_seconds, budget)
+                                            source_url, runtime_seconds, budget,
+                                            alignment_recovery=alignment_recovery)
             try:
                 _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, scp, host, budget, temporary)
             finally:

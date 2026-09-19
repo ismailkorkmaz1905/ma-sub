@@ -24,11 +24,10 @@ def _remote_identity(request):
 
 
 def test_local_tr_return_must_match_current_pack(tmp_path, monkeypatch):
-    name = "Muhtemel Ask 11.Bolum"
-    pack = tmp_path / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
-    returned = tmp_path / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    name = "Muhtemel Ask 15.Bolum"
+    pack = tmp_path / "handoff" / f"{name}_TR_CORRECTION_PACK.zip"
+    returned = tmp_path / "handoff" / f"{name}_TR_TEXT_CORRECTED.zip"
     pack.parent.mkdir()
-    returned.parent.mkdir()
     pack.write_bytes(b"pack")
     returned.write_bytes(b"returned")
     checked = []
@@ -46,11 +45,10 @@ def test_local_tr_return_must_match_current_pack(tmp_path, monkeypatch):
 
 
 def test_stale_local_tr_return_fails_before_upload(tmp_path, monkeypatch):
-    name = "Muhtemel Ask 11.Bolum"
-    pack = tmp_path / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
-    returned = tmp_path / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    name = "Muhtemel Ask 15.Bolum"
+    pack = tmp_path / "handoff" / f"{name}_TR_CORRECTION_PACK.zip"
+    returned = tmp_path / "handoff" / f"{name}_TR_TEXT_CORRECTED.zip"
     pack.parent.mkdir()
-    returned.parent.mkdir()
     pack.write_bytes(b"pack")
     returned.write_bytes(b"stale")
     monkeypatch.setattr(
@@ -365,7 +363,7 @@ def test_failed_terminal_remote_job_cannot_get_new_attempt_without_authorization
     request_path = tmp_path / "remote-job-request.json"
     status_path = tmp_path / "remote-job-status.json"
     base = "a" * 64
-    request = {"commit": "b" * 40, "episode": 13, "input_sha256": base}
+    request = {"commit": "b" * 40, "episode": 15, "input_sha256": base}
     request_path.write_text(
         json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
         encoding="utf-8",
@@ -382,7 +380,7 @@ def test_expected_terminal_remote_job_keeps_input_identity(tmp_path, exit_code):
     request_path = tmp_path / "remote-job-request.json"
     status_path = tmp_path / "remote-job-status.json"
     base = "a" * 64
-    request = {"commit": "b" * 40, "episode": 13, "input_sha256": base}
+    request = {"commit": "b" * 40, "episode": 15, "input_sha256": base}
     request_path.write_text(
         json.dumps({"data": request, "sha256": runpod_controller.digest(request)}),
         encoding="utf-8",
@@ -400,7 +398,7 @@ def test_expected_terminal_remote_job_keeps_input_identity(tmp_path, exit_code):
     ("field", "wrong"),
     [
         ("format", "mas-remote-result-collection-failure-0"),
-        ("episode", 12),
+        ("episode", 16),
         ("base_input_sha256", "d" * 64),
         ("input_sha256", "d" * 64),
         ("attempt", 0),
@@ -420,7 +418,7 @@ def test_mismatched_collection_failure_marker_fails_closed(tmp_path, field, wron
     input_sha = runpod_controller.digest({"base_input_sha256": base, "attempt": 1})
     request = {
         "commit": "b" * 40,
-        "episode": 13,
+        "episode": 15,
         "input_sha256": input_sha,
         "base_input_sha256": base,
         "attempt": 1,
@@ -439,7 +437,7 @@ def test_mismatched_collection_failure_marker_fails_closed(tmp_path, field, wron
     )
     failure = {
         "format": "mas-remote-result-collection-failure-1",
-        "episode": 13,
+        "episode": 15,
         "base_input_sha256": base,
         "input_sha256": input_sha,
         "attempt": 1,
@@ -447,7 +445,7 @@ def test_mismatched_collection_failure_marker_fails_closed(tmp_path, field, wron
         "request_sha256": runpod_controller.digest(request),
         "relative_path": "work/delivery-export.json",
         "storage_path": (
-            "/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum/"
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum/"
             "work/delivery-export.json"
         ),
     }
@@ -470,7 +468,7 @@ def test_missing_collection_failure_marker_fails_closed(tmp_path):
     base = "a" * 64
     request = {
         "commit": "b" * 40,
-        "episode": 13,
+        "episode": 15,
         "input_sha256": base,
         "base_input_sha256": base,
         "attempt": 0,
@@ -496,7 +494,7 @@ def test_delivery_export_failure_records_current_attempt(tmp_path, monkeypatch):
     base = "a" * 64
     request = {
         "commit": "b" * 40,
-        "episode": 13,
+        "episode": 15,
         "input_sha256": base,
         "base_input_sha256": base,
         "attempt": 0,
@@ -525,9 +523,9 @@ def test_delivery_export_failure_records_current_attempt(tmp_path, monkeypatch):
     with pytest.raises(runpod_controller.RunPodControllerError, match="export unavailable"):
         runpod_controller._collect_remote_results(
             runpod_controller.READY_FOR_DELIVERY,
-            13,
+            15,
             local_root,
-            "/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum",
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum",
             ["ssh"],
             ["scp"],
             "host",
@@ -541,7 +539,7 @@ def test_delivery_export_failure_records_current_attempt(tmp_path, monkeypatch):
     assert marker["sha256"] == runpod_controller.digest(marker["data"])
     assert marker["data"]["relative_path"] == "work/delivery-export.json"
     assert marker["data"]["storage_path"] == (
-        "/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum/"
+        "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum/"
         "work/delivery-export.json"
     )
     assert runpod_controller._remote_attempt_identity(
@@ -553,8 +551,8 @@ def test_delivery_export_failure_records_current_attempt(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("filename", [
-    "Muhtemel Ask 13.Bolum.id.bound.mp4",
-    "Muhtemel Ask 13.Bolum.id.bound.burn.json",
+    "Muhtemel Ask 15.Bolum.id.bound.mp4",
+    "Muhtemel Ask 15.Bolum.id.bound.burn.json",
 ])
 def test_missing_external_delivery_result_advances_remote_identity(
         tmp_path, monkeypatch, filename):
@@ -565,7 +563,7 @@ def test_missing_external_delivery_result_advances_remote_identity(
     commit = "b" * 40
     request = {
         "commit": commit,
-        "episode": 13,
+        "episode": 15,
         "input_sha256": base,
         "base_input_sha256": base,
         "attempt": 0,
@@ -582,12 +580,12 @@ def test_missing_external_delivery_result_advances_remote_identity(
         encoding="utf-8",
     )
     record = {
-        "relative_path": f"final/{filename}",
-        "storage_path": f"/tmp/mas-ep13-output/{filename}",
+        "relative_path": f"output/{filename}",
+        "storage_path": f"/tmp/mas-ep15-output/{filename}",
         "size_bytes": 1,
         "sha256": "c" * 64,
     }
-    manifest = {"episode": 13, "mode": "strict", "files": [record]}
+    manifest = {"episode": 15, "mode": "strict", "files": [record]}
 
     def transfer(command, **kwargs):
         Path(command[-1]).write_text(json.dumps(manifest), encoding="utf-8")
@@ -606,9 +604,9 @@ def test_missing_external_delivery_result_advances_remote_identity(
     with pytest.raises(runpod_controller.RunPodControllerError, match="No such file"):
         runpod_controller._collect_remote_results(
             runpod_controller.READY_FOR_DELIVERY,
-            13,
+            15,
             local_root,
-            "/workspace/ma-sub/EPISODES/Muhtemel Ask 13.Bolum",
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum",
             ["ssh"],
             ["scp"],
             "host",
@@ -628,8 +626,8 @@ def test_missing_external_delivery_result_advances_remote_identity(
     assert input_sha == runpod_controller.digest(
         {"base_input_sha256": base, "attempt": 1}
     )
-    prior_token = hashlib.sha256(f"13\n{commit}\n{base}\n".encode()).hexdigest()
-    next_token = hashlib.sha256(f"13\n{commit}\n{input_sha}\n".encode()).hexdigest()
+    prior_token = hashlib.sha256(f"15\n{commit}\n{base}\n".encode()).hexdigest()
+    next_token = hashlib.sha256(f"15\n{commit}\n{input_sha}\n".encode()).hexdigest()
     assert next_token != prior_token
 
 
@@ -847,7 +845,7 @@ def test_large_remote_download_has_single_attempt_and_byte_growth_probe(monkeypa
 
     monkeypatch.setattr(runpod_controller, "_network_retry", transfer)
     record = {
-        "relative_path": "final/episode.mp4",
+        "relative_path": "output/episode.mp4",
         "size_bytes": 64 * 1024 * 1024,
         "sha256": "a" * 64,
     }
@@ -903,7 +901,7 @@ def test_invalid_local_return_fails_before_provider_access(monkeypatch, tmp_path
         runpod_controller.RunPodControllerError("stale return")))
     monkeypatch.setattr(runpod_controller, "RunPodClient", lambda *_: pytest.fail("provider access"))
     with pytest.raises(runpod_controller.RunPodControllerError, match="stale return"):
-        runpod_controller.run_remote_episode(11)
+        runpod_controller.run_remote_episode(15)
 
 
 def test_episode_budget_anchors_run_start_across_retries(monkeypatch, tmp_path):
@@ -912,17 +910,17 @@ def test_episode_budget_anchors_run_start_across_retries(monkeypatch, tmp_path):
     monkeypatch.setenv("MAS_RUN_STARTED_AT", first.isoformat())
     for _ in range(2):
         with pytest.raises(BudgetExceeded):
-            runpod_controller._episode_budget(tmp_path, 11)
+            runpod_controller._episode_budget(tmp_path, 15)
     saved = json.loads((tmp_path / "work" / "controller_budget.json").read_text())
     assert saved["data"]["started_at"] == first.isoformat()
     monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "21600")
     with pytest.raises(BudgetExceeded):
-        runpod_controller._episode_budget(tmp_path, 11)
+        runpod_controller._episode_budget(tmp_path, 15)
 
 
 def test_episode_budget_checkpoint_tampering_fails(monkeypatch, tmp_path):
     monkeypatch.delenv("MAS_EPISODE_BUDGET_SECONDS", raising=False)
-    runpod_controller._episode_budget(tmp_path, 11)
+    runpod_controller._episode_budget(tmp_path, 15)
     path = tmp_path / "work" / "controller_budget.json"
     saved = json.loads(path.read_text())
     original_start = saved["data"]["started_at"]
@@ -932,7 +930,7 @@ def test_episode_budget_checkpoint_tampering_fails(monkeypatch, tmp_path):
     assert saved["data"]["started_at"] != original_start
     path.write_text(json.dumps(saved))
     with pytest.raises(runpod_controller.RunPodControllerError, match="integrity"):
-        runpod_controller._episode_budget(tmp_path, 11)
+        runpod_controller._episode_budget(tmp_path, 15)
 
 
 def test_network_capture_returns_readback_without_streaming(monkeypatch):
@@ -952,8 +950,8 @@ def test_network_capture_returns_readback_without_streaming(monkeypatch):
 def test_audio_review_overrides_upload_requires_partial_and_final_readback(
     monkeypatch, tmp_path
 ):
-    local_root = tmp_path / "Muhtemel Ask 11.Bolum"
-    source = local_root / "review" / "audio_review_overrides.json"
+    local_root = tmp_path / "Muhtemel Ask 15.Bolum"
+    source = local_root / "work" / "audio_review_overrides.json"
     source.parent.mkdir(parents=True)
     source.write_bytes(b'{"override":true}\n')
     expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -970,7 +968,7 @@ def test_audio_review_overrides_upload_requires_partial_and_final_readback(
     monkeypatch.setattr(runpod_controller, "_network_retry", network_retry)
     receipt = runpod_controller._upload_audio_review_overrides(
         local_root,
-        "/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum",
+        "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum",
         ssh=["ssh", "root@host"],
         scp=["scp"],
         host="host",
@@ -985,8 +983,8 @@ def test_audio_review_overrides_upload_requires_partial_and_final_readback(
     )
     assert "mv -f --" in calls[3][0][-1]
     assert (
-        "'/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum/"
-        "review/audio_review_overrides.json'"
+        "'/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum/"
+        "work/audio_review_overrides.json'"
     ) in calls[3][0][-1]
     assert all(
         kwargs
@@ -1003,8 +1001,8 @@ def test_audio_review_overrides_upload_requires_partial_and_final_readback(
 def test_audio_review_overrides_upload_fails_before_install_on_readback_mismatch(
     monkeypatch, tmp_path
 ):
-    local_root = tmp_path / "11"
-    source = local_root / "review" / "audio_review_overrides.json"
+    local_root = tmp_path / "15"
+    source = local_root / "work" / "audio_review_overrides.json"
     source.parent.mkdir(parents=True)
     source.write_text("{}", encoding="utf-8")
     calls = []
@@ -1022,7 +1020,7 @@ def test_audio_review_overrides_upload_fails_before_install_on_readback_mismatch
     ):
         runpod_controller._upload_audio_review_overrides(
             local_root,
-            "/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum",
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum",
             ssh=["ssh", "root@host"],
             scp=["scp"],
             host="host",
@@ -1035,8 +1033,8 @@ def test_audio_review_overrides_upload_fails_before_install_on_readback_mismatch
 def test_audio_review_overrides_upload_rejects_final_readback_mismatch(
     monkeypatch, tmp_path
 ):
-    local_root = tmp_path / "11"
-    source = local_root / "review" / "audio_review_overrides.json"
+    local_root = tmp_path / "15"
+    source = local_root / "work" / "audio_review_overrides.json"
     source.parent.mkdir(parents=True)
     source.write_text("{}", encoding="utf-8")
     expected_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -1057,7 +1055,7 @@ def test_audio_review_overrides_upload_rejects_final_readback_mismatch(
     ):
         runpod_controller._upload_audio_review_overrides(
             local_root,
-            "/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum",
+            "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum",
             ssh=["ssh", "root@host"],
             scp=["scp"],
             host="host",
@@ -1075,7 +1073,7 @@ def test_missing_audio_review_overrides_does_not_touch_remote(monkeypatch, tmp_p
 
     assert runpod_controller._upload_audio_review_overrides(
         tmp_path,
-        "/workspace/ma-sub/EPISODES/Muhtemel Ask 11.Bolum",
+        "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum",
         ssh=["ssh", "root@host"],
         scp=["scp"],
         host="host",
@@ -1083,7 +1081,7 @@ def test_missing_audio_review_overrides_does_not_touch_remote(monkeypatch, tmp_p
 
 
 def test_speaker_evidence_uses_verified_episode_upload(monkeypatch, tmp_path):
-    source = tmp_path / "review" / "speaker_evidence_v1.json"
+    source = tmp_path / "work" / "speaker_evidence_v1.json"
     source.parent.mkdir(parents=True)
     source.write_text("{}", encoding="utf-8")
     calls = []
@@ -1103,7 +1101,7 @@ def test_speaker_evidence_uses_verified_episode_upload(monkeypatch, tmp_path):
 
     assert receipt["bytes"] == 2
     assert calls[0][0][0] == source
-    assert calls[0][0][1] == "/remote/episode/review/speaker_evidence_v1.json"
+    assert calls[0][0][1] == "/remote/episode/work/speaker_evidence_v1.json"
 
 
 def test_ssh_has_bounded_liveness_options(tmp_path):
@@ -1160,9 +1158,6 @@ def test_runtime_environment_is_shell_quoted_and_does_not_log_secrets(
     values = {
         "RUNPOD_POD_ID": "pod123",
         "RUNPOD_API_KEY": "api secret",
-        "MAS_GMAIL_ADDRESS": "from@example.com",
-        "MAS_GMAIL_APP_PASSWORD": "mail secret",
-        "MAS_NOTIFY_TO": "to@example.com",
         "MAS_DRIVE_STRICT_REMOTE": "gdrive:path with spaces",
         "MAS_ALLOW_C0E3_VENV_ADOPTION": "1",
     }
@@ -1207,8 +1202,8 @@ def test_cli_dispatches_production_run_to_controller(monkeypatch, tmp_path):
     monkeypatch.setattr("mas.runlog.episode_dir", lambda episode: tmp_path / str(episode))
     monkeypatch.setattr(cli, "run_remote_episode", lambda *args: calls.append(args) or 0)
     monkeypatch.setattr(cli, "run", lambda *args: (_ for _ in ()).throw(AssertionError("local")))
-    assert cli.main(["run", "14"]) == 0
-    assert calls == [(14, None)]
+    assert cli.main(["run", "15"]) == 0
+    assert calls == [(15, None)]
 
 
 def test_cli_local_flag_prevents_controller_dispatch(monkeypatch, tmp_path):
@@ -1216,8 +1211,8 @@ def test_cli_local_flag_prevents_controller_dispatch(monkeypatch, tmp_path):
     monkeypatch.setattr("mas.runlog.episode_dir", lambda episode: tmp_path / str(episode))
     monkeypatch.setattr(cli, "run_remote_episode", lambda *args: (_ for _ in ()).throw(AssertionError("remote")))
     monkeypatch.setattr(cli, "run", lambda *args: calls.append(args) or 20)
-    assert cli.main(["run", "14", "--local"]) == 20
-    assert calls == [(14, None, False, None)]
+    assert cli.main(["run", "15", "--local"]) == 20
+    assert calls == [(15, None, False, None)]
 
 
 def test_local_preflight_rejects_dirty_repository(monkeypatch, tmp_path):
@@ -1294,9 +1289,6 @@ def test_session_failure_releases_owned_lease(monkeypatch, tmp_path, failure):
         "RUNPOD_API_KEY": "api",
         "MAS_RUNPOD_SSH_KEY": str(key),
         "MAS_YTDLP_COOKIES": str(cookie),
-        "MAS_GMAIL_ADDRESS": "from@example.com",
-        "MAS_GMAIL_APP_PASSWORD": "mail",
-        "MAS_NOTIFY_TO": "to@example.com",
         "MAS_DRIVE_STRICT_REMOTE": "gdrive:path",
     }
 
@@ -1343,5 +1335,5 @@ def test_session_failure_releases_owned_lease(monkeypatch, tmp_path, failure):
     monkeypatch.setattr(runpod_controller, "_prepare_official_source", lambda *_: "https://example.com")
     monkeypatch.setattr(runpod_controller, "_run_remote_session", lambda *_a, **_k: (_ for _ in ()).throw(failure))
     with pytest.raises(type(failure)):
-        runpod_controller.run_remote_episode(11)
+        runpod_controller.run_remote_episode(15)
     assert events == ["acquired", "externally_absent"]

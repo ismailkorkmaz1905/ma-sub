@@ -289,7 +289,7 @@ def prepare_episode_parts(root, episode, source_video, audio_path, captions_path
             _verify_file(root, record, deadline)
     from .part_scope import DELIVERY_BOUNDARY_POLICY
     plan = build_part_plan(episode=episode, source=source, audio=audio, vad=vad, captions=captions,
-                           boundary_policy=DELIVERY_BOUNDARY_POLICY if episode >= 14 else None)
+                           boundary_policy=DELIVERY_BOUNDARY_POLICY)
     _write_envelope(plan_path, plan)
     return plan
 
@@ -339,7 +339,7 @@ def _result(root, plan, lineage, *, deadline=None, probe=False, verified=None):
     elif verification_key in _VERIFIED_AUDIO:
         _VERIFIED_AUDIO.move_to_end(verification_key)
     return {"audio_path": audio_path, "captions_path": caption_path,
-            "lineage_path": _path(root, f"parts/{part_id}/prepare/audio-part.done.json"),
+            "lineage_path": _path(root, f"parts/{part_id}/work/audio-part.done.json"),
             "lineage": lineage, "plan_sha256": digest(plan),
             "parent_vad_regions": project_part_vad(plan, part_id)}
 
@@ -353,7 +353,7 @@ def validate_part_audio(root, episode, part_id, *, total_timeout=300, verified=N
             _verify_file(root, record, deadline, verified=verified)
     if _read_envelope(_path(root, "work/part-vad.json")) != plan["vad"]:
         raise PartScopeError("parent VAD receipt differs from part plan")
-    lineage = _read_envelope(_path(root, f"parts/{part_id}/prepare/audio-part.done.json"))
+    lineage = _read_envelope(_path(root, f"parts/{part_id}/work/audio-part.done.json"))
     return _result(root, plan, lineage, deadline=deadline, probe=True, verified=verified)
 
 
@@ -366,7 +366,7 @@ def extract_part_audio(root, episode, part_id, *, total_timeout):
             _verify_file(root, record, deadline)
     if _read_envelope(_path(root, "work/part-vad.json")) != plan["vad"]:
         raise PartScopeError("parent VAD receipt differs from part plan")
-    destination = _path(root, f"parts/{part_id}/prepare")
+    destination = _path(root, f"parts/{part_id}/work")
     destination.mkdir(parents=True, exist_ok=True)
     lineage_path = destination / "audio-part.done.json"
     if lineage_path.exists():

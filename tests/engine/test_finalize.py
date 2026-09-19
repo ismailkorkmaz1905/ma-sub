@@ -10,7 +10,6 @@ import unittest
 from unittest.mock import patch
 
 from mas.engine.audio_review import resolve_tr_audio_reviews_v2
-from mas.engine.archive import _load_finalization_inputs
 from mas.engine.download import atomic_write_json, sha256_file, sha256_json, write_stage_marker
 from mas.engine.finalize import FinalizationV2Error, finalize_episode_v2
 from mas.engine.forced_align import _alignment_sha256, align_corrected_segments
@@ -75,8 +74,8 @@ def _alignment_result(words: list[dict]) -> dict:
 
 
 class FinalizeV2Tests(unittest.TestCase):
-    episode = 12
-    episode_name = "Muhtemel Ask 12.Bolum"
+    episode = 15
+    episode_name = "Muhtemel Ask 15.Bolum"
 
     @staticmethod
     def _json(path: Path, value: dict) -> None:
@@ -154,9 +153,9 @@ class FinalizeV2Tests(unittest.TestCase):
         root = project / "EPISODES" / self.episode_name
         for name in (
             "source",
-            "prepare",
-            "translation_input",
-            "translation_output",
+            "work",
+            "handoff",
+            "output",
         ):
             (root / name).mkdir(parents=True, exist_ok=True)
         config = project / "config" / "production"
@@ -165,41 +164,41 @@ class FinalizeV2Tests(unittest.TestCase):
             "source": root / "source" / f"{self.episode_name}.mp4",
             "download_metadata": root / "source" / "source.metadata.json",
             "download_marker": root / "source" / "download.done.json",
-            "audio": root / "prepare" / "audio.flac",
-            "audio_metadata": root / "prepare" / "audio.metadata.json",
-            "audio_marker": root / "prepare" / "audio.done.json",
-            "raw": root / "prepare" / "raw_asr_v2.json",
-            "raw_marker": root / "prepare" / "raw_asr_v2.done.json",
-            "forced": root / "prepare" / "forced_alignment_v2.json",
-            "forced_marker": root / "prepare" / "forced_alignment_v2.done.json",
-            "schema": root / "prepare" / "aligned_tr_schema_v2.json",
+            "audio": root / "work" / "audio.flac",
+            "audio_metadata": root / "work" / "audio.metadata.json",
+            "audio_marker": root / "work" / "audio.done.json",
+            "raw": root / "work" / "raw_asr_v2.json",
+            "raw_marker": root / "work" / "raw_asr_v2.done.json",
+            "forced": root / "work" / "forced_alignment_v2.json",
+            "forced_marker": root / "work" / "forced_alignment_v2.done.json",
+            "schema": root / "work" / "aligned_tr_schema_v2.json",
             "tr_pack": (
                 root
-                / "translation_input"
+                / "handoff"
                 / f"{self.episode_name}_TR_CORRECTION_PACK.zip"
             ),
             "tr_text_output": (
                 root
-                / "translation_output"
+                / "handoff"
                 / f"{self.episode_name}_TR_TEXT_CORRECTED.zip"
             ),
             "tr_output": (
                 root
-                / "translation_output"
+                / "handoff"
                 / f"{self.episode_name}_TR_CORRECTED.zip"
             ),
-            "audio_review": root / "prepare" / "audio_review_v2.json",
+            "audio_review": root / "work" / "audio_review_v2.json",
             "audio_review_recovery": (
-                root / "prepare" / "audio_review_v2.recovery.json"
+                root / "work" / "audio_review_v2.recovery.json"
             ),
             "id_pack": (
                 root
-                / "translation_input"
+                / "handoff"
                 / f"{self.episode_name}_ID_TRANSLATION_PACK.zip"
             ),
             "translated": (
                 root
-                / "translation_output"
+                / "handoff"
                 / f"{self.episode_name}_ID_TRANSLATED.zip"
             ),
             "series_config": config / "series.yaml",
@@ -643,26 +642,11 @@ class FinalizeV2Tests(unittest.TestCase):
         output.write_bytes(b"verified-stream-copy-mkv")
         return self._mux_report(output)
 
-    def test_pass_rebuilds_full_evidence_and_preserves_legacy_v1(self) -> None:
+    def test_pass_rebuilds_full_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root, paths = self._workspace(temporary)
             schema = self._inputs(root, paths)
-            final = root / "final"
-            final.mkdir()
-            legacy = {
-                "report": final / f"{self.episode_name}_FINALIZATION_REPORT.json",
-                "id": final / f"{self.episode_name}.id-final.srt",
-                "tr": final / f"{self.episode_name}.tr-final.srt",
-                "mkv": final / f"{self.episode_name} - Endonezce + Turkce.mkv",
-            }
-            legacy_bytes = {
-                "report": b'{"legacy":true}',
-                "id": b"legacy-id",
-                "tr": b"legacy-tr",
-                "mkv": b"legacy-mkv",
-            }
-            for key, path in legacy.items():
-                path.write_bytes(legacy_bytes[key])
+            final = root / "output"
 
             with patch(
                 "mas.engine.finalize.mux_softsubs", side_effect=self._fake_mux
@@ -725,15 +709,6 @@ class FinalizeV2Tests(unittest.TestCase):
             self.assertEqual(
                 json.loads(report_path.read_text(encoding="utf-8")), report
             )
-            archive_input = _load_finalization_inputs(root, self.episode)
-            self.assertEqual(
-                archive_input["finalization_report_version"], 2
-            )
-            self.assertEqual(
-                archive_input["source"], "finalization_report_v2"
-            )
-            for key, path in legacy.items():
-                self.assertEqual(path.read_bytes(), legacy_bytes[key])
 
     def test_weakened_alignment_policy_or_hard_counter_cannot_reach_mux(
         self,
@@ -859,7 +834,7 @@ class FinalizeV2Tests(unittest.TestCase):
 
             tr_entries = parse_srt(
                 root
-                / "final"
+                / "output"
                 / "subtitles"
                 / f"{self.episode_name}-tr.srt"
             )
@@ -982,7 +957,7 @@ class FinalizeV2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root, paths = self._workspace(temporary)
             self._inputs(root, paths)
-            stale_audio = root / "prepare" / "stale.flac"
+            stale_audio = root / "work" / "stale.flac"
             stale_audio.write_bytes(b"stale-other-episode-audio")
             corrections = validate_tr_correction_output(
                 paths["tr_pack"], paths["tr_output"]
@@ -1079,7 +1054,7 @@ class FinalizeV2Tests(unittest.TestCase):
                     FinalizationV2Error, "verification failed"
                 ):
                     finalize_episode_v2(**self._kwargs(root, paths))
-            final = root / "final"
+            final = root / "output"
             self.assertFalse((final / f"{self.episode_name}.mkv").exists())
             self.assertFalse(
                 (
@@ -1109,12 +1084,12 @@ class FinalizeV2Tests(unittest.TestCase):
                 ):
                     finalize_episode_v2(**self._kwargs(root, paths))
             self.assertFalse(
-                (root / "final" / f"{self.episode_name}.mkv").exists()
+                (root / "output" / f"{self.episode_name}.mkv").exists()
             )
             self.assertFalse(
                 (
                     root
-                    / "final"
+                    / "output"
                     / f"{self.episode_name}_FINALIZATION_REPORT_V2.json"
                 ).exists()
             )
@@ -1123,7 +1098,7 @@ class FinalizeV2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root, paths = self._workspace(temporary)
             self._inputs(root, paths)
-            final = root / "final"
+            final = root / "output"
             subtitles = final / "subtitles"
             subtitles.mkdir(parents=True)
             prior_paths = {

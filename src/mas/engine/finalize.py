@@ -461,7 +461,7 @@ def _safe_output_directory(path: Path, expected_parent: Path) -> None:
 
 
 def _canonical_output_paths(root: Path, episode_name: str) -> dict[str, Path]:
-    final = root / "final"
+    final = root / "output"
     _safe_output_directory(final, root)
     subtitles = final / "subtitles"
     _safe_output_directory(subtitles, final)
@@ -586,7 +586,7 @@ def _validate_source_chain(
 def _validate_audio_chain(
     root: Path, source: Path, source_sha: str
 ) -> tuple[Path, Path, Path, dict[str, Any]]:
-    prepare = root / "prepare"
+    prepare = root / "work"
     audio = prepare / "audio.flac"
     metadata_path = prepare / "audio.metadata.json"
     marker_path = prepare / "audio.done.json"
@@ -907,9 +907,8 @@ def finalize_episode_v2(
     episode_name = _episode_identity(episode)
     root = _validate_finalization_root(episode_root, episode)
     source_dir = _require_workflow_directory(root, "source")
-    prepare_dir = _require_workflow_directory(root, "prepare")
-    translation_input_dir = _require_workflow_directory(root, "translation_input")
-    translation_output_dir = _require_workflow_directory(root, "translation_output")
+    work_dir = _require_workflow_directory(root, "work")
+    handoff_dir = _require_workflow_directory(root, "handoff")
     project_root = ROOT.resolve(strict=True)
 
     source, source_file_record = _source_record(root, source_video, episode_name)
@@ -928,47 +927,47 @@ def finalize_episode_v2(
 
     raw_path = _exact_regular_file(
         raw_asr_path,
-        prepare_dir / "raw_asr_v2.json",
+        work_dir / "raw_asr_v2.json",
         "Raw ASR V2 artifact",
     )
     forced_path = _exact_regular_file(
         forced_alignment_path,
-        prepare_dir / "forced_alignment_v2.json",
+        work_dir / "forced_alignment_v2.json",
         "Full forced-alignment artifact",
     )
     tr_pack_path = _exact_regular_file(
         tr_correction_pack,
-        translation_input_dir / f"{episode_name}_TR_CORRECTION_PACK.zip",
+        handoff_dir / f"{episode_name}_TR_CORRECTION_PACK.zip",
         "Turkish correction input pack",
     )
     tr_text_output_path = _exact_regular_file(
         tr_text_correction_output,
-        translation_output_dir / f"{episode_name}_TR_TEXT_CORRECTED.zip",
+        handoff_dir / f"{episode_name}_TR_TEXT_CORRECTED.zip",
         "Text-only Turkish correction output",
     )
     tr_output_path = _exact_regular_file(
         tr_correction_output,
-        translation_output_dir / f"{episode_name}_TR_CORRECTED.zip",
+        handoff_dir / f"{episode_name}_TR_CORRECTED.zip",
         "Turkish correction output",
     )
     audio_review_report_path = _exact_regular_file(
         audio_review_path,
-        prepare_dir / "audio_review_v2.json",
+        work_dir / "audio_review_v2.json",
         "Bounded Colab audio-review report",
     )
     schema_path = _exact_regular_file(
         aligned_schema,
-        prepare_dir / "aligned_tr_schema_v2.json",
+        work_dir / "aligned_tr_schema_v2.json",
         "Aligned Turkish V2 schema",
     )
     id_pack_path = _exact_regular_file(
         id_translation_pack,
-        translation_input_dir / f"{episode_name}_ID_TRANSLATION_PACK.zip",
+        handoff_dir / f"{episode_name}_ID_TRANSLATION_PACK.zip",
         "Indonesian translation input pack",
     )
     id_zip_path = _exact_regular_file(
         id_translation_zip,
-        translation_output_dir / f"{episode_name}_ID_TRANSLATED.zip",
+        handoff_dir / f"{episode_name}_ID_TRANSLATED.zip",
         "Indonesian translation output",
     )
 
@@ -1043,7 +1042,7 @@ def finalize_episode_v2(
         or _SHA256_RE.fullmatch(raw_input_sha) is None
     ):
         raise FinalizationV2Error("Raw ASR has no valid input_sha256")
-    raw_marker_path = prepare_dir / "raw_asr_v2.done.json"
+    raw_marker_path = work_dir / "raw_asr_v2.done.json"
     raw_marker = _validated_stage_marker(
         raw_marker_path,
         stage="raw_asr_v2",
@@ -1107,7 +1106,7 @@ def finalize_episode_v2(
         raise FinalizationV2Error(
             "Forced alignment belongs to stale or different audio"
         )
-    forced_marker_path = prepare_dir / "forced_alignment_v2.done.json"
+    forced_marker_path = work_dir / "forced_alignment_v2.done.json"
     forced_marker = _validated_stage_marker(
         forced_marker_path,
         stage="forced_alignment_v2",
@@ -1204,7 +1203,7 @@ def finalize_episode_v2(
         != strict_word_vad_v2
     ):
         raise FinalizationV2Error(
-            "Speech coverage does not bind the exact audio-review/VAD audits"
+            "Speech coverage does not bind the exact audio-work/VAD audits"
         )
     coverage_sha = _canonical_sha256(artifacts.speech_coverage_report)
     if trusted_schema.get("speech_coverage_sha256") != coverage_sha:

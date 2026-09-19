@@ -14,41 +14,40 @@ def subtitle_export(root):
         path.write_text(content, encoding='utf-8')
         return file_record(path, root)
     inputs = {'source_video': record('source/source.mp4', 'source')}
-    outputs = {language + '_srt': record('final/' + language + '.srt',
+    outputs = {language + '_srt': record('output/' + language + '.srt',
                '1\n00:00:01,000 --> 00:00:02,000\nMerhaba.\n') for language in ('tr', 'id')}
-    report = {'episode': 14, 'status': 'PASS', 'input_files': inputs, 'outputs': outputs}
-    atomic_json(root / 'final/Muhtemel Ask 14.Bolum_FINALIZATION_REPORT_V2.json', report)
+    report = {'episode': 15, 'status': 'PASS', 'input_files': inputs, 'outputs': outputs}
+    atomic_json(root / 'output/Muhtemel Ask 15.Bolum_FINALIZATION_REPORT_V2.json', report)
     record('source/official-source.json', '{}')
     record('source/source.url', 'https://example.invalid/source')
-    local_encode.write_subtitle_export(root, 14)
+    local_encode.write_subtitle_export(root, 15)
     return report
 
 
 def release(root):
-    body = {'format': 'mas-gpu-released-for-encode-1', 'episode': 14, 'status': 'ABSENT',
+    body = {'format': 'mas-gpu-released-for-encode-1', 'episode': 15, 'status': 'ABSENT',
             'plan_sha256': sha256_file(root / 'work/local-encode-plan.json'),
             'pod_id': 'owned', 'capacity_state': {}, 'capacity_shutdown': {}}
     atomic_json(root / 'work/gpu-released-for-encode.json', {'data': body, 'sha256': digest(body)})
 
 
-def test_export_is_strict_and_independent_of_mutable_mail(tmp_path):
+def test_export_is_strict_and_independent_of_unrelated_state(tmp_path):
     subtitle_export(tmp_path)
-    atomic_json(tmp_path / 'work/notification-outbox/event.json', {'status': 'sent'})
-    assert local_encode.validate_subtitle_export(tmp_path, 14)[0]['encoder'] == 'h264_qsv'
-    (tmp_path / 'final/id.srt').write_text('changed')
+    assert local_encode.validate_subtitle_export(tmp_path, 15)[0]['encoder'] == 'h264_qsv'
+    (tmp_path / 'output/id.srt').write_text('changed')
     with pytest.raises(ValueError):
-        local_encode.validate_subtitle_export(tmp_path, 14)
+        local_encode.validate_subtitle_export(tmp_path, 15)
 
 
 def test_export_rejects_forged_equal_hash_inventory_with_changed_timeline(tmp_path):
     report = subtitle_export(tmp_path)
-    path = tmp_path / 'final/id.srt'
+    path = tmp_path / 'output/id.srt'
     path.write_text('1\n00:00:00,500 --> 00:00:02,000\nHalo.\n')
     report['outputs']['id_srt'] = file_record(path, tmp_path)
-    atomic_json(tmp_path / 'final/Muhtemel Ask 14.Bolum_FINALIZATION_REPORT_V2.json', report)
-    local_encode.write_subtitle_export(tmp_path, 14)
+    atomic_json(tmp_path / 'output/Muhtemel Ask 15.Bolum_FINALIZATION_REPORT_V2.json', report)
+    local_encode.write_subtitle_export(tmp_path, 15)
     with pytest.raises(ValueError, match='timelines differ'):
-        local_encode.validate_subtitle_export(tmp_path, 14)
+        local_encode.validate_subtitle_export(tmp_path, 15)
 
 
 def test_semantic_first_hour_export_selects_from_canonical_blocks(tmp_path):
@@ -70,15 +69,15 @@ def test_semantic_first_hour_export_selects_from_canonical_blocks(tmp_path):
     srt = ('1\n00:59:59,000 --> 01:00:00,100\nBir.\n\n'
            '2\n01:00:01,000 --> 01:00:02,000\nİki.\n')
     outputs = {
-        'tr_srt': record('final/subtitles/episode-tr.srt', srt),
-        'id_srt': record('final/subtitles/episode-id.srt', srt),
+        'tr_srt': record('output/subtitles/episode-tr.srt', srt),
+        'id_srt': record('output/subtitles/episode-id.srt', srt),
     }
     report = {
         'episode': 15, 'status': 'PASS', 'alignment_policy': 'semantic-block-v1',
         'strict_ctc_pass': False, 'semantic_alignment_pass': True,
         'release_eligible': True, 'input_files': inputs, 'outputs': outputs,
     }
-    atomic_json(tmp_path / 'final/Muhtemel Ask 15.Bolum_SEMANTIC_FINALIZATION_REPORT.json', report)
+    atomic_json(tmp_path / 'output/Muhtemel Ask 15.Bolum_SEMANTIC_FINALIZATION_REPORT.json', report)
     record('source/official-source.json', '{}')
     record('source/source.url', 'https://example.invalid/source')
     atomic_json(tmp_path / 'work/state.json', {
@@ -101,7 +100,7 @@ def test_no_hardware_or_encoder_call_before_external_gpu_release(tmp_path, monke
     subtitle_export(tmp_path)
     monkeypatch.setattr(local_encode, 'plan_encoding_settings', lambda *a, **k: pytest.fail('encoded before release'))
     with pytest.raises(FileNotFoundError):
-        local_encode.complete_local_encode(tmp_path, 14, total_timeout=600)
+        local_encode.complete_local_encode(tmp_path, 15, total_timeout=600)
 
 
 def test_qsv_resume_uses_only_remaining_budget_and_emits_bound_delivery(tmp_path, monkeypatch):
@@ -125,7 +124,7 @@ def test_qsv_resume_uses_only_remaining_budget_and_emits_bound_delivery(tmp_path
         atomic_json(output.with_suffix('.burn.json'), {'test': True})
     monkeypatch.setattr(local_encode, 'qualify_encoding', qualify)
     monkeypatch.setattr(local_encode, 'burn_indonesian_mp4', burn)
-    result = local_encode.complete_local_encode(tmp_path, 14, total_timeout=120)
+    result = local_encode.complete_local_encode(tmp_path, 15, total_timeout=120)
     assert events == ['released', 'qualified', 'burned']
     assert result['execution_plan_sha256'] == sha256_file(tmp_path / 'work/local-encode-plan.json')
     assert result['mode'] == 'strict'
@@ -139,12 +138,12 @@ def test_expired_budget_never_starts_qualification(tmp_path, monkeypatch):
     monkeypatch.setattr(local_encode, 'plan_encoding_settings', lambda *a, **k: ({}, {}))
     monkeypatch.setattr(local_encode, 'qualify_encoding', lambda *a, **k: pytest.fail('late qualification'))
     with pytest.raises(TimeoutError, match='budget exhausted'):
-        local_encode.complete_local_encode(tmp_path, 14, total_timeout=0)
+        local_encode.complete_local_encode(tmp_path, 15, total_timeout=0)
 
 
 def test_local_delivery_qualification_rejects_changed_samples(tmp_path):
     subtitle_export(tmp_path)
-    plan, _ = local_encode.validate_subtitle_export(tmp_path, 14)
+    plan, _ = local_encode.validate_subtitle_export(tmp_path, 15)
     folder = tmp_path / 'work/encoding-qualification/example'
     folder.mkdir(parents=True)
     samples = []
@@ -169,7 +168,7 @@ def test_local_delivery_qualification_rejects_changed_samples(tmp_path):
                 'qualification': file_record(path, tmp_path)}
     receipt = {'encoder': plan['encoder'], 'style': plan['style'],
                'encoding_settings': {'identity_sha256': 'settings', 'target_size_gb': plan['target_size_gb']}}
-    local_encode.validate_local_encoding_evidence(tmp_path, 14, delivery, receipt)
+    local_encode.validate_local_encoding_evidence(tmp_path, 15, delivery, receipt)
     (folder / samples[0]['output_file']).write_bytes(b'changed')
     with pytest.raises(ValueError):
-        local_encode.validate_local_encoding_evidence(tmp_path, 14, delivery, receipt)
+        local_encode.validate_local_encoding_evidence(tmp_path, 15, delivery, receipt)

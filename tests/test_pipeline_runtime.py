@@ -41,12 +41,12 @@ def test_external_controller_requires_external_delivery_without_pod_env(monkeypa
 
 
 def test_audio_review_reset_preserves_bound_stale_artifacts(tmp_path, monkeypatch):
-    name = "Muhtemel Ask 14.Bolum"
+    name = "Muhtemel Ask 15.Bolum"
     artifacts = []
     for relative, payload in (
-        ("prepare/audio_review_v2.json", b"report"),
-        ("prepare/audio_review_v2.recovery.json", b"recovery"),
-        (f"translation_output/{name}_TR_CORRECTED.zip", b"final"),
+        ("work/audio_review_v2.json", b"report"),
+        ("work/audio_review_v2.recovery.json", b"recovery"),
+        (f"handoff/{name}_TR_CORRECTED.zip", b"final"),
     ):
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,7 +65,7 @@ def test_audio_review_reset_preserves_bound_stale_artifacts(tmp_path, monkeypatc
         "artifacts": artifacts,
     }
     marker = {"data": body, "sha256": pipeline.sha256_json(body)}
-    marker_path = tmp_path / "review/audio_review_reset.json"
+    marker_path = tmp_path / "work/audio_review_reset.json"
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker_path.write_text(json.dumps(marker), encoding="utf-8")
     monkeypatch.setattr(
@@ -83,12 +83,12 @@ def test_audio_review_reset_preserves_bound_stale_artifacts(tmp_path, monkeypatc
         tmp_path, 14, name, tmp_path / "pack.zip", tmp_path / "output.zip"
     )
 
-    archive = tmp_path / "review/superseded-audio-review" / marker["sha256"]
+    archive = tmp_path / "work/superseded-audio-review" / marker["sha256"]
     assert receipt["artifacts"] == artifacts
     for item in artifacts:
         assert not (tmp_path / item["relative_path"]).exists()
         assert (archive / item["relative_path"]).is_file()
-    replacement = tmp_path / f"translation_output/{name}_TR_CORRECTED.zip"
+    replacement = tmp_path / f"handoff/{name}_TR_CORRECTED.zip"
     replacement.write_bytes(b"new-final")
     pipeline._apply_audio_review_reset(
         tmp_path, 14, name, tmp_path / "pack.zip", tmp_path / "output.zip"
@@ -117,7 +117,7 @@ def test_strict_finalize_checkpoint_hydrates_only_exact_bound_outputs(
     tmp_path, monkeypatch
 ):
     root = tmp_path / "episode"
-    final = root / "final"
+    final = root / "output"
     subtitles = final / "subtitles"
     subtitles.mkdir(parents=True)
     outputs = {
@@ -263,13 +263,13 @@ def test_ep15_semantic_mode_never_enters_forced_ctc(tmp_path, monkeypatch):
     }
 
 
-def test_ep15_delivery_scope_can_change_without_changing_semantic_evidence(monkeypatch):
+def test_delivery_scope_can_change_without_changing_semantic_evidence(monkeypatch):
     monkeypatch.delenv("MAS_ALIGNMENT_POLICY", raising=False)
     state = {}
     first = pipeline._resolve_run_contract(
-        state, episode=15, new_state=True, priority="first-hour-v1")
+        state, episode=15, priority="first-hour-v1")
     whole = pipeline._resolve_run_contract(
-        state, episode=15, new_state=False, priority="whole-episode-v1")
+        state, episode=15, priority="whole-episode-v1")
     assert first["alignment_policy"] == whole["alignment_policy"] == "semantic-block-v1"
     assert whole["delivery_scope"] == "whole-episode"
     assert state["delivery_scope_history"] == ["first-hour", "whole-episode"]
@@ -432,7 +432,6 @@ def test_stage_records_elapsed_seconds_on_success_and_failure(tmp_path, monkeypa
     state = {"episode": 13}
     values = iter((10.0, 12.5, 20.0, 23.25))
     monkeypatch.setattr("mas.pipeline.time.monotonic", lambda: next(values))
-    monkeypatch.setattr("mas.pipeline.notify", lambda *args, **kwargs: None)
     path = tmp_path / "state.json"
 
     _stage(path, state, "ok", lambda: {"value": 1, "path": "audio.wav"})
@@ -509,7 +508,6 @@ def test_stage_heartbeat_does_not_mark_useful_work(tmp_path, monkeypatch, capsys
         def join(self): pass
     monkeypatch.setattr(pipeline.threading, "Event", Event)
     monkeypatch.setattr(pipeline.threading, "Thread", Thread)
-    monkeypatch.setattr(pipeline, "notify", lambda *a, **kw: None)
     monkeypatch.setattr(pipeline, "mark_work_progress", lambda stage, **kw: marks.append((stage, kw)))
     pipeline._stage(tmp_path / "state.json", {"episode": 11}, "audio", lambda: {})
     assert capsys.readouterr().out.count("RUNNING") == 2
@@ -698,48 +696,6 @@ def test_runpod_stop_requires_key(monkeypatch):
 def test_non_runpod_shutdown_is_noop(monkeypatch):
     monkeypatch.delenv("RUNPOD_POD_ID", raising=False)
     assert stop_current_pod() == {"requested": False, "reason": "not_running_on_runpod"}
-
-
-def test_stage_only_notifies_failure_without_start_chatter(tmp_path, monkeypatch):
-    state = {"episode": 13, "stages": {}}
-    events = []
-    monkeypatch.setattr(pipeline, "notify", lambda episode, event, details=None, **kwargs: events.append((episode, event, details)))
-
-    def fail():
-        raise ValueError("invalid returned ZIP")
-
-    with pytest.raises(ValueError, match="invalid returned ZIP"):
-        pipeline._stage(tmp_path / "state.json", state, "id_return", fail)
-
-    assert state["stages"]["id_return"]["status"] == "failed"
-    assert events == [
-        (
-            13,
-            "Endonezce çeviri dönüşü doğrulaması başarısız",
-            "Sonuç: aşama tamamlanamadı.\n"
-            "Hata: ValueError: invalid returned ZIP\n"
-            "Sonraki adım: hatayı giderip aynı bölüm komutuyla güvenli devam edin.",
-        ),
-    ]
-
-
-def test_only_fresh_major_milestones_enqueue_mail(tmp_path, monkeypatch):
-    state = {"episode": 13, "stages": {}}
-    events = []
-    monkeypatch.setattr(
-        pipeline,
-        "notify",
-        lambda episode, event, details=None, **kwargs: events.append(
-            (episode, event, kwargs)
-        ),
-    )
-
-    pipeline._stage(tmp_path / "state.json", state, "download", lambda: {})
-
-    assert events == []
-    pipeline._stage(tmp_path / 'state.json', state, 'raw_asr', lambda: {'resumed': False})
-    pipeline._stage(tmp_path / 'state.json', state, 'raw_asr', lambda: {'resumed': True})
-    assert len(events) == 1 and events[0][2]['kind'] == 'milestone'
 
 
 @pytest.mark.parametrize(

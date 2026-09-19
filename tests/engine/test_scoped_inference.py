@@ -13,5 +13,5 @@ def test_scoped_alignment_cannot_start_raw_inference(tmp_path, monkeypatch, forc
     monkeypatch.setattr(raw_asr, 'recover_raw_asr_v2_from_checkpoint',
                         lambda *a, **k: pytest.fail('recovery inference was attempted'))
     with pytest.raises(TranscriptionError, match='Scoped alignment retry'):
-        raw_asr.transcribe_raw_audio_v2(audio, tmp_path / 'prepare', episode=14,
+        raw_asr.transcribe_raw_audio_v2(audio, tmp_path / 'work', episode=14,
                                        require_resume=True, force=force)

@@ -20,8 +20,8 @@ def schema(episode=11):
 
 def make_files(root, *, episode=11, text="Halo.", review=False, pack_episode=None):
     name = f"Muhtemel Ask {episode}.Bolum"
-    pack = root / "translation_input" / f"{name}_ID_TRANSLATION_PACK.zip"
-    returned = root / "translation_output" / f"{name}_ID_TRANSLATED.zip"
+    pack = root / "handoff" / f"{name}_ID_TRANSLATION_PACK.zip"
+    returned = root / "handoff" / f"{name}_ID_TRANSLATED.zip"
     source = schema(pack_episode or episode)
     manifest = create_id_translation_pack(source, pack, batch_size=1,
                                           glossary=load_default_id_translation_glossary())

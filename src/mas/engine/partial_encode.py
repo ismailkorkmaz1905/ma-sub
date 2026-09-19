@@ -57,8 +57,8 @@ def burn_partial_indonesian_mp4(root, episode, part_id, *, total_timeout, target
         'export_sha256': sha256_file(safe_relative(root, f'parts/{part_id}/work/partial-export.json')),
         'settings': settings, 'style': burn.SUBTITLE_STYLE}
     child = safe_relative(root, f'parts/{part_id}')
-    output = child / 'final' / f'Muhtemel Ask {episode}.Bolum_{part_id}.id.{digest(identity)[:16]}.mp4'
-    receipt_path = child / 'final/partial-encoding.json'
+    output = child / 'output' / f'Muhtemel Ask {episode}.Bolum_{part_id}.id.{digest(identity)[:16]}.mp4'
+    receipt_path = child / 'output/partial-encoding.json'
     pending_path = child / 'work/partial-encode-pending.json'
     if not receipt_path.exists() and pending_path.exists():
         wrapped = read_json(pending_path)
@@ -156,7 +156,7 @@ def validate_partial_encoding(root, episode, part_id, *, total_timeout=300):
     deadline = time.monotonic() + total_timeout
     root = Path(root)
     export, report = validate_partial_export(root, episode, part_id, total_timeout=total_timeout)
-    path = safe_relative(root, f'parts/{part_id}/final/partial-encoding.json')
+    path = safe_relative(root, f'parts/{part_id}/output/partial-encoding.json')
     receipt = read_json(path)
     if report['mode'] == 'delivery-first-v1':
         from ..delivery_first import verify_evidence
@@ -206,7 +206,7 @@ def validate_partial_encoding(root, episode, part_id, *, total_timeout=300):
                 raise ValueError('Partial qualification artifact escaped its directory')
             _verify_file(root, {'relative_path': (qualification_path.parent / name).relative_to(root).as_posix(),
                 'sha256': sample[key + '_sha256'], 'size_bytes': sample[key + '_bytes']}, deadline)
-    expected = f'parts/{part_id}/final/Muhtemel Ask {episode}.Bolum_{part_id}.id.{digest(identity)[:16]}.mp4'
+    expected = f'parts/{part_id}/output/Muhtemel Ask {episode}.Bolum_{part_id}.id.{digest(identity)[:16]}.mp4'
     if receipt['output']['relative_path'] != expected:
         raise ValueError('Partial encoding output escaped its identity-scoped path')
     return receipt, _verify_file(root, receipt['output'], deadline)

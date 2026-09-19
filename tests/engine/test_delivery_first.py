@@ -30,9 +30,10 @@ def policy():
     return series, names, religious, build_production_translation_policy(series, names, religious)
 
 
-def test_policy_preserves_retained_episodes():
-    assert not df.enabled(13)
-    assert df.enabled(14)
+def test_policy_accepts_positive_episode_numbers():
+    assert df.enabled(1)
+    assert df.enabled(15)
+    assert not df.enabled(0)
 
 
 def test_long_incomplete_parent_only_omits_its_own_cue():
@@ -70,7 +71,7 @@ def test_overlap_never_moves_a_cue_into_a_distant_scene(policy):
         {'uid': 'one', 'start_ms': 0, 'end_ms': 1000, 'text': 'Merhaba', 'timing_source': 'source_interval_fallback'},
         {'uid': 'two', 'start_ms': 900, 'end_ms': 1800, 'text': 'İyiyim', 'timing_source': 'source_interval_fallback'},
         {'uid': 'three', 'start_ms': 30000, 'end_ms': 31000, 'text': 'Sonra', 'timing_source': 'source_interval_fallback'}
-    ], 14, 32000, policy[3])
+    ], 15, 32000, policy[3])
     assert schema['blocks'][1]['start_ms'] == 1000
     assert schema['blocks'][2]['start_ms'] == 30000
     assert warnings and schema['quality_status'] == 'NOT_STRICT'
@@ -84,7 +85,7 @@ def test_short_display_is_extended_only_into_free_time_and_otherwise_omitted(pol
          'timing_source': 'source_interval_fallback'},
         {'uid': 'three', 'start_ms': 1150, 'end_ms': 1300, 'text': 'Üç',
          'timing_source': 'source_interval_fallback'},
-    ], 14, 2000, policy[3])
+    ], 15, 2000, policy[3])
     assert [(block['tr_text'], block['start_ms'], block['end_ms']) for block in schema['blocks']] == [
         ('Bir', 0, 400), ('Üç', 1150, 1550)]
     assert any(warning['action'] == 'omitted' and warning['uid'] == 'two' for warning in warnings)
@@ -108,12 +109,12 @@ def test_failed_group_continues_and_does_not_repeat_on_resume(tmp_path):
             {'uid': 'good', 'start_ms': 1000, 'end_ms': 1900, 'text': 'İyiyim'}]
     FakeSession.calls = []
     kwargs = dict(remaining=lambda: 4000, session_factory=FakeSession)
-    first, notes = align.refine_cues(cues, 'audio', tmp_path, {'episode': 14}, **kwargs)
+    first, notes = align.refine_cues(cues, 'audio', tmp_path, {'episode': 15}, **kwargs)
     assert [x['text'] for x in first] == ['Merhaba', 'İyiyim']
     assert first[0]['timing_source'] == 'source_interval_fallback'
     assert first[1]['timing_source'] == 'ctc_cue_bounds'
     assert notes[0]['reason'] == 'alignment_timeout'
-    second, _ = align.refine_cues(cues, 'audio', tmp_path, {'episode': 14}, **kwargs)
+    second, _ = align.refine_cues(cues, 'audio', tmp_path, {'episode': 15}, **kwargs)
     assert first == second
     assert FakeSession.calls == ['bad', 'good']
 
@@ -122,7 +123,7 @@ def test_low_budget_never_launches_alignment(tmp_path):
     cue = {'uid': 'a', 'start_ms': 0, 'end_ms': 1000, 'text': 'Merhaba'}
     def forbidden(*a, **kw):
         pytest.fail('spent delivery reserve on alignment')
-    result, notes = align.refine_cues([cue], 'audio', tmp_path, {'episode': 14},
+    result, notes = align.refine_cues([cue], 'audio', tmp_path, {'episode': 15},
                                     remaining=lambda: 1799, session_factory=forbidden)
     assert result[0]['timing_source'] == 'source_interval_fallback'
     assert notes[0]['reason'] == 'delivery_time_reserved'
@@ -130,7 +131,7 @@ def test_low_budget_never_launches_alignment(tmp_path):
 
 def test_inflight_group_is_not_relaunched(tmp_path):
     cue = {'uid': 'a', 'start_ms': 0, 'end_ms': 1000, 'text': 'Merhaba'}
-    binding = {'episode': 14}
+    binding = {'episode': 15}
     uid = digest({'binding': binding, 'cue': cue})
     df.write_signed(tmp_path / (uid + '.json'), {'binding': binding, 'cue': cue, 'result': None}, 'alignment-group')
     result, notes = align.refine_cues([cue], 'audio', tmp_path, binding, remaining=lambda: 4000,
@@ -163,8 +164,8 @@ def test_actual_lost_subprocess_is_bounded(tmp_path):
 
 def test_handoff_to_real_authenticated_delivery_export(synthetic_parents, monkeypatch, policy):
     root, source, audio, captions, calls = synthetic_parents
-    atomic_json(root / 'source/official-source.json', {'episode': 14, 'title': 'Muhtemel Ask 14. Bolum'})
-    (root / 'source/source.url').write_text('https://example.invalid/14', encoding='utf-8')
+    atomic_json(root / 'source/official-source.json', {'episode': 15, 'title': 'Muhtemel Ask 15. Bolum'})
+    (root / 'source/source.url').write_text('https://example.invalid/15', encoding='utf-8')
     primary_calls = []
     def primary(*a, **kw):
         primary_calls.append(1)
@@ -176,22 +177,22 @@ def test_handoff_to_real_authenticated_delivery_export(synthetic_parents, monkey
     series, names, religious, _ = policy
     from mas.progressive import run_progressive_worker
     args = dict(total_timeout=1200, config_dir=None, series=series, names=names, religious=religious)
-    assert run_progressive_worker(root, 14, source, audio, captions, **args) == 25
+    assert run_progressive_worker(root, 15, source, audio, captions, **args) == 25
     child = root / 'parts/part-001'
-    saved = df.read_signed(child / 'prepare/delivery-schema.json', 'schema')
+    saved = df.read_signed(child / 'work/delivery-schema.json', 'schema')
     schema = saved['schema']
-    pack = child / 'translation_input/Muhtemel Ask 14.Bolum_ID_TRANSLATION_PACK.zip'
-    out = child / 'translation_output/Muhtemel Ask 14.Bolum_ID_TRANSLATED.zip'
+    pack = child / 'handoff/Muhtemel Ask 15.Bolum_ID_TRANSLATION_PACK.zip'
+    out = child / 'handoff/Muhtemel Ask 15.Bolum_ID_TRANSLATED.zip'
     records = [{**r, 'id_final': 'Halo. ' * 40, 'review_required': True, 'note': 'needs review'}
                for r in build_id_translation_records(schema)]
     create_id_translation_output_zip(schema, records, out, input_manifest=validate_id_translation_pack(pack))
-    assert run_progressive_worker(root, 14, source, audio, captions, **args) == 26
-    export, report = validate_partial_export(root, 14, 'part-001')
+    assert run_progressive_worker(root, 15, source, audio, captions, **args) == 26
+    export, report = validate_partial_export(root, 15, 'part-001')
     assert report['quality_status'] == 'NOT_STRICT'
     assert report['status'] == 'READY_WITH_WARNINGS' and report['warnings']
     assert primary_calls == [1]
-    assert not (child / 'prepare/forced_alignment_v2.json').exists()
-    assert not list(child.glob('final/*PARTIAL_FINALIZATION_REPORT*'))
+    assert not (child / 'work/forced_alignment_v2.json').exists()
+    assert not list(child.glob('output/*PARTIAL_FINALIZATION_REPORT*'))
     # Changing a subtitle and all public checksums cannot forge the export.
     srt = root / report['outputs']['id_srt']['relative_path']
     srt.write_text('1\n00:00:00,500 --> 00:00:01,000\nchanged\n\n', encoding='utf-8')
@@ -200,14 +201,14 @@ def test_handoff_to_real_authenticated_delivery_export(synthetic_parents, monkey
     export['files'] = [replacement if r['relative_path'] == replacement['relative_path'] else r for r in export['files']]
     atomic_json(child / 'work/partial-export.json', export)
     with pytest.raises(ValueError, match='authentication'):
-        validate_partial_export(root, 14, 'part-001')
+        validate_partial_export(root, 15, 'part-001')
 
 
 def test_delivery_workspace_allows_quality_warning_not_changed_identity(tmp_path, policy):
     from mas.engine.translation_workspace import prepare_id_translation_workspaces, collect_id_translation_workspaces, validate_id_workspace_output
     from mas.engine.id_translation import create_id_translation_pack
     schema, _ = df.build_schema([{'uid': 'a', 'start_ms': 0, 'end_ms': 1000,
-        'text': 'Allah yardım etsin.', 'timing_source': 'source_interval_fallback'}], 14, 2000, policy[3])
+        'text': 'Allah yardım etsin.', 'timing_source': 'source_interval_fallback'}], 15, 2000, policy[3])
     pack, out = tmp_path / 'pack.zip', tmp_path / 'out.zip'
     create_id_translation_pack(schema, pack, glossary=schema['production_policy']['glossary'])
     workspace = prepare_id_translation_workspaces(pack, tmp_path / 'workers')
@@ -227,7 +228,7 @@ def test_delivery_workspace_allows_quality_warning_not_changed_identity(tmp_path
 
 def test_delivery_rejects_translated_subtitle_credit_hallucination(tmp_path, policy):
     schema, _ = df.build_schema([{'uid': 'a', 'start_ms': 0, 'end_ms': 1000,
-        'text': 'Merhaba.', 'timing_source': 'source_interval_fallback'}], 14, 2000, policy[3])
+        'text': 'Merhaba.', 'timing_source': 'source_interval_fallback'}], 15, 2000, policy[3])
     records = [{**record, 'id_final': 'Takarir M.K.'}
                for record in build_id_translation_records(schema)]
     output = tmp_path / 'translated.zip'
@@ -242,7 +243,7 @@ def test_delivery_rejects_translated_subtitle_credit_hallucination(tmp_path, pol
 
 def test_key_rotation_rejects_delivery_checkpoint(tmp_path, monkeypatch):
     path = tmp_path / 'saved.json'
-    df.write_signed(path, {'episode': 14}, 'schema')
+    df.write_signed(path, {'episode': 15}, 'schema')
     monkeypatch.setenv('MAS_RAW_ASR_AUTH_KEY', '3' * 64)
     with pytest.raises(ValueError, match='authentication'):
         df.read_signed(path, 'schema')

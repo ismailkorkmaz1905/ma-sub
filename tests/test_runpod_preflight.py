@@ -10,8 +10,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 REQUIRED_ENV = {
-    "MAS_GMAIL_ADDRESS": "sender@example.com",
-    "MAS_GMAIL_APP_PASSWORD": "app-password-secret",
     "MAS_DRIVE_STRICT_REMOTE": "gdrive:MyDrive/Muhtemel_Ask_Subtitles",
     "RUNPOD_POD_ID": "pod-id",
     "RUNPOD_API_KEY": "runpod-key-secret",

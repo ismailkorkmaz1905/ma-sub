@@ -24,10 +24,10 @@ class SyntheticWorkflowTests(unittest.TestCase):
             root = Path(temporary)
             transcription = synthetic_transcription(10)
             segmentation = segment_transcription(
-                transcription, episode=12, prepare_dir=root / "prepare"
+                transcription, episode=12, prepare_dir=root / "work"
             )
             resumed = segment_transcription(
-                transcription, episode=12, prepare_dir=root / "prepare"
+                transcription, episode=12, prepare_dir=root / "work"
             )
             self.assertTrue(segmentation.report.valid)
             self.assertFalse(segmentation.resumed)
@@ -39,11 +39,11 @@ class SyntheticWorkflowTests(unittest.TestCase):
             records = translation_records(schema)
             records[3]["review_required"] = True
             records[3]["note"] = "Bağlama göre hitap biçimini kontrol et."
-            pack = root / "Muhtemel Ask 12.Bolum_TRANSLATION_PACK.zip"
-            translated = root / "Muhtemel Ask 12.Bolum_TRANSLATED.zip"
-            tr_path = root / "Muhtemel Ask 12.Bolum.tr-final.srt"
-            id_path = root / "Muhtemel Ask 12.Bolum.id-final.srt"
-            review_path = root / "Muhtemel Ask 12.Bolum_review.xlsx"
+            pack = root / "Muhtemel Ask 15.Bolum_TRANSLATION_PACK.zip"
+            translated = root / "Muhtemel Ask 15.Bolum_TRANSLATED.zip"
+            tr_path = root / "Muhtemel Ask 15.Bolum.tr-final.srt"
+            id_path = root / "Muhtemel Ask 15.Bolum.id-final.srt"
+            review_path = root / "Muhtemel Ask 15.Bolum_review.xlsx"
 
             manifest = create_translation_pack(schema, pack)
             self.assertEqual(validate_translation_pack(pack, expected_schema=schema), manifest)

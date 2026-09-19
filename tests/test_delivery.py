@@ -73,10 +73,10 @@ def test_delivery_paths_cannot_escape_episode(tmp_path, value):
 
 
 def test_local_delivery_rejects_changed_artifact(tmp_path):
-    path = tmp_path / "final" / "movie.mp4"
+    path = tmp_path / "output" / "movie.mp4"
     path.parent.mkdir()
     path.write_bytes(b"changed")
-    record = {"relative_path": "final/movie.mp4", "size_bytes": 7,
+    record = {"relative_path": "output/movie.mp4", "size_bytes": 7,
               "sha256": hashlib.sha256(b"original").hexdigest()}
     with pytest.raises(ValueError, match="byte/SHA"):
         delivery.verified_record(tmp_path, record)

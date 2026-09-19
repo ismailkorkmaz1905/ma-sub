@@ -29,4 +29,4 @@ printf 'Authorization: Bearer %s\n' "$RUNPOD_API_KEY" | curl --fail --silent --s
   "${base}/stop"
 
 echo "RunPod stop accepted for ${RUNPOD_POD_ID}."
-echo "Verify provider state from outside the pod using docs/ASTRA_HANDOFF.md."
+echo "Verify provider state from the external controller."

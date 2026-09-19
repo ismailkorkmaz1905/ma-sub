@@ -4,7 +4,6 @@ from pathlib import Path
 
 from .engine.episode_archive import file_record
 from .engine.part_scope import get_part, validate_file_record, validate_part_plan
-from .notify import enqueue_notification
 from .reliability import atomic_json, digest, file_digest as sha256_file, read_json
 from .state import load, save, set_stage
 
@@ -43,8 +42,8 @@ def write_partial_handoff(root, episode, part_id, kind, pack, expected_return, f
     name = f"Muhtemel Ask {episode}.Bolum"
     pack_name = name + ("_TR_CORRECTION_PACK.zip" if kind == "tr" else "_ID_TRANSLATION_PACK.zip")
     return_name = name + ("_TR_TEXT_CORRECTED.zip" if kind == "tr" else "_ID_TRANSLATED.zip")
-    if (Path(pack).resolve() != (child / "translation_input" / pack_name).resolve()
-            or Path(expected_return).resolve() != (child / "translation_output" / return_name).resolve()):
+    if (Path(pack).resolve() != (child / "handoff" / pack_name).resolve()
+            or Path(expected_return).resolve() != (child / "handoff" / return_name).resolve()):
         raise RuntimeError("partial handoff pack or return path changed")
     paths = {Path(path) for path in files}
     paths.update({root / plan_record["relative_path"], Path(pack)})
@@ -56,13 +55,10 @@ def write_partial_handoff(root, episode, part_id, kind, pack, expected_return, f
     data = {"format": "mas-partial-handoff-1", "episode": episode, "part_id": part_id, "kind": kind,
             "plan_sha256": plan_record["sha256"], "part_plan": plan_record,
             "pack": file_record(pack, root), "files": records,
-            "expected_return": (child / "translation_output" / return_name).relative_to(root).as_posix()}
+            "expected_return": (child / "handoff" / return_name).relative_to(root).as_posix()}
     _bound_json(child / "work" / f"partial-handoff-{kind}.json", data, immutable=True)
     _bound_json(child / "work" / "partial-handoff.json", data)
     _bound_json(root / "work" / "partial-handoff.json", data)
-    enqueue_notification(episode, f"{part_id} {kind.upper()} dönüşü bekleniyor [{data['pack']['sha256']}]",
-        f"Parça: {part_id}\nPaket: {data['pack']['relative_path']}\nBeklenen dönüş: {data['expected_return']}",
-        root=root, kind="action")
     return data
 
 
@@ -94,9 +90,9 @@ def validate_partial_handoff(root, episode, part_id=None):
     name = f"Muhtemel Ask {episode}.Bolum"
     pack_name = name + ("_TR_CORRECTION_PACK.zip" if kind == "tr" else "_ID_TRANSLATION_PACK.zip")
     return_name = name + ("_TR_TEXT_CORRECTED.zip" if kind == "tr" else "_ID_TRANSLATED.zip")
-    expected_pack = file_record(child / "translation_input" / pack_name, root)
+    expected_pack = file_record(child / "handoff" / pack_name, root)
     if (data.get("pack") != expected_pack or data.get("expected_return") !=
-            f"parts/{part_id}/translation_output/{return_name}"):
+            f"parts/{part_id}/handoff/{return_name}"):
         raise RuntimeError("partial handoff pack or return ownership changed")
     records = data.get("files")
     if (not isinstance(records, list) or any(not isinstance(item, dict) for item in records)
@@ -153,7 +149,7 @@ def run_progressive_worker(root, episode, source_video, audio_path, captions_pat
     child = root / "parts" / part_id
     if (root / "parts").is_symlink() or child.is_symlink():
         raise RuntimeError("partial workspace cannot follow a directory symlink")
-    dirs = {name: child / name for name in ("prepare", "translation_input", "translation_output", "review", "final", "work")}
+    dirs = {name: child / name for name in ("work", "handoff", "output")}
     for directory in dirs.values():
         if directory.is_symlink():
             raise RuntimeError("partial workspace cannot follow a directory symlink")
@@ -197,19 +193,19 @@ def run_progressive_worker(root, episode, source_video, audio_path, captions_pat
     state["part_audio_lineage_sha256"] = sha256_file(audio["lineage_path"])
     save(state_path, state)
     name = f"Muhtemel Ask {episode}.Bolum"
-    tr_pack = dirs["translation_input"] / f"{name}_TR_CORRECTION_PACK.zip"
-    tr_text = dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip"
-    tr_final = dirs["translation_output"] / f"{name}_TR_CORRECTED.zip"
-    id_pack = dirs["translation_input"] / f"{name}_ID_TRANSLATION_PACK.zip"
-    id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
-    review_path = dirs["prepare"] / "audio_review_v2.json"
-    alignment_path = dirs["prepare"] / "forced_alignment_v2.json"
-    schema_path = dirs["prepare"] / "aligned_tr_schema_v2.json"
+    tr_pack = dirs["handoff"] / f"{name}_TR_CORRECTION_PACK.zip"
+    tr_text = dirs["handoff"] / f"{name}_TR_TEXT_CORRECTED.zip"
+    tr_final = dirs["handoff"] / f"{name}_TR_CORRECTED.zip"
+    id_pack = dirs["handoff"] / f"{name}_ID_TRANSLATION_PACK.zip"
+    id_output = dirs["handoff"] / f"{name}_ID_TRANSLATED.zip"
+    review_path = dirs["work"] / "audio_review_v2.json"
+    alignment_path = dirs["work"] / "forced_alignment_v2.json"
+    schema_path = dirs["work"] / "aligned_tr_schema_v2.json"
     holder = {}
 
     def transcribe():
         raw = pipeline.transcribe_raw_audio(
-            audio["audio_path"], dirs["prepare"], episode=episode,
+            audio["audio_path"], dirs["work"], episode=episode,
             config=pipeline.RawASRConfig(model_name=series["whisper_model"], allow_cpu_fallback=False,
                 extra_audio_review_uids=pipeline._pending_extra_audio_review_uids(tr_pack, tr_text)),
             captions_path=audio["captions_path"], canonical_names=tuple(names["canonical_names"]),
@@ -230,28 +226,28 @@ def run_progressive_worker(root, episode, source_video, audio_path, captions_pat
             return {"input_sha256": manifest["input_sha256"], "resumed": True}
         manifest = pipeline.create_tr_correction_pack(
             raw["correction_utterances"], raw["speech_hole_records"], tr_pack, episode=episode,
-            batch_size=250, speech_hole_audio_root=dirs["prepare"],
-            asr_hallucination_records=raw["asr_hallucination_records"], asr_hallucination_audio_root=dirs["prepare"],
+            batch_size=250, speech_hole_audio_root=dirs["work"],
+            asr_hallucination_records=raw["asr_hallucination_records"], asr_hallucination_audio_root=dirs["work"],
             rebind_text_output_path=tr_text)
         return {"input_sha256": manifest["input_sha256"]}
 
     stage("tr_pack", make_tr_pack)
-    context_files = [audio["lineage_path"], dirs["prepare"] / "raw_asr_v2.json",
-                     dirs["prepare"] / "raw_asr_v2.done.json"]
+    context_files = [audio["lineage_path"], dirs["work"] / "raw_asr_v2.json",
+                     dirs["work"] / "raw_asr_v2.done.json"]
     if not tr_text.is_file():
         write_partial_handoff(root, episode, part_id, "tr", tr_pack, tr_text, context_files)
         set_stage(state_path, state, "tr_return", "blocked", expected=str(tr_text))
         current_stage("tr_return")
         return WAIT_PART_RETURN
     stage("tr_return", lambda: {"records": len(pipeline.validate_tr_correction_output(tr_pack, tr_text).records)})
-    overrides_path = dirs["review"] / "audio_review_overrides.json"
-    speaker_path = dirs["review"] / "speaker_evidence_v1.json"
+    overrides_path = dirs["work"] / "audio_review_overrides.json"
+    speaker_path = dirs["work"] / "speaker_evidence_v1.json"
     overrides = read_json(overrides_path) if overrides_path.is_file() else None
     speaker = read_json(speaker_path) if speaker_path.is_file() else None
 
     def review():
         holder["review"] = pipeline.resolve_tr_audio_reviews(
-            tr_pack, tr_text, tr_final, review_path, dirs["prepare"] / "audio_review_v2.recovery.json",
+            tr_pack, tr_text, tr_final, review_path, dirs["work"] / "audio_review_v2.recovery.json",
             config=pipeline.AudioReviewConfig(model_name=series["whisper_model"], device="cuda", allow_cpu_fallback=False),
             manual_overrides=overrides, **({"require_resume": True} if resume_scope is not None else {}))
         holder["correction"] = pipeline.validate_tr_correction_output(tr_pack, tr_final)
@@ -279,13 +275,13 @@ def run_progressive_worker(root, episode, source_video, audio_path, captions_pat
             speaker_evidence=speaker, production_policy=pipeline.build_production_translation_policy(series, names, religious),
             parent_vad_regions=audio["parent_vad_regions"], part_lineage=audio["lineage"])
         atomic_json(schema_path, artifacts.schema)
-        atomic_json(dirs["prepare"] / "alignment_window_audit_v2.json", list(artifacts.preparation.window_audit))
-        atomic_json(dirs["prepare"] / "final_speech_coverage_v2.json", artifacts.speech_coverage_report)
-        atomic_json(dirs["prepare"] / "pre_id_timing_qa_v2.json", artifacts.timing_qa_report)
+        atomic_json(dirs["work"] / "alignment_window_audit_v2.json", list(artifacts.preparation.window_audit))
+        atomic_json(dirs["work"] / "final_speech_coverage_v2.json", artifacts.speech_coverage_report)
+        atomic_json(dirs["work"] / "pre_id_timing_qa_v2.json", artifacts.timing_qa_report)
         holder["manifest"] = pipeline.create_id_translation_pack(
             artifacts, id_pack, batch_size=series["batch_size"],
             glossary=artifacts.schema["production_policy"]["glossary"])
-        holder["workspace"] = pipeline.prepare_id_translation_workspaces(id_pack, dirs["translation_input"] / "id-workers")
+        holder["workspace"] = pipeline.prepare_id_translation_workspaces(id_pack, dirs["handoff"] / "id-workers")
         holder["artifacts"] = artifacts
         return {"schema_sha256": artifacts.schema["schema_sha256"]}
 
@@ -293,7 +289,7 @@ def run_progressive_worker(root, episode, source_video, audio_path, captions_pat
     if not id_output.is_file():
         context_files.extend([tr_pack, tr_text, tr_final, review_path, alignment_path,
             alignment_path.with_suffix(".done.json"), schema_path,
-            dirs["prepare"] / "final_speech_coverage_v2.json", dirs["prepare"] / "pre_id_timing_qa_v2.json"])
+            dirs["work"] / "final_speech_coverage_v2.json", dirs["work"] / "pre_id_timing_qa_v2.json"])
         workspace_path = Path(holder["workspace"])
         context_files.append(workspace_path)
         context_files.extend(workspace_path.parent / f"worker-{index:02d}" / "input.json" for index in range(1, 4))

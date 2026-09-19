@@ -2,22 +2,8 @@ import json
 
 import pytest
 
-from mas import notify
 from mas.engine import burned_mp4
 from mas.reliability import file_digest as sha256_file
-
-
-def test_corrupt_outbox_records_do_not_starve_terminal_delivery(tmp_path, monkeypatch):
-    sent = []
-    monkeypatch.setattr(notify, 'send_email',
-                        lambda *args, **kwargs: sent.append(args[1]) or {'status': 'sent'})
-    notify.enqueue_notification(14, 'ready', 'verified', root=tmp_path, kind='terminal')
-    outbox = tmp_path / 'work/notification-outbox'
-    for index in range(3):
-        (outbox / f'000{index}.json').write_text('{')
-    notify.drain_outbox(tmp_path, max_messages=3)
-    assert sent == ['ready']
-    assert len(list(outbox.glob('000*.json'))) == 3
 
 
 def qualification_fixture(tmp_path, monkeypatch):

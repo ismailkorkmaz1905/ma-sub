@@ -8,7 +8,7 @@ from mas.engine.part_scope import PartScopeError, build_part_plan, project_part_
 
 def plan_case(*, samples=7200000 * 16 + 7):
     record = lambda name: {"relative_path": name, "sha256": "a" * 64, "size_bytes": 100}
-    audio = {**record("prepare/audio.flac"), "sample_rate_hz": 16000,
+    audio = {**record("work/audio.flac"), "sample_rate_hz": 16000,
              "channels": 1, "sample_count": samples}
     regions = [
         {"vad_region_index": 1, "start_ms": 1000, "end_ms": 3599000, "source": "silero_vad"},

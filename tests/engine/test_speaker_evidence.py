@@ -16,8 +16,8 @@ def _pilot(probabilities):
         "format": "mas-native-diarization-pilot-1",
         "status": "REVIEW_REQUIRED",
         "production_acceptance": False,
-        "episode": 13,
-        "clip_identity": "ep13-residual-001-0-3000",
+        "episode": 15,
+        "clip_identity": "ep15-residual-001-0-3000",
         "input_sha256": "a" * 64,
         "model_sha256": "b" * 64,
         "runtime": [{"name": "runtime.dll", "bytes": 1, "sha256": "c" * 64}],
@@ -41,7 +41,7 @@ def _fixture():
     for index in range(15, 22):
         probabilities[index] = [0.01, 0.97, 0.0, 0.0]
     evidence = build_speaker_evidence(
-        episode=13,
+        episode=15,
         audio_sha256="d" * 64,
         input_utterances=records,
         intervals=[{"start": 0, "end": 3000}],
@@ -55,7 +55,7 @@ def test_strict_pilot_frames_create_reproducible_acoustic_lanes():
 
     assignments = validate_speaker_evidence(
         evidence,
-        episode=13,
+        episode=15,
         audio_sha256="d" * 64,
         input_utterances=records,
     )
@@ -74,7 +74,7 @@ def test_assignment_cannot_be_forged_even_with_recomputed_wrapper_hash():
     with pytest.raises(SpeakerEvidenceError, match="not reproducible"):
         validate_speaker_evidence(
             forged,
-            episode=13,
+            episode=15,
             audio_sha256="d" * 64,
             input_utterances=records,
         )
@@ -86,7 +86,7 @@ def test_ambiguous_or_short_activity_does_not_create_a_speaker_id():
     for index in range(5, 9):
         probabilities[index] = [0.99, 0.01, 0.0, 0.0]
     evidence = build_speaker_evidence(
-        episode=13,
+        episode=15,
         audio_sha256="d" * 64,
         input_utterances=records,
         intervals=[{"start": 0, "end": 3000}],

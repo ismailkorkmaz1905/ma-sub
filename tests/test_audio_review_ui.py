@@ -26,10 +26,9 @@ def _wav(duration_ms):
 
 
 def _episode(tmp_path, *, pending=("hole-1", "candidate-1")):
-    root = tmp_path / "Muhtemel Ask 11.Bolum"
-    (root / "prepare").mkdir(parents=True)
-    (root / "translation_input").mkdir()
-    (root / "translation_output").mkdir()
+    root = tmp_path / "Muhtemel Ask 15.Bolum"
+    (root / "work").mkdir(parents=True)
+    (root / "handoff").mkdir()
     hole_audio = _wav(800)
     candidate_audio = _wav(1_519)
     audit = {
@@ -113,12 +112,12 @@ def _episode(tmp_path, *, pending=("hole-1", "candidate-1")):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
 
-    pack = root / "translation_input" / f"{root.name}_TR_CORRECTION_PACK.zip"
+    pack = root / "handoff" / f"{root.name}_TR_CORRECTION_PACK.zip"
     pack_manifest = create_tr_correction_pack(
         utterances,
         [hole],
         pack,
-        episode=11,
+        episode=15,
         speech_hole_audio_root=root,
         asr_hallucination_records=[candidate],
         asr_hallucination_audio_root=root,
@@ -141,7 +140,7 @@ def _episode(tmp_path, *, pending=("hole-1", "candidate-1")):
             }
         )
         records.append(output)
-    output_path = root / "translation_output" / f"{root.name}_TR_TEXT_CORRECTED.zip"
+    output_path = root / "handoff" / f"{root.name}_TR_TEXT_CORRECTED.zip"
     output_manifest = create_tr_correction_output(pack, records, output_path)
     kinds = {"hole-1": "speech_hole", "candidate-1": "asr_caption_candidate"}
     report = {
@@ -166,14 +165,14 @@ def _episode(tmp_path, *, pending=("hole-1", "candidate-1")):
         ],
     }
     report["audio_review_sha256"] = sha256_json(report)
-    (root / "prepare" / "audio_review_v2.json").write_text(
+    (root / "work" / "audio_review_v2.json").write_text(
         json.dumps(report), encoding="utf-8"
     )
     return root
 
 
 def _update_report(root, change):
-    path = root / "prepare" / "audio_review_v2.json"
+    path = root / "work" / "audio_review_v2.json"
     report = json.loads(path.read_text(encoding="utf-8"))
     report.pop("audio_review_sha256")
     change(report)
@@ -235,8 +234,7 @@ def test_store_rejects_invalid_decisions(tmp_path, uid, value, message):
 
 def test_store_fails_closed_for_unknown_stale_override(tmp_path):
     root = _episode(tmp_path)
-    (root / "review").mkdir()
-    (root / "review" / "audio_review_overrides.json").write_text(
+    (root / "work" / "audio_review_overrides.json").write_text(
         json.dumps(
             {
                 "old-uid": {
@@ -254,7 +252,7 @@ def test_store_fails_closed_for_unknown_stale_override(tmp_path):
 
 def test_store_detects_audio_hash_mismatch_before_serving(tmp_path):
     root = _episode(tmp_path, pending=("hole-1",))
-    pack = root / "translation_input" / f"{root.name}_TR_CORRECTION_PACK.zip"
+    pack = root / "handoff" / f"{root.name}_TR_CORRECTION_PACK.zip"
     with zipfile.ZipFile(pack, "r") as archive:
         members = {name: archive.read(name) for name in archive.namelist()}
     members["speech_hole_audio/hole-1.wav"] = b"x" * len(
@@ -270,7 +268,7 @@ def test_store_detects_audio_hash_mismatch_before_serving(tmp_path):
 def test_store_detects_report_change_before_save(tmp_path):
     root = _episode(tmp_path)
     store = AudioReviewStore(root)
-    report = root / "prepare" / "audio_review_v2.json"
+    report = root / "work" / "audio_review_v2.json"
     report.write_text(report.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(AudioReviewUIError, match="report changed"):
         store.save(
@@ -338,8 +336,8 @@ def test_cli_registers_review_audio(monkeypatch):
 
     called = []
     monkeypatch.setattr(cli, "run_audio_review_ui", lambda episode: called.append(episode) or 0)
-    assert cli.main(["review-audio", "11"]) == 0
-    assert called == [11]
+    assert cli.main(["review-audio", "15"]) == 0
+    assert called == [15]
 
 
 def test_local_http_ui_serves_audio_and_saves(tmp_path):

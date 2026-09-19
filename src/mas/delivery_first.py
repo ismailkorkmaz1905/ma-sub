@@ -13,14 +13,14 @@ from .reliability import atomic_json, digest, file_digest as sha256_file, read_j
 
 MODE = 'delivery-first-v1'
 EXPORT_MODE = 'delivery-first-subtitles'
-POLICY = {'mode': MODE, 'first_episode': 14, 'group_seconds': 20,
+POLICY = {'mode': MODE, 'group_seconds': 20,
            'alignment_seconds': 600, 'delivery_reserve_seconds': 1800,
           'maximum_source_cue_ms': 10000, 'maximum_word_gap_ms': 3500,
           'minimum_display_ms': 400}
 
 
 def enabled(episode):
-    return episode >= POLICY['first_episode']
+    return type(episode) is int and episode > 0
 
 
 def _key():
@@ -317,7 +317,7 @@ def create_export(root, episode, part, derived, schema, transcript_path, schema_
         preferred_max_cps=policy['timing_qa']['maximum_cps'], line_limit=42)
     warnings += [{'reason': issue.get('code', 'subtitle_quality'), 'detail': issue,
                   'action': 'delivered_with_warning'} for issue in qa.get('issues', [])]
-    output_paths = {language: child / 'final' / ('DELIVERY-' + language + '.srt') for language in ('tr', 'id')}
+    output_paths = {language: child / 'output' / ('DELIVERY-' + language + '.srt') for language in ('tr', 'id')}
     for language, entries in (('tr', tr), ('id', ind)):
         write_srt(output_paths[language], entries)
         if not entries:
@@ -337,7 +337,7 @@ def create_export(root, episode, part, derived, schema, transcript_path, schema_
               'outputs': {k + '_srt': file_record(p, root) for k, p in output_paths.items()}}
     report['quality_summary'] = quality_summary(report)
     print('[QUALITY] ' + part['part_id'] + ': ' + json.dumps(report['quality_summary']), flush=True)
-    report_path = child / 'final/DELIVERY-QUALITY-REPORT.json'
+    report_path = child / 'output/DELIVERY-QUALITY-REPORT.json'
     atomic_json(report_path, report)
     files = list(report['input_files'].values()) + list(report['outputs'].values()) + [file_record(report_path, root)]
     export = {'mode': EXPORT_MODE, 'episode': episode, 'part_id': part['part_id'],
@@ -381,7 +381,7 @@ def validate_export(root, episode, part_id, export, *, total_timeout):
     deadline = time.monotonic() + remaining()
     for record in files:
         _verify_file(root, record, deadline, verified=verified)
-    expected_report = f'parts/{part_id}/final/DELIVERY-QUALITY-REPORT.json'
+    expected_report = f'parts/{part_id}/output/DELIVERY-QUALITY-REPORT.json'
     if export['report'] not in files or export['report']['relative_path'] != expected_report:
         raise ValueError('Delivery report escaped evidence inventory')
     report = read_json(verified_record(root, export['report']))
@@ -432,7 +432,7 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
         return NEXT_PART
     part_id = part['part_id']
     child = safe_relative(root, 'parts/' + part_id)
-    for name in ('prepare', 'work', 'final', 'translation_input', 'translation_output'):
+    for name in ('work', 'handoff', 'output'):
         safe_relative(root, f'parts/{part_id}/{name}').mkdir(parents=True, exist_ok=True)
     if (child / 'work/partial-export.json').exists():
         export, _ = validate_partial_export(root, episode, part_id, total_timeout=max(.001, remaining()))
@@ -444,8 +444,8 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
                'plan_sha256': sha256_file(root / 'work/part-plan.json'), 'producer': producer(),
                'duration_ms': (part['end_sample'] - part['start_sample']) // 16,
                'primary_producer': model_binding(series)}
-    transcript_path = child / 'prepare/delivery-primary.json'
-    schema_path = child / 'prepare/delivery-schema.json'
+    transcript_path = child / 'work/delivery-primary.json'
+    schema_path = child / 'work/delivery-schema.json'
     if schema_path.exists():
         saved = read_signed(schema_path, 'schema')
         if saved['binding'] != binding:
@@ -457,7 +457,7 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
             if transcript['binding'] != binding:
                 raise ValueError('Delivery primary identity changed')
         else:
-            raw = primary_transcript(derived['audio_path'], child / 'prepare', episode, series, names, religious)
+            raw = primary_transcript(derived['audio_path'], child / 'work', episode, series, names, religious)
             if any(raw.get('identity', {}).get(k) != v for k, v in binding['primary_producer'].items()):
                 raise ValueError('Primary producer changed during delivery transcription')
             transcript = {'binding': binding, 'primary': raw}
@@ -483,8 +483,8 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
                          'action': 'delivered_with_warning'})
         write_signed(schema_path, {'binding': binding, 'schema': schema, 'warnings': warnings}, 'schema')
     name = f'Muhtemel Ask {episode}.Bolum'
-    id_pack = child / 'translation_input' / (name + '_ID_TRANSLATION_PACK.zip')
-    id_output = child / 'translation_output' / (name + '_ID_TRANSLATED.zip')
+    id_pack = child / 'handoff' / (name + '_ID_TRANSLATION_PACK.zip')
+    id_output = child / 'handoff' / (name + '_ID_TRANSLATED.zip')
     if id_pack.exists():
         validate_id_translation_pack(id_pack, expected_schema=schema)
     else:
@@ -499,7 +499,7 @@ def run_worker(root, episode, source_video, audio_path, captions_path=None, *, t
                       id_pack, id_output, warnings, remaining=remaining)
         validate_partial_export(root, episode, part_id, total_timeout=max(.001, remaining()))
         return READY_FOR_PARTIAL_ENCODE
-    workspace = prepare_id_translation_workspaces(id_pack, child / 'translation_input/id-workers')
+    workspace = prepare_id_translation_workspaces(id_pack, child / 'handoff/id-workers')
     if not id_output.exists():
         context = [derived['lineage_path'], transcript_path, schema_path, Path(workspace)]
         context += [Path(workspace).parent / f'worker-{i:02d}/input.json' for i in range(1, 4)]

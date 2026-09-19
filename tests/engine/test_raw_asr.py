@@ -1295,7 +1295,7 @@ class RawASRV2RuntimeTests(unittest.TestCase):
         root = Path(directory)
         audio = root / "audio.flac"
         audio.write_bytes(b"synthetic-audio-for-runtime-tests")
-        return audio, root / "prepare"
+        return audio, root / "work"
 
     @staticmethod
     def _vad() -> tuple[list[dict[str, object]], None]:

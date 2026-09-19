@@ -66,18 +66,18 @@ def retry_diagnostic_layout(episode, part_id=None):
         raise RetryAuthorizationError("retry part identity is invalid")
     prefix = f"parts/{part_id}/" if part_id is not None else ""
     name = f"Muhtemel Ask {episode}.Bolum"
-    files = ["source/download.done.json", "prepare/audio.done.json",
-             prefix + "prepare/raw_asr_v2.done.json",
-             prefix + "prepare/raw_asr_v2.json",
-             prefix + "prepare/audio_review_v2.json",
-             prefix + f"translation_input/{name}_TR_CORRECTION_PACK.zip",
-             prefix + f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
-             prefix + f"translation_output/{name}_TR_CORRECTED.zip"]
+    files = ["source/download.done.json", "work/audio.done.json",
+             prefix + "work/raw_asr_v2.done.json",
+             prefix + "work/raw_asr_v2.json",
+             prefix + "work/audio_review_v2.json",
+             prefix + f"handoff/{name}_TR_CORRECTION_PACK.zip",
+             prefix + f"handoff/{name}_TR_TEXT_CORRECTED.zip",
+             prefix + f"handoff/{name}_TR_CORRECTED.zip"]
     if part_id is not None:
         files.extend(["work/part-plan.json", "work/part-vad.json", "work/current-part.json",
-                      prefix + "work/state.json", prefix + "prepare/audio-part.done.json",
-                      prefix + "review/audio_review_overrides.json", prefix + "review/speaker_evidence_v1.json"])
-    return {"files": tuple(files), "prefixes": (prefix + "prepare/forced_alignment_units/",)}
+                      prefix + "work/state.json", prefix + "work/audio-part.done.json",
+                      prefix + "work/audio_review_overrides.json", prefix + "work/speaker_evidence_v1.json"])
+    return {"files": tuple(files), "prefixes": (prefix + "work/forced_alignment_units/",)}
 
 
 def retry_predecessor_paths(episode, scope, local_root=None):
@@ -86,7 +86,7 @@ def retry_predecessor_paths(episode, scope, local_root=None):
     files = retry_diagnostic_layout(episode, part_id)["files"]
     if part_id is None:
         return files
-    optional = {f"parts/{part_id}/review/{name}" for name in ("audio_review_overrides.json", "speaker_evidence_v1.json")}
+    optional = {f"parts/{part_id}/work/{name}" for name in ("audio_review_overrides.json", "speaker_evidence_v1.json")}
     return tuple(path for path in files if path not in {"work/current-part.json", f"parts/{part_id}/work/state.json"}
                  and (path not in optional or local_root is not None and safe_relative(local_root, path).is_file()))
 
@@ -105,7 +105,7 @@ def validate_part_retry_context(local_root, episode, scope):
     root = Path(local_root)
     part_id = scope["part_id"]
     plan = load_part_plan(root, episode, verify_files=False)
-    lineage_path = safe_relative(root, f"parts/{part_id}/prepare/audio-part.done.json")
+    lineage_path = safe_relative(root, f"parts/{part_id}/work/audio-part.done.json")
     lineage = validate_part_lineage(plan, part_id, _read_bound(lineage_path))
     if (sha256_file(root / "work/part-plan.json") != scope["part_plan_sha256"]
             or sha256_file(lineage_path) != scope["part_audio_lineage_sha256"]
@@ -113,9 +113,9 @@ def validate_part_retry_context(local_root, episode, scope):
             or lineage["audio"]["sha256"] != scope["audio_sha256"]):
         raise RetryAuthorizationError("retry part plan or child audio lineage changed")
     child = root / "parts" / part_id
-    raw_path = child / "prepare/raw_asr_v2.json"
+    raw_path = child / "work/raw_asr_v2.json"
     raw = _validate_raw_vad_inventory(json.loads(raw_path.read_text(encoding="utf-8")), episode=episode)
-    marker = json.loads((child / "prepare/raw_asr_v2.done.json").read_text(encoding="utf-8"))
+    marker = json.loads((child / "work/raw_asr_v2.done.json").read_text(encoding="utf-8"))
     output = marker.get("outputs", {}).get("raw_asr_v2", {})
     if (raw["audio_sha256"] != scope["audio_sha256"]
             or raw["model"]["settings"].get("allow_cpu_fallback") is not False
@@ -124,17 +124,17 @@ def validate_part_retry_context(local_root, episode, scope):
             or marker.get("details", {}).get("audio_sha256") != scope["audio_sha256"]):
         raise RetryAuthorizationError("retry raw-ASR predecessor is not the exact child checkpoint")
     name = f"Muhtemel Ask {episode}.Bolum"
-    pack_path = child / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
-    text_path = child / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
-    final_path = child / "translation_output" / f"{name}_TR_CORRECTED.zip"
+    pack_path = child / "handoff" / f"{name}_TR_CORRECTION_PACK.zip"
+    text_path = child / "handoff" / f"{name}_TR_TEXT_CORRECTED.zip"
+    final_path = child / "handoff" / f"{name}_TR_CORRECTED.zip"
     pack = read_tr_correction_pack(pack_path)
     if (pack.manifest["episode"] != episode or list(pack.utterances) != raw["correction_utterances"]
             or list(pack.speech_holes) != raw["speech_hole_records"]
             or list(pack.asr_hallucination_records) != raw["asr_hallucination_records"]):
         raise RetryAuthorizationError("retry Turkish pack is not bound to frozen child raw ASR")
-    validate_audio_review_v2_report(pack_path, text_path, final_path, child / "prepare/audio_review_v2.json")
+    validate_audio_review_v2_report(pack_path, text_path, final_path, child / "work/audio_review_v2.json")
     final = validate_tr_correction_output(pack_path, final_path)
-    speaker_path = child / "review/speaker_evidence_v1.json"
+    speaker_path = child / "work/speaker_evidence_v1.json"
     speaker = json.loads(speaker_path.read_text(encoding="utf-8")) if speaker_path.is_file() else None
     bundle = correction_records_to_alignment_inputs(pack.utterances, final.records,
         speech_hole_records=pack.speech_holes, asr_hallucination_records=pack.asr_hallucination_records,
@@ -307,7 +307,7 @@ def authorize_code_fix_retry(local_root, episode, commit, *, fixture_nodeids, di
               "fixture_files": fixture_files,
               "fixture_nodeids": fixture_nodeids, "fixture_result": _record(local_root, junit_relative),
               "fixture_passed_count": len(cases)}
-    target = local_root / "review/code-fix-resume.json"
+    target = local_root / "work/code-fix-resume.json"
     atomic_json(target, {"data": permit, "sha256": digest(permit)})
     validate_code_fix_resume(local_root, episode, commit, target)
     return target
@@ -315,7 +315,7 @@ def authorize_code_fix_retry(local_root, episode, commit, *, fixture_nodeids, di
 
 def validate_code_fix_resume(local_root, episode, commit, permit_path=None):
     local_root = Path(local_root)
-    permit = _read_bound(permit_path or local_root / "review/code-fix-resume.json")
+    permit = _read_bound(permit_path or local_root / "work/code-fix-resume.json")
     started_at, _ = _budget(local_root, episode)
     failure = _read_bound(local_root / "work/remote-failure-invariant.json")
     if (permit.get("format") != "mas-code-fix-resume-1" or permit.get("episode") != episode
@@ -385,6 +385,6 @@ def propose_alignment_recovery(local_root, episode, *, max_new_ctc_calls, part_i
             'start_ms': min(item['start_ms'] for item in selected),
             'end_ms': max(item['end_ms'] for item in selected),
             'identity_sha256': digest(identity), 'failure_sha256': digest(failure)}
-    target = root / 'review/alignment-recovery-plan.json'
+    target = root / 'work/alignment-recovery-plan.json'
     atomic_json(target, {'data': body, 'sha256': digest(body)})
     return target

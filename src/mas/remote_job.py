@@ -337,7 +337,7 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
         raise RemoteJobError("snapshot deadline must be within (0, 60] seconds")
     identity = _identity(episode, commit, input_sha256)
     paths = _paths(root, episode, identity["token"])
-    prepare = paths["episode"] / "prepare"
+    prepare = paths["episode"] / "work"
     episode_root = paths["episode"]
     candidates = list((prepare / "primary_asr").glob("*.json"))
     candidates += [prepare / name for name in (
@@ -345,13 +345,9 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
     candidates += [episode_root / "source" / "source.url",
                    episode_root / "source" / "download.done.json",
                    prepare / "audio.done.json", prepare / "audio_review_v2.json",
-                   episode_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_ID_TRANSLATED.zip.workspace.json",
+                   episode_root / "handoff" / f"Muhtemel Ask {episode}.Bolum_ID_TRANSLATED.zip.workspace.json",
                    episode_root / "work" / "state.json"]
     candidates += list((episode_root / "work" / "encoder-qualification").glob("*/technical-qualification.json"))
-    outbox = sorted((episode_root / "work/notification-outbox").glob("*.json"))
-    if len(outbox) > 256:
-        raise RemoteJobError("notification snapshot count exceeds the bounded manifest")
-    candidates += outbox
     part_id = None
     current_path = episode_root / 'work/current-part.json'
     if current_path.is_file():
@@ -365,21 +361,21 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
         part_id = data['part_id']
         child = episode_root / 'parts' / part_id
         candidates += [current_path, episode_root / 'work/part-plan.json', episode_root / 'work/part-vad.json',
-                       child / 'work/state.json', child / 'prepare/audio-part.done.json',
-                       child / 'prepare/raw_asr_v2.recovery.json', child / 'prepare/raw_asr_v2.json',
-                       child / 'prepare/raw_asr_v2.done.json', child / 'prepare/audio_review_v2.json']
-        candidates += list((child / 'prepare/primary_asr').glob('*.json'))
+                       child / 'work/state.json', child / 'work/audio-part.done.json',
+                       child / 'work/raw_asr_v2.recovery.json', child / 'work/raw_asr_v2.json',
+                       child / 'work/raw_asr_v2.done.json', child / 'work/audio_review_v2.json']
+        candidates += list((child / 'work/primary_asr').glob('*.json'))
     if diagnostics:
         name = f"Muhtemel Ask {episode}.Bolum"
         candidates = [episode_root / relative for relative in (
-            f"translation_input/{name}_TR_CORRECTION_PACK.zip",
-            "prepare/audio_review_v2.json", "prepare/audio_review_v2.recovery.json",
-            "prepare/forced_alignment_units/resume-identity.json",
-            "prepare/forced_alignment_units/components/latest-conflict-failure.json",
-            "prepare/forced_alignment_units/components/latest-resume-scope-violation.json",
-            "source/download.done.json", "prepare/audio.done.json", "prepare/raw_asr_v2.done.json",
-            f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
-            f"translation_output/{name}_TR_CORRECTED.zip",
+            f"handoff/{name}_TR_CORRECTION_PACK.zip",
+            "work/audio_review_v2.json", "work/audio_review_v2.recovery.json",
+            "work/forced_alignment_units/resume-identity.json",
+            "work/forced_alignment_units/components/latest-conflict-failure.json",
+            "work/forced_alignment_units/components/latest-resume-scope-violation.json",
+            "source/download.done.json", "work/audio.done.json", "work/raw_asr_v2.done.json",
+            f"handoff/{name}_TR_TEXT_CORRECTED.zip",
+            f"handoff/{name}_TR_CORRECTED.zip",
         )]
         if part_id is not None:
             from .retry_authorization import retry_diagnostic_layout
@@ -388,7 +384,7 @@ def checkpoint_manifest(root, episode, commit, input_sha256=None, deadline_secon
             candidates += [episode_root / prefix / relative for prefix in layout['prefixes'] for relative in (
                 'resume-identity.json', 'components/latest-conflict-failure.json',
                 'components/latest-resume-scope-violation.json')]
-            candidates.append(episode_root / f'parts/{part_id}/prepare/audio_review_v2.recovery.json')
+            candidates.append(episode_root / f'parts/{part_id}/work/audio_review_v2.recovery.json')
     missing = [path.relative_to(episode_root).as_posix() for path in candidates if not path.is_file()]
     files = []
     unstable = []

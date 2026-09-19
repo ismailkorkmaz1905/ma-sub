@@ -10,7 +10,7 @@ from mas.reliability import atomic_json
 
 def encoded_fixture(partial_fixture, monkeypatch):
     root, child, _, _, _, _ = partial_fixture
-    partial_finalize.finalize_partial_episode(root, 12, 'part-001')
+    partial_finalize.finalize_partial_episode(root, 15, 'part-001')
     calls = []
     def release(*args, **kwargs):
         assert 0 < kwargs['total_timeout'] <= 120
@@ -35,8 +35,8 @@ def encoded_fixture(partial_fixture, monkeypatch):
 
 def test_partial_qsv_encode_has_range_lineage_proportional_target_and_no_whole_authority(partial_fixture, monkeypatch):
     root, child, calls = encoded_fixture(partial_fixture, monkeypatch)
-    result = partial_encode.burn_partial_indonesian_mp4(root, 12, 'part-001', total_timeout=120)
-    receipt, output = partial_encode.validate_partial_encoding(root, 12, 'part-001')
+    result = partial_encode.burn_partial_indonesian_mp4(root, 15, 'part-001', total_timeout=120)
+    receipt, output = partial_encode.validate_partial_encoding(root, 15, 'part-001')
     assert result['output']['relative_path'] == output.relative_to(root).as_posix()
     assert receipt['mode'] == 'strict-partial' and receipt['full_episode_complete'] is False
     assert receipt['source_range_seconds'] == [0, 7]
@@ -47,25 +47,25 @@ def test_partial_qsv_encode_has_range_lineage_proportional_target_and_no_whole_a
     assert command[command.index('-c:v') + 1] == 'h264_qsv'
     assert command[command.index('-global_quality') + 1] == '18'
     assert not output.with_suffix('.burn.json').exists()
-    assert not (root / 'final/burned_mp4_delivery.json').exists()
+    assert not (root / 'output/burned_mp4_delivery.json').exists()
     count = len(calls)
-    assert partial_encode.burn_partial_indonesian_mp4(root, 12, 'part-001', total_timeout=120) == result
+    assert partial_encode.burn_partial_indonesian_mp4(root, 15, 'part-001', total_timeout=120) == result
     assert len(calls) == count + 1
 
 
 def test_partial_encoder_requires_release_before_probe_or_encode(partial_fixture, monkeypatch):
     root, child, _, _, _, _ = partial_fixture
-    partial_finalize.finalize_partial_episode(root, 12, 'part-001')
+    partial_finalize.finalize_partial_episode(root, 15, 'part-001')
     monkeypatch.setattr(partial_encode.burn, 'plan_encoding_settings', lambda *a, **k: pytest.fail('probe before release'))
     with pytest.raises(FileNotFoundError):
-        partial_encode.burn_partial_indonesian_mp4(root, 12, 'part-001', total_timeout=120)
+        partial_encode.burn_partial_indonesian_mp4(root, 15, 'part-001', total_timeout=120)
 
 
 @pytest.mark.parametrize('change', ['mode', 'range', 'output', 'sample', 'subtitle'])
 def test_partial_encoding_validation_rejects_changed_authority_or_bytes(partial_fixture, monkeypatch, change):
     root, child, _ = encoded_fixture(partial_fixture, monkeypatch)
-    result = partial_encode.burn_partial_indonesian_mp4(root, 12, 'part-001', total_timeout=120)
-    path = child / 'final/partial-encoding.json'
+    result = partial_encode.burn_partial_indonesian_mp4(root, 15, 'part-001', total_timeout=120)
+    path = child / 'output/partial-encoding.json'
     receipt = json.loads(path.read_text(encoding='utf-8'))
     if change == 'mode':
         receipt['mode'] = 'strict'
@@ -79,16 +79,16 @@ def test_partial_encoding_validation_rejects_changed_authority_or_bytes(partial_
         folder = (root / receipt['qualification']['relative_path']).parent
         (folder / 'sample-1.mp4').write_bytes(b'changed')
     else:
-        (child / 'final/Muhtemel Ask 12.Bolum_part-001-id.srt').write_bytes(b'changed')
+        (child / 'output/Muhtemel Ask 15.Bolum_part-001-id.srt').write_bytes(b'changed')
     with pytest.raises(ValueError):
-        partial_encode.validate_partial_encoding(root, 12, 'part-001')
+        partial_encode.validate_partial_encoding(root, 15, 'part-001')
 
 
 def test_partial_expired_budget_never_starts_source_validation(partial_fixture, monkeypatch):
     root, _, _, _, _, _ = partial_fixture
     monkeypatch.setattr(partial_encode, 'validate_partial_export', lambda *a, **k: pytest.fail('late validation'))
     with pytest.raises(ValueError):
-        partial_encode.burn_partial_indonesian_mp4(root, 12, 'part-001', total_timeout=0)
+        partial_encode.burn_partial_indonesian_mp4(root, 15, 'part-001', total_timeout=0)
 
 
 def test_range_encoder_uses_exact_sample_offset_not_rounded_milliseconds(partial_fixture, monkeypatch):
@@ -100,7 +100,7 @@ def test_range_encoder_uses_exact_sample_offset_not_rounded_milliseconds(partial
                            'start_ms': 30000, 'end_ms': 37001}
         return export, report
     monkeypatch.setattr(partial_encode, 'validate_partial_export', nonzero_scope)
-    partial_encode.burn_partial_indonesian_mp4(root, 12, 'part-001', total_timeout=120)
+    partial_encode.burn_partial_indonesian_mp4(root, 15, 'part-001', total_timeout=120)
     command = calls[-1]
     assert command[command.index('-ss') + 1] == '30.000062500'
     assert command[command.index('-t') + 1] == '7.000000000'
@@ -123,11 +123,11 @@ def test_verified_partial_output_recovers_publication_interruption_without_reenc
             raise KeyboardInterrupt()
         monkeypatch.setattr(partial_encode.burn, '_stage_output', crash_move)
     with pytest.raises(KeyboardInterrupt):
-        partial_encode.burn_partial_indonesian_mp4(root, 12, 'part-001', total_timeout=120)
+        partial_encode.burn_partial_indonesian_mp4(root, 15, 'part-001', total_timeout=120)
     count = sum(isinstance(item, list) for item in calls)
     monkeypatch.setattr(partial_encode, 'atomic_json', write)
     monkeypatch.setattr(partial_encode.burn, '_stage_output', stage)
-    result = partial_encode.burn_partial_indonesian_mp4(root, 12, 'part-001', total_timeout=120)
-    assert partial_encode.validate_partial_encoding(root, 12, 'part-001')[1].is_file()
+    result = partial_encode.burn_partial_indonesian_mp4(root, 15, 'part-001', total_timeout=120)
+    assert partial_encode.validate_partial_encoding(root, 15, 'part-001')[1].is_file()
     assert sum(isinstance(item, list) for item in calls) == count
     assert (root / result['receipt']['relative_path']).exists()

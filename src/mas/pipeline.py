@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 import yaml
 
 from .config import ROOT, episode_dir
-from .notify import enqueue_notification as notify
 from .progress import mark_work_progress
 from .reliability import digest as sha256_json, file_digest as sha256_file
 from .remote import upload_verified
@@ -86,34 +85,6 @@ WAIT_TR = 20
 WAIT_ID = 21
 STRICT_DRIVE_OUTPUTS = ("mp4",)
 STAGE_HEARTBEAT_SECONDS = 300
-STAGE_NOTIFICATION_NAMES = {
-    "download": "kaynak dosyası kontrolü",
-    "audio": "ses dosyası hazırlığı",
-    "raw_asr": "Türkçe konuşma tanıma ve kanıt hazırlığı",
-    "tr_pack": "Türkçe düzeltme paketi hazırlığı",
-    "tr_return": "Türkçe düzeltme dönüşü doğrulaması",
-    "audio_review": "Türkçe ses incelemesi",
-    "forced_alignment": "altyazı zaman hizalaması",
-    "id_pack": "Endonezce çeviri paketi hazırlığı",
-    "id_return": "Endonezce çeviri dönüşü doğrulaması",
-    "strict_finalize": "strict altyazı ve softsub video üretimi",
-    "burn_mp4": "Endonezce altyazılı final video üretimi",
-    "drive_readback": "Google Drive yükleme ve hash doğrulaması",
-}
-STAGE_START_DETAILS = {
-    "download": "Kaynak kimliği ile byte ve SHA-256 bütünlüğü kontrol edilecek; gerekirse indirme başlatılacak.",
-    "audio": "Değişmez kaynak videodan üretim ses dosyası hazırlanacak.",
-    "raw_asr": "GPU üzerinde Türkçe ASR ve inceleme kanıtları hazırlanacak; CPU fallback kullanılmayacak.",
-    "tr_pack": "Türkçe düzeltme için hash bağlı handoff paketi hazırlanacak.",
-    "tr_return": "Dönen Türkçe düzeltme paketinin şeması, kimliği ve değişmez alanları doğrulanacak.",
-    "audio_review": "Bekleyen Türkçe kayıtlar ses kanıtıyla incelenecek.",
-    "forced_alignment": "Düzeltilmiş Türkçe metin CUDA üzerinde akustik olarak hizalanacak.",
-    "id_pack": "Endonezce çeviri için değişmez Türkçe metne bağlı paket hazırlanacak.",
-    "id_return": "Dönen Endonezce çevirinin kimliği, sırası ve değişmez alanları doğrulanacak.",
-    "strict_finalize": "Strict altyazılar üretilecek ve tüm zamanlama ve kalite kuralları yeniden doğrulanacak.",
-    "burn_mp4": "Doğrulanmış Endonezce altyazı değişmez kaynağa gömülecek ve encoding makbuzu doğrulanacak.",
-    "drive_readback": "Final dosyaları geçici adla yüklenecek; byte ve SHA-256 readback doğrulanacak.",
-}
 def _requires_external_delivery():
     return (
         os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1"
@@ -124,9 +95,7 @@ def _requires_external_delivery():
 def _paths(episode, *, create=False):
     root = episode_dir(episode)
     name = f"Muhtemel Ask {episode}.Bolum"
-    dirs = {key: root / key for key in ("source", "prepare", "translation_input",
-                                        "translation_output", "review", "final",
-                                        "emergency", "work")}
+    dirs = {key: root / key for key in ("source", "work", "handoff", "output")}
     if create:
         dirs["source"].mkdir(parents=True, exist_ok=True)
         dirs["work"].mkdir(parents=True, exist_ok=True)
@@ -139,7 +108,7 @@ def _json(path):
 
 
 def _apply_audio_review_reset(root, episode, name, tr_pack, tr_text):
-    marker_path = Path(root) / "review" / "audio_review_reset.json"
+    marker_path = Path(root) / "work" / "audio_review_reset.json"
     if not marker_path.is_file():
         return None
     saved = _json(marker_path)
@@ -162,9 +131,9 @@ def _apply_audio_review_reset(root, episode, name, tr_pack, tr_text):
     ):
         raise RuntimeError("audio-review reset marker input binding mismatch")
     expected_paths = {
-        "prepare/audio_review_v2.json",
-        "prepare/audio_review_v2.recovery.json",
-        f"translation_output/{name}_TR_CORRECTED.zip",
+        "work/audio_review_v2.json",
+        "work/audio_review_v2.recovery.json",
+        f"handoff/{name}_TR_CORRECTED.zip",
     }
     artifacts = body.get("artifacts")
     if (
@@ -173,7 +142,7 @@ def _apply_audio_review_reset(root, episode, name, tr_pack, tr_text):
         != expected_paths
     ):
         raise RuntimeError("audio-review reset artifact inventory mismatch")
-    archive = Path(root) / "review" / "superseded-audio-review" / marker_sha256
+    archive = Path(root) / "work" / "superseded-audio-review" / marker_sha256
     receipt_path = archive / "receipt.json"
     if receipt_path.is_file():
         receipt = _json(receipt_path)
@@ -251,11 +220,6 @@ def _guard_existing_source(state, source_dir):
 
 def _stage(path, state, name, action):
     started = time.monotonic()
-    notification_name = STAGE_NOTIFICATION_NAMES.get(name, name)
-    notification_root = path.parent.parent if path.parent.name == 'work' else path.parent
-    if notification_root.parent.name == 'parts':
-        notification_name = notification_root.name + ': ' + notification_name
-        notification_root = notification_root.parent.parent
     set_stage(path, state, name, "running")
     mark_work_progress(name)
     print(f"[STAGE] {name}: START", flush=True)
@@ -283,19 +247,6 @@ def _stage(path, state, name, action):
             elapsed_seconds=round(elapsed, 3),
         )
         print(f"[STAGE] {name}: FAIL elapsed={elapsed:.1f}s", flush=True)
-        notify(
-            state["episode"],
-            f"{notification_name} başarısız",
-            f"Sonuç: aşama tamamlanamadı.\n"
-            f"Hata: {type(exc).__name__}: {exc}\n"
-            f"Sonraki adım: hatayı giderip aynı bölüm komutuyla güvenli devam edin.",
-            root=notification_root,
-            kind="terminal",
-        )
-        try:
-            exc._mas_notification_sent = True
-        except (AttributeError, TypeError):
-            pass
         raise
     heartbeat_stop.set()
     heartbeat_thread.join()
@@ -316,9 +267,6 @@ def _stage(path, state, name, action):
     print(f"[STAGE] {name}: PASS elapsed={elapsed:.1f}s", flush=True)
     if "resumed" in details:
         print(f"[CHECKPOINT] {name}: resumed={str(bool(details['resumed'])).lower()}", flush=True)
-    if name in {'audio', 'raw_asr', 'forced_alignment', 'strict_finalize', 'strict_partial_finalize'} and not details.get('resumed'):
-        notify(state['episode'], f'{notification_name} tamamlandı',
-               json.dumps(details, ensure_ascii=False, sort_keys=True), root=notification_root, kind='milestone')
     return details
 
 
@@ -459,7 +407,7 @@ def _load_strict_finalize_checkpoint(marker_path, report_path, expected_outputs,
         stage="strict_finalize_v2",
         input_sha256=input_sha256,
         required_output_keys=tuple(expected_outputs),
-        allowed_root=Path(episode_root) / "final",
+        allowed_root=Path(episode_root) / "output",
     )
     if marker is None:
         raise RuntimeError("strict finalization checkpoint binding changed; preserve it")
@@ -621,7 +569,7 @@ def _validate_id_quality(artifacts, validation, series, names, religious):
     return qa_report
 
 
-def _resolve_run_contract(state, *, episode, new_state, priority):
+def _resolve_run_contract(state, *, episode, priority):
     delivery_scope = {
         "whole-episode-v1": "whole-episode",
         "first-hour-v1": "first-hour",
@@ -633,17 +581,6 @@ def _resolve_run_contract(state, *, episode, new_state, priority):
         raise RuntimeError("unsupported alignment policy")
     existing = state.get("run_contract")
     if existing is None:
-        if not new_state:
-            if episode >= 15:
-                raise RuntimeError(
-                    "existing EP15+ state lacks an explicit run contract; preserve it and choose a migration explicitly"
-                )
-            return {
-                "format": "mas-run-contract-legacy-1",
-                "episode": episode,
-                "delivery_scope": delivery_scope,
-                "alignment_policy": "strict-ctc-v1",
-            }
         existing = semantic_run_contract(episode, delivery_scope)
         if requested_policy:
             existing["alignment_policy"] = requested_policy
@@ -690,7 +627,7 @@ def _run_semantic_flow(
     semantic_root.mkdir(parents=True, exist_ok=True)
     settings = SemanticAlignmentConfig()
     producer = semantic_producer_identity()
-    raw_path = dirs["prepare"] / "raw_asr_v2.json"
+    raw_path = dirs["work"] / "raw_asr_v2.json"
     source_sha = _source_guard(state, source_video)
     config_sha = sha256_json(asdict(settings))
 
@@ -754,7 +691,7 @@ def _run_semantic_flow(
     unresolved_path = semantic_root / "unresolved_windows.jsonl"
     prepare_report_path = semantic_root / "semantic_prepare.json"
     prepare_marker = semantic_root / "semantic_prepare.done.json"
-    pack_path = dirs["translation_input"] / f"{name}_SEMANTIC_ALIGNMENT_PACK.zip"
+    pack_path = dirs["handoff"] / f"{name}_SEMANTIC_ALIGNMENT_PACK.zip"
     prepare_input_sha = sha256_json(
         {
             "timeline_sha256": timeline["manifest"]["timeline_sha256"],
@@ -843,7 +780,7 @@ def _run_semantic_flow(
     windows = holder["semantic_windows"]
     auto = holder["semantic_auto"]
     unresolved = holder["semantic_unresolved"]
-    return_path = dirs["translation_output"] / f"{name}_SEMANTIC_ALIGNMENT_RETURN.zip"
+    return_path = dirs["handoff"] / f"{name}_SEMANTIC_ALIGNMENT_RETURN.zip"
     if unresolved and not return_path.is_file():
         set_stage(
             state_path,
@@ -932,10 +869,10 @@ def _run_semantic_flow(
 
     final_blocks_path = semantic_root / "final_blocks.jsonl"
     semantic_qa_path = semantic_root / "semantic_release_qa.json"
-    schema_path = dirs["prepare"] / "aligned_tr_schema_semantic_v1.json"
+    schema_path = dirs["work"] / "aligned_tr_schema_semantic_v1.json"
     finalize_marker = semantic_root / "semantic_finalize.done.json"
     production_policy = build_production_translation_policy(series, names, religious)
-    approval_path = dirs["review"] / "semantic_coarse_fallback_approvals.json"
+    approval_path = dirs["work"] / "semantic_coarse_fallback_approvals.json"
     allow_approved_coarse_release = (
         os.getenv("MAS_ALLOW_APPROVED_COARSE_SEMANTIC_RELEASE") == "1"
     )
@@ -1026,8 +963,8 @@ def _run_semantic_flow(
     _stage(state_path, state, "semantic_finalize", finalize_semantic)
     schema = holder["semantic_schema"]
 
-    id_pack = dirs["translation_input"] / f"{name}_ID_TRANSLATION_PACK.zip"
-    id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
+    id_pack = dirs["handoff"] / f"{name}_ID_TRANSLATION_PACK.zip"
+    id_output = dirs["handoff"] / f"{name}_ID_TRANSLATED.zip"
 
     def make_id_pack():
         manifest = create_semantic_id_translation_pack(
@@ -1036,7 +973,7 @@ def _run_semantic_flow(
             batch_size=series["batch_size"],
             glossary=load_default_id_translation_glossary(),
         )
-        prepare_id_translation_workspaces(id_pack, dirs["translation_input"] / "id-workers")
+        prepare_id_translation_workspaces(id_pack, dirs["handoff"] / "id-workers")
         holder["semantic_id_manifest"] = manifest
         return {
             "path": str(id_pack),
@@ -1067,8 +1004,8 @@ def _run_semantic_flow(
 
     _stage(state_path, state, "id_return", validate_id_return)
 
-    report_path = dirs["final"] / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
-    semantic_release_marker = dirs["final"] / "semantic_release.done.json"
+    report_path = dirs["output"] / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
+    semantic_release_marker = dirs["output"] / "semantic_release.done.json"
     release_inputs = {
         "source": source_video,
         "raw_asr": raw_path,
@@ -1160,7 +1097,7 @@ def _deliver_semantic_report(
     execution_plan,
     sample_approval,
 ):
-    report_path = dirs["final"] / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
+    report_path = dirs["output"] / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
     if (
         report.get("status") != "PASS"
         or report.get("alignment_policy") != SEMANTIC_ALIGNMENT_POLICY
@@ -1212,7 +1149,7 @@ def _deliver_semantic_report(
                 "settings": settings["identity_sha256"],
             }
         )[:12]
-        mp4 = dirs["final"] / f"{name}.id.{identity}.mp4"
+        mp4 = dirs["output"] / f"{name}.id.{identity}.mp4"
         if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1" and not sample_approval.is_file():
             samples = dirs["work"] / "encoding-samples" / identity
             manifest_path = create_encoding_samples(
@@ -1238,7 +1175,7 @@ def _deliver_semantic_report(
         network = os.getenv("MAS_NETWORK_VOLUME_QUOTA_BYTES")
         if network:
             storage = inspect_encoding_storage(
-                dirs["final"],
+                dirs["output"],
                 network_volume_root="/workspace",
                 network_volume_quota_bytes=int(network),
             )
@@ -1262,7 +1199,7 @@ def _deliver_semantic_report(
             mp4_record = file_record(mp4, root)
         else:
             mp4_record = {
-                "relative_path": f"final/{mp4.name}",
+                "relative_path": f"output/{mp4.name}",
                 "storage_path": str(mp4),
                 "size_bytes": mp4.stat().st_size,
                 "sha256": sha256_file(mp4),
@@ -1276,10 +1213,10 @@ def _deliver_semantic_report(
             "encoding_receipt_sha256": sha256_file(mp4.with_suffix(".burn.json")),
             "outputs": {"mp4": mp4_record},
         }
-        delivery_path = dirs["final"] / "burned_mp4_delivery.json"
+        delivery_path = dirs["output"] / "burned_mp4_delivery.json"
         atomic_write_json(delivery_path, delivery)
         scoped_delivery_path = (
-            dirs["final"] / "delivery-scopes" / delivery_scope / "burned_mp4_delivery.json"
+            dirs["output"] / "delivery-scopes" / delivery_scope / "burned_mp4_delivery.json"
         )
         atomic_write_json(scoped_delivery_path, delivery)
         holder["delivery"] = delivery
@@ -1316,7 +1253,7 @@ def _deliver_semantic_report(
             error="MAS_DRIVE_STRICT_REMOTE is not set",
         )
         raise RuntimeError("semantic output is local only; Drive byte/SHA-256 readback is mandatory")
-    receipt_path = dirs["final"] / "drive_readback_receipt.json"
+    receipt_path = dirs["output"] / "drive_readback_receipt.json"
 
     def publish():
         record = holder["delivery"]["outputs"]["mp4"]
@@ -1329,7 +1266,7 @@ def _deliver_semantic_report(
             {"status": "PASS", "mode": SEMANTIC_ALIGNMENT_POLICY, "files": [receipt]},
         )
         atomic_write_json(
-            dirs["final"] / "delivery-scopes" / delivery_scope / "drive_readback_receipt.json",
+            dirs["output"] / "delivery-scopes" / delivery_scope / "drive_readback_receipt.json",
             {"status": "PASS", "mode": SEMANTIC_ALIGNMENT_POLICY, "files": [receipt]},
         )
         return {"receipt": str(receipt_path), "sha256": sha256_file(receipt_path)}
@@ -1347,13 +1284,11 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         return run_fixture(episode, stop_after=stop_after)
     root, name, dirs = _paths(episode, create=True)
     state_path = dirs["work"] / "state.json"
-    new_state = not state_path.is_file()
     state = load(state_path, episode)
     priority = os.getenv('MAS_PRODUCTION_PRIORITY', 'whole-episode-v1')
     contract = _resolve_run_contract(
         state,
         episode=episode,
-        new_state=new_state,
         priority=priority,
     )
     state["mode"] = (
@@ -1378,12 +1313,12 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
             raise RuntimeError("alignment recovery requires a validated code-fix resume scope")
         required = (
             dirs["source"] / "download.done.json",
-            dirs["prepare"] / "audio.done.json",
-            dirs["prepare"] / "raw_asr_v2.done.json",
-            dirs["translation_input"] / f"{name}_TR_CORRECTION_PACK.zip",
-            dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip",
-            dirs["translation_output"] / f"{name}_TR_CORRECTED.zip",
-            dirs["prepare"] / "audio_review_v2.json",
+            dirs["work"] / "audio.done.json",
+            dirs["work"] / "raw_asr_v2.done.json",
+            dirs["handoff"] / f"{name}_TR_CORRECTION_PACK.zip",
+            dirs["handoff"] / f"{name}_TR_TEXT_CORRECTED.zip",
+            dirs["handoff"] / f"{name}_TR_CORRECTED.zip",
+            dirs["work"] / "audio_review_v2.json",
         )
         if any(not path.is_file() for path in required):
             raise RuntimeError("alignment recovery requires retained remote checkpoints; no source download is allowed")
@@ -1396,8 +1331,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
     execution_plan = os.getenv("MAS_DELIVERY_EXECUTION_PLAN", "remote-nvenc-v1")
     if execution_plan not in {"remote-nvenc-v1", "local-qsv-v1"}:
         raise RuntimeError("unsupported delivery execution plan")
-    id_output = dirs["translation_output"] / f"{name}_ID_TRANSLATED.zip"
-    sample_approval = dirs["review"] / "mp4-sample-approval.json"
+    id_output = dirs["handoff"] / f"{name}_ID_TRANSLATED.zip"
+    sample_approval = dirs["work"] / "mp4-sample-approval.json"
     if (os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1" and execution_plan == "remote-nvenc-v1"
             and encoder != "h264_nvenc"):
         raise RuntimeError("RunPod MP4 production requires the explicitly supported NVENC encoder")
@@ -1409,8 +1344,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
                                  attempts=3, socket_timeout=30,
                                  cookies_file=os.getenv("MAS_YTDLP_COOKIES"),
                                  expected_source_sha256=state.get("source_sha256"),
-                                 freeze_captions=(dirs["prepare"] / "primary_asr").is_dir() or any(
-                                     (dirs["prepare"] / filename).is_file()
+                                 freeze_captions=(dirs["work"] / "primary_asr").is_dir() or any(
+                                     (dirs["work"] / filename).is_file()
                                      for filename in ("raw_asr_v2.json", "raw_asr_v2.recovery.json")
                                  ))
         holder["download"] = result
@@ -1439,7 +1374,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
 
     def prepare_audio():
         _source_guard(state, download.video_path)
-        result = extract_audio(download.video_path, dirs["prepare"], source_sha256=state["source_sha256"])
+        result = extract_audio(download.video_path, dirs["work"], source_sha256=state["source_sha256"])
         holder["audio"] = result
         return {"path": str(result.audio_path), "sha256": sha256_file(result.audio_path), "resumed": result.resumed}
     _stage(state_path, state, "audio", prepare_audio)
@@ -1462,14 +1397,14 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
                                       total_timeout=remaining, config_dir=config_dir, series=series,
                                       names=names, religious=religious, resume_scope=resume_scope)
 
-    tr_pack = dirs["translation_input"] / f"{name}_TR_CORRECTION_PACK.zip"
-    tr_text = dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip"
+    tr_pack = dirs["handoff"] / f"{name}_TR_CORRECTION_PACK.zip"
+    tr_text = dirs["handoff"] / f"{name}_TR_TEXT_CORRECTED.zip"
     extra_audio_review_uids = _pending_extra_audio_review_uids(tr_pack, tr_text)
 
     def transcribe():
         _source_guard(state, download.video_path)
         data = transcribe_raw_audio(
-            audio.audio_path, dirs["prepare"], episode=episode,
+            audio.audio_path, dirs["work"], episode=episode,
             config=RawASRConfig(
                 model_name=series["whisper_model"],
                 allow_cpu_fallback=False,
@@ -1484,7 +1419,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         if data.get("independent_vad") is not True or settings.get("allow_cpu_fallback") is not False:
             raise RuntimeError("strict raw ASR requires independent VAD and GPU-only policy")
         holder["raw"] = data
-        path = dirs["prepare"] / "raw_asr_v2.json"
+        path = dirs["work"] / "raw_asr_v2.json"
         return {"path": str(path), "sha256": sha256_file(path), "resumed": data.get("resumed", False)}
     _stage(state_path, state, "raw_asr", transcribe)
     raw = holder["raw"]
@@ -1530,23 +1465,15 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
     def make_tr_pack():
         manifest = create_tr_correction_pack(
             raw["correction_utterances"], raw["speech_hole_records"], tr_pack,
-            episode=episode, batch_size=250, speech_hole_audio_root=dirs["prepare"],
+            episode=episode, batch_size=250, speech_hole_audio_root=dirs["work"],
             asr_hallucination_records=raw["asr_hallucination_records"],
-            asr_hallucination_audio_root=dirs["prepare"],
-            rebind_text_output_path=dirs["translation_output"] / f"{name}_TR_TEXT_CORRECTED.zip")
+            asr_hallucination_audio_root=dirs["work"],
+            rebind_text_output_path=dirs["handoff"] / f"{name}_TR_TEXT_CORRECTED.zip")
         return {"path": str(tr_pack), "sha256": sha256_file(tr_pack), "input_sha256": manifest["input_sha256"]}
     _stage(state_path, state, "tr_pack", make_tr_pack)
 
     if not tr_text.is_file():
         set_stage(state_path, state, "tr_return", "blocked", expected=str(tr_text))
-        notify(
-            episode,
-            "Türkçe düzeltme bekleniyor",
-            f"Sonuç: Türkçe düzeltme paketi hazır.\n"
-            f"Beklenen dönüş: {tr_text}\n"
-            f"Sonraki adım: düzeltilmiş ZIP'i bu konuma koyup ./mas run {episode} komutunu yeniden çalıştırın.",
-            root=root, kind="action",
-        )
         print(f"[WAIT] TR CORRECTION\nPack: {tr_pack}\nExpected: {tr_text}\nSafe to stop RunPod.")
         return WAIT_TR
     def validate_tr_return():
@@ -1554,11 +1481,11 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         return {"sha256": sha256_file(tr_text), "records": len(result.records)}
     _stage(state_path, state, "tr_return", validate_tr_return)
 
-    tr_output = dirs["translation_output"] / f"{name}_TR_CORRECTED.zip"
-    review_path = dirs["prepare"] / "audio_review_v2.json"
+    tr_output = dirs["handoff"] / f"{name}_TR_CORRECTED.zip"
+    review_path = dirs["work"] / "audio_review_v2.json"
     _apply_audio_review_reset(root, episode, name, tr_pack, tr_text)
-    overrides_path = dirs["review"] / "audio_review_overrides.json"
-    speaker_evidence_path = dirs["review"] / "speaker_evidence_v1.json"
+    overrides_path = dirs["work"] / "audio_review_overrides.json"
+    speaker_evidence_path = dirs["work"] / "speaker_evidence_v1.json"
     overrides = _json(overrides_path) if overrides_path.is_file() else None
     speaker_evidence = (
         _json(speaker_evidence_path) if speaker_evidence_path.is_file() else None
@@ -1567,7 +1494,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         resumed = tr_output.is_file() and review_path.is_file()
         report = resolve_tr_audio_reviews(
             tr_pack, tr_text, tr_output, review_path,
-            dirs["prepare"] / "audio_review_v2.recovery.json",
+            dirs["work"] / "audio_review_v2.recovery.json",
             config=AudioReviewConfig(model_name=series["whisper_model"], device="cuda", allow_cpu_fallback=False),
             manual_overrides=overrides,
             **({"require_resume": True} if resume_scope is not None else {}))
@@ -1577,7 +1504,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
                 "review_count": report["review_count"], "resumed": resumed}
     _stage(state_path, state, "audio_review", review_audio)
     correction = holder["correction"]
-    alignment_path = dirs["prepare"] / "forced_alignment_v2.json"
+    alignment_path = dirs["work"] / "forced_alignment_v2.json"
     def align():
         pack = read_tr_correction_pack(tr_pack)
         bundle = correction_records_to_alignment_inputs(
@@ -1602,8 +1529,8 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
     if alignment_recovery:
         return ALIGNMENT_RECOVERY_COMPLETE
 
-    schema_path = dirs["prepare"] / "aligned_tr_schema_v2.json"
-    id_pack = dirs["translation_input"] / f"{name}_ID_TRANSLATION_PACK.zip"
+    schema_path = dirs["work"] / "aligned_tr_schema_v2.json"
+    id_pack = dirs["handoff"] / f"{name}_ID_TRANSLATION_PACK.zip"
     def make_id_pack():
         artifacts = build_strict_artifacts(
             raw,
@@ -1615,9 +1542,9 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
             production_policy=build_production_translation_policy(series, names, religious),
         )
         atomic_write_json(schema_path, artifacts.schema)
-        atomic_write_json(dirs["prepare"] / "alignment_window_audit_v2.json", list(artifacts.preparation.window_audit))
-        atomic_write_json(dirs["prepare"] / "final_speech_coverage_v2.json", artifacts.speech_coverage_report)
-        atomic_write_json(dirs["prepare"] / "pre_id_timing_qa_v2.json", artifacts.timing_qa_report)
+        atomic_write_json(dirs["work"] / "alignment_window_audit_v2.json", list(artifacts.preparation.window_audit))
+        atomic_write_json(dirs["work"] / "final_speech_coverage_v2.json", artifacts.speech_coverage_report)
+        atomic_write_json(dirs["work"] / "pre_id_timing_qa_v2.json", artifacts.timing_qa_report)
         manifest = create_id_translation_pack(
             artifacts,
             id_pack,
@@ -1625,7 +1552,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
             glossary=load_default_id_translation_glossary(),
         )
         if 'production_policy' in artifacts.schema:
-            prepare_id_translation_workspaces(id_pack, dirs['translation_input'] / 'id-workers')
+            prepare_id_translation_workspaces(id_pack, dirs['handoff'] / 'id-workers')
         holder["artifacts"] = artifacts
         holder["id_manifest"] = manifest
         return {
@@ -1639,14 +1566,6 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
 
     if not id_output.is_file():
         set_stage(state_path, state, "id_return", "blocked", expected=str(id_output))
-        notify(
-            episode,
-            "Endonezce çeviri bekleniyor",
-            f"Sonuç: Endonezce çeviri paketi hazır.\n"
-            f"Beklenen dönüş: {id_output}\n"
-            f"Sonraki adım: çevrilmiş ZIP'i bu konuma koyup ./mas run {episode} komutunu yeniden çalıştırın.",
-            root=root, kind="action",
-        )
         print(f"[WAIT] ID TRANSLATION\nPack: {id_pack}\nExpected: {id_output}\nSafe to stop RunPod.")
         return WAIT_ID
     def validate_id_return():
@@ -1661,25 +1580,25 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         return {"sha256": sha256_file(id_output), "records": result.output_block_count}
     _stage(state_path, state, "id_return", validate_id_return)
 
-    report_path = dirs["final"] / f"{name}_FINALIZATION_REPORT_V2.json"
-    strict_marker_path = dirs["final"] / "strict_finalize.done.json"
+    report_path = dirs["output"] / f"{name}_FINALIZATION_REPORT_V2.json"
+    strict_marker_path = dirs["output"] / "strict_finalize.done.json"
     strict_outputs = {
         "report": report_path,
-        "mkv": dirs["final"] / f"{name}.mkv",
-        "id_srt": dirs["final"] / "subtitles" / f"{name}-id.srt",
-        "tr_srt": dirs["final"] / "subtitles" / f"{name}-tr.srt",
+        "mkv": dirs["output"] / f"{name}.mkv",
+        "id_srt": dirs["output"] / "subtitles" / f"{name}-id.srt",
+        "tr_srt": dirs["output"] / "subtitles" / f"{name}-tr.srt",
     }
     strict_inputs = {
         "source_video": download.video_path,
         "download_metadata": dirs["source"] / "source.metadata.json",
         "download_marker": dirs["source"] / "download.done.json",
         "audio": audio.audio_path,
-        "audio_metadata": dirs["prepare"] / "audio.metadata.json",
-        "audio_marker": dirs["prepare"] / "audio.done.json",
-        "raw_asr": dirs["prepare"] / "raw_asr_v2.json",
-        "raw_asr_marker": dirs["prepare"] / "raw_asr_v2.done.json",
+        "audio_metadata": dirs["work"] / "audio.metadata.json",
+        "audio_marker": dirs["work"] / "audio.done.json",
+        "raw_asr": dirs["work"] / "raw_asr_v2.json",
+        "raw_asr_marker": dirs["work"] / "raw_asr_v2.done.json",
         "forced_alignment": alignment_path,
-        "forced_alignment_marker": dirs["prepare"] / "forced_alignment_v2.done.json",
+        "forced_alignment_marker": dirs["work"] / "forced_alignment_v2.done.json",
         "tr_correction_pack": tr_pack,
         "tr_text_correction_output": tr_text,
         "tr_correction_output": tr_output,
@@ -1707,7 +1626,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         if report is None:
             report = finalize_episode(
                 episode_root=root, episode=episode, source_video=download.video_path,
-                raw_asr_path=dirs["prepare"] / "raw_asr_v2.json",
+                raw_asr_path=dirs["work"] / "raw_asr_v2.json",
                 forced_alignment_path=alignment_path,
                 tr_correction_pack=tr_pack, tr_text_correction_output=tr_text,
                 tr_correction_output=tr_output, audio_review_path=review_path,
@@ -1747,7 +1666,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         identity = sha256_json({"source": sha256_file(download.video_path),
                                 "id_srt": sha256_file(id_srt),
                                 "style": SUBTITLE_STYLE, "settings": settings["identity_sha256"]})[:12]
-        mp4 = dirs["final"] / f"{name}.id.{identity}.mp4"
+        mp4 = dirs["output"] / f"{name}.id.{identity}.mp4"
         if os.getenv("MAS_EXTERNAL_RUNPOD_CONTROLLER") == "1" and not sample_approval.is_file():
             samples = dirs["work"] / "encoding-samples" / identity
             manifest_path = create_encoding_samples(download.video_path, id_srt, samples,
@@ -1761,7 +1680,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         network = os.getenv("MAS_NETWORK_VOLUME_QUOTA_BYTES")
         storage = {}
         if network:
-            storage = inspect_encoding_storage(dirs["final"], network_volume_root="/workspace",
+            storage = inspect_encoding_storage(dirs["output"], network_volume_root="/workspace",
                                                network_volume_quota_bytes=int(network))
             atomic_write_json(dirs["work"] / "encoding-storage.json", storage)
             # Allow room beyond the target; size is never an output acceptance ceiling.
@@ -1776,13 +1695,13 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         if mp4.is_relative_to(root):
             mp4_record = file_record(mp4, root)
         else:
-            mp4_record = {"relative_path": f"final/{mp4.name}", "storage_path": str(mp4),
+            mp4_record = {"relative_path": f"output/{mp4.name}", "storage_path": str(mp4),
                           "size_bytes": mp4.stat().st_size, "sha256": sha256_file(mp4)}
         delivery = {"format": "mas-burned-mp4-delivery-1", "mode": "strict",
                     "strict_finalization_sha256": sha256_file(report_path),
                     "encoding_receipt_sha256": sha256_file(mp4.with_suffix('.burn.json')),
                     "outputs": {"mp4": mp4_record}}
-        delivery_path = dirs["final"] / "burned_mp4_delivery.json"
+        delivery_path = dirs["output"] / "burned_mp4_delivery.json"
         atomic_write_json(delivery_path, delivery)
         holder["delivery"] = delivery
         return {"delivery": str(delivery_path), "delivery_sha256": sha256_file(delivery_path)}
@@ -1790,8 +1709,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
 
     if holder.get("sample_wait"):
         set_stage(state_path, state, "burn_mp4", "blocked", reason="MP4 samples require review",
-                  approval_path=str(dirs["review"] / "mp4-sample-approval.json"))
-        notify(episode, "MP4 örnekleri inceleme bekliyor", "Örnekleri inceleyip kaynak/ayar bağlı onay kaydını tamamlayın.")
+                  approval_path=str(dirs["work"] / "mp4-sample-approval.json"))
         return WAIT_MP4_SAMPLE
 
     if external_delivery:
@@ -1804,7 +1722,7 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
     if not remote_root:
         set_stage(state_path, state, "drive_readback", "blocked", error="MAS_DRIVE_STRICT_REMOTE is not set")
         raise RuntimeError("strict output is local only; Drive byte/SHA-256 readback is mandatory")
-    receipt_path = dirs["final"] / "drive_readback_receipt.json"
+    receipt_path = dirs["output"] / "drive_readback_receipt.json"
     def publish():
         receipts = []
         for key in STRICT_DRIVE_OUTPUTS:
@@ -1816,13 +1734,6 @@ def run(episode, source_url=None, fixture=False, stop_after=None, alignment_reco
         atomic_write_json(receipt_path, {"status": "PASS", "mode": "strict", "files": receipts})
         return {"receipt": str(receipt_path), "sha256": sha256_file(receipt_path)}
     _stage(state_path, state, "drive_readback", publish)
-    notify(
-        episode,
-        "bölüm hazır",
-        f"Sonuç: strict final dosyalar Drive'a yüklendi ve byte/SHA-256 readback doğrulandı.\n"
-        f"Makbuz: {receipt_path}\n"
-        "Sonraki adım: teslimat makbuzunu arşivleyin.",
-    )
     set_stage(state_path, state, "compute_shutdown", "running")
     shutdown = stop_current_pod()
     set_stage(state_path, state, "compute_shutdown", "pass", **shutdown)
@@ -1871,8 +1782,8 @@ def status_summary(episode):
         }.get(stage.get("status"), "bilinmiyor")
 
     pending = None
-    packs = list(dirs["translation_input"].glob("*.zip"))
-    packs += list((root / "parts").glob("part-*/translation_input/*.zip"))
+    packs = list(dirs["handoff"].glob("*.zip"))
+    packs += list((root / "parts").glob("part-*/handoff/*.zip"))
     suffixes = {
         "_SEMANTIC_ALIGNMENT_PACK.zip": "_SEMANTIC_ALIGNMENT_RETURN.zip",
         "_TR_CORRECTION_PACK.zip": "_TR_TEXT_CORRECTED.zip",
@@ -1882,7 +1793,7 @@ def status_summary(episode):
         for pack_suffix, return_suffix in suffixes.items():
             if not pack.name.endswith(pack_suffix):
                 continue
-            returned = pack.parent.parent / "translation_output" / (
+            returned = pack.parent.parent / "handoff" / (
                 pack.name[:-len(pack_suffix)] + return_suffix
             )
             if not returned.is_file():
@@ -1897,7 +1808,7 @@ def status_summary(episode):
             path for path in dirs["source"].iterdir()
             if path.is_file() and path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
         )
-    outputs = sorted(dirs["final"].rglob("*.mp4")) if dirs["final"].is_dir() else []
+    outputs = sorted(dirs["output"].rglob("*.mp4")) if dirs["output"].is_dir() else []
 
     print(f"Bölüm {episode}")
     print(f"Durum: {stage_name}" + (f" ({stage_status})" if stage_status else ""))
@@ -1967,7 +1878,7 @@ def status(episode):
                 row["stage"] = {"metadata_status": "INVALID_LOCAL_METADATA"}
             for label, relative, format_name in (
                 ("handoff", "work/partial-handoff.json", "mas-partial-handoff-1"),
-                ("delivery", "final/drive_readback_receipt.json", "mas-part-delivery-1"),
+                ("delivery", "output/drive_readback_receipt.json", "mas-part-delivery-1"),
             ):
                 path = child / relative
                 row[label] = {"present": path.is_file(), "stored_status": None}
@@ -1982,57 +1893,55 @@ def status(episode):
                                       metadata_status="STORED_METADATA_BOUND", path=path.relative_to(root).as_posix())
                 except (OSError, ValueError, KeyError, TypeError):
                     row[label]["metadata_status"] = "INVALID_LOCAL_METADATA"
-            if episode >= 14:
-                from .delivery_first import read_signed, quality_summary, _tag, EXPORT_MODE
-                import hmac
-                export_path = child / "work/partial-export.json"
-                if export_path.is_file():
-                    try:
-                        export = _json(export_path)
-                        body = dict(export)
-                        tag = body.pop('auth_tag', None)
-                        if (body.get('mode') != EXPORT_MODE or body.get('episode') != episode
-                                or body.get('part_id') != part_id or body.get('plan_sha256') != plan_sha
-                                or not isinstance(tag, str) or not hmac.compare_digest(tag, _tag(body, 'export'))):
-                            raise ValueError('delivery metadata authentication failed')
-                        from .delivery import verified_record
-                        report = _json(verified_record(root, export['report']))
-                        row['quality'] = {**quality_summary(report),
-                            'metadata_status': 'SIGNED_STORED_REPORT', 'artifact_revalidation': False}
-                    except Exception:
-                        row['quality'] = {'metadata_status': 'UNVERIFIED_LOCAL_METADATA'}
-                tail_path = child / 'final/local-tail-ready.json'
-                if tail_path.is_file():
-                    try:
-                        tail = read_signed(tail_path, 'local-tail-ready')
-                        if (tail.get('episode') != episode or tail.get('part_id') != part_id
-                                or tail.get('plan_sha256') != plan_sha
-                                or tail.get('status') != 'LOCAL_ENCODED_NOT_PUBLISHED'):
-                            raise ValueError('tail metadata scope changed')
-                        row['local_tail'] = {'stored_status': tail['status'],
-                            'artifact_revalidation': False, 'remote_publication': False}
-                    except Exception:
-                        row['local_tail'] = {'metadata_status': 'UNVERIFIED_LOCAL_METADATA'}
-            progress["parts"].append(row)
-        if episode >= 14:
-            full_path = root / 'final/delivery-first/full-drive-receipt.json'
-            progress['full_delivery'] = {'present': full_path.is_file(), 'live_verification': False}
-            if full_path.is_file():
+            from .delivery_first import read_signed, quality_summary, _tag, EXPORT_MODE
+            import hmac
+            export_path = child / "work/partial-export.json"
+            if export_path.is_file():
                 try:
-                    from .delivery_first import read_signed
-                    full = read_signed(full_path, 'full-delivery')
-                    if (full['identity']['episode'] != episode or full['identity']['plan_sha256'] != plan_sha
-                            or full['status'] != 'DELIVERED_WITH_WARNINGS'
-                            or full['quality_status'] != 'NOT_STRICT'
-                            or full['remote']['bytes'] != full['mp4']['size_bytes']
-                            or full['remote']['sha256'] != full['mp4']['sha256']):
-                        raise ValueError('full delivery metadata scope changed')
-                    progress['full_delivery'].update(stored_status=full['status'],
-                        quality_status=full['quality_status'], remote=full['remote']['remote'],
-                        bytes=full['remote']['bytes'], sha256=full['remote']['sha256'],
-                        metadata_status='SIGNED_STORED_RECEIPT', artifact_revalidation=False)
+                    export = _json(export_path)
+                    body = dict(export)
+                    tag = body.pop('auth_tag', None)
+                    if (body.get('mode') != EXPORT_MODE or body.get('episode') != episode
+                            or body.get('part_id') != part_id or body.get('plan_sha256') != plan_sha
+                            or not isinstance(tag, str) or not hmac.compare_digest(tag, _tag(body, 'export'))):
+                        raise ValueError('delivery metadata authentication failed')
+                    from .delivery import verified_record
+                    report = _json(verified_record(root, export['report']))
+                    row['quality'] = {**quality_summary(report),
+                        'metadata_status': 'SIGNED_STORED_REPORT', 'artifact_revalidation': False}
                 except Exception:
-                    progress['full_delivery']['metadata_status'] = 'UNVERIFIED_LOCAL_METADATA'
+                    row['quality'] = {'metadata_status': 'UNVERIFIED_LOCAL_METADATA'}
+            tail_path = child / 'output/local-tail-ready.json'
+            if tail_path.is_file():
+                try:
+                    tail = read_signed(tail_path, 'local-tail-ready')
+                    if (tail.get('episode') != episode or tail.get('part_id') != part_id
+                            or tail.get('plan_sha256') != plan_sha
+                            or tail.get('status') != 'LOCAL_ENCODED_NOT_PUBLISHED'):
+                        raise ValueError('tail metadata scope changed')
+                    row['local_tail'] = {'stored_status': tail['status'],
+                        'artifact_revalidation': False, 'remote_publication': False}
+                except Exception:
+                    row['local_tail'] = {'metadata_status': 'UNVERIFIED_LOCAL_METADATA'}
+            progress["parts"].append(row)
+        full_path = root / 'output/delivery-first/full-drive-receipt.json'
+        progress['full_delivery'] = {'present': full_path.is_file(), 'live_verification': False}
+        if full_path.is_file():
+            try:
+                from .delivery_first import read_signed
+                full = read_signed(full_path, 'full-delivery')
+                if (full['identity']['episode'] != episode or full['identity']['plan_sha256'] != plan_sha
+                        or full['status'] != 'DELIVERED_WITH_WARNINGS'
+                        or full['quality_status'] != 'NOT_STRICT'
+                        or full['remote']['bytes'] != full['mp4']['size_bytes']
+                        or full['remote']['sha256'] != full['mp4']['sha256']):
+                    raise ValueError('full delivery metadata scope changed')
+                progress['full_delivery'].update(stored_status=full['status'],
+                    quality_status=full['quality_status'], remote=full['remote']['remote'],
+                    bytes=full['remote']['bytes'], sha256=full['remote']['sha256'],
+                    metadata_status='SIGNED_STORED_RECEIPT', artifact_revalidation=False)
+            except Exception:
+                progress['full_delivery']['metadata_status'] = 'UNVERIFIED_LOCAL_METADATA'
         result["progressive"] = progress
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0

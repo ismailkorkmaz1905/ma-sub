@@ -701,8 +701,8 @@ class V2CorrectionRoutingTests(unittest.TestCase):
             "format": "mas-native-diarization-pilot-1",
             "status": "REVIEW_REQUIRED",
             "production_acceptance": False,
-            "episode": 12,
-            "clip_identity": "ep12-residual-001-0-6500",
+            "episode": 15,
+            "clip_identity": "ep15-residual-001-0-6500",
             "input_sha256": "a" * 64,
             "model_sha256": "b" * 64,
             "runtime": [],
@@ -714,7 +714,7 @@ class V2CorrectionRoutingTests(unittest.TestCase):
         }
         pilot = {"data": pilot_data, "sha256": digest(pilot_data)}
         evidence = build_speaker_evidence(
-            episode=12,
+            episode=15,
             audio_sha256=AUDIO_SHA,
             input_utterances=inputs,
             intervals=[{"start": 0, "end": 6500}],
@@ -726,7 +726,7 @@ class V2CorrectionRoutingTests(unittest.TestCase):
             corrections,
             speech_hole_records=_speech_holes(),
             speaker_evidence=evidence,
-            episode=12,
+            episode=15,
             audio_sha256=AUDIO_SHA,
         )
 

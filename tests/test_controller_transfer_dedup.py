@@ -39,13 +39,13 @@ def test_changed_handoff_uploads_and_requires_both_readbacks(tmp_path, monkeypat
 
 
 def _manifest_case(root):
-    identity = remote_job._identity(14, "a" * 40, "b" * 64)
-    request = {"episode": 14, "commit": identity["commit"], "input_sha256": identity["input_sha256"]}
+    identity = remote_job._identity(15, "a" * 40, "b" * 64)
+    request = {"episode": 15, "commit": identity["commit"], "input_sha256": identity["input_sha256"]}
     atomic_json(root / "work/remote-job-request.json", {"data": request, "sha256": digest(request)})
     payload = b"retained diagnostic"
     signature = hashlib.sha256(payload).hexdigest()
-    relative = "prepare/audio_review_v2.json"
-    remote_root = "/workspace/ma-sub/EPISODES/Muhtemel Ask 14.Bolum"
+    relative = "work/audio_review_v2.json"
+    remote_root = "/workspace/ma-sub/EPISODES/Muhtemel Ask 15.Bolum"
     record = {"relative_path": relative, "sha256": signature, "size_bytes": len(payload),
               "snapshot_path": remote_root + "/work/remote-jobs/snapshots/" + signature + ".json"}
     manifest = {"identity": identity, "kind": "diagnostics", "files": [record], "missing": [], "unstable": []}
@@ -66,14 +66,14 @@ def test_diagnostic_manifest_reuses_exact_local_bytes(tmp_path, monkeypatch, loc
         assert command[0] == "ssh", "unchanged diagnostic was downloaded again"
         return json.dumps(manifest).encode()
     monkeypatch.setattr(controller, "_network_retry", network)
-    controller._collect_diagnostics(14, tmp_path, remote_root, ["ssh"], ["scp"], "host", controller.time.monotonic() + 120)
+    controller._collect_diagnostics(15, tmp_path, remote_root, ["ssh"], ["scp"], "host", controller.time.monotonic() + 120)
     assert len(calls) == 1
 
 
 def test_diagnostic_manifest_downloads_changed_hash_and_preserves_canonical(tmp_path, monkeypatch):
     remote_root, manifest, payload = _manifest_case(tmp_path)
     canonical = tmp_path / manifest["files"][0]["relative_path"]
-    canonical.parent.mkdir(parents=True)
+    canonical.parent.mkdir(parents=True, exist_ok=True)
     canonical.write_bytes(b"old evidence")
     from pathlib import Path
     def network(command, **kwargs):
@@ -82,7 +82,7 @@ def test_diagnostic_manifest_downloads_changed_hash_and_preserves_canonical(tmp_
         Path(command[-1]).write_bytes(payload)
         return b""
     monkeypatch.setattr(controller, "_network_retry", network)
-    controller._collect_diagnostics(14, tmp_path, remote_root, ["ssh"], ["scp"], "host", controller.time.monotonic() + 120)
+    controller._collect_diagnostics(15, tmp_path, remote_root, ["ssh"], ["scp"], "host", controller.time.monotonic() + 120)
     assert canonical.read_bytes() == b"old evidence"
     retained = tmp_path / "work/remote-checkpoints" / manifest["files"][0]["sha256"] / canonical.name
     assert retained.read_bytes() == payload
@@ -93,18 +93,18 @@ def test_diagnostic_manifest_rejects_forged_path_before_download(tmp_path, monke
     manifest["files"][0]["relative_path"] = "../../credentials"
     monkeypatch.setattr(controller, "_network_retry", lambda *a, **kw: json.dumps(manifest).encode())
     with pytest.raises(controller.RunPodControllerError, match="path set"):
-        controller._collect_diagnostics(14, tmp_path, remote_root, ["ssh"], ["scp"], "host", controller.time.monotonic() + 120)
+        controller._collect_diagnostics(15, tmp_path, remote_root, ["ssh"], ["scp"], "host", controller.time.monotonic() + 120)
 
 
 def test_remote_diagnostic_manifest_snapshots_only_bounded_failure_set(tmp_path):
-    root = tmp_path / "EPISODES/Muhtemel Ask 14.Bolum"
-    diagnostic = root / "prepare/audio_review_v2.json"
-    diagnostic.parent.mkdir(parents=True)
+    root = tmp_path / "EPISODES/Muhtemel Ask 15.Bolum"
+    diagnostic = root / "work/audio_review_v2.json"
+    diagnostic.parent.mkdir(parents=True, exist_ok=True)
     diagnostic.write_bytes(b"review")
     (diagnostic.parent / "unrelated.json").write_bytes(b"unrelated")
-    manifest = remote_job.checkpoint_manifest(tmp_path, 14, "a" * 40, diagnostics=True)
+    manifest = remote_job.checkpoint_manifest(tmp_path, 15, "a" * 40, diagnostics=True)
     assert manifest["kind"] == "diagnostics"
-    assert [record["relative_path"] for record in manifest["files"]] == ["prepare/audio_review_v2.json"]
+    assert [record["relative_path"] for record in manifest["files"]] == ["work/audio_review_v2.json"]
     assert len(manifest["missing"]) == 10
     diagnostic.write_bytes(b"changed after snapshot")
     from pathlib import Path

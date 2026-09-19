@@ -670,8 +670,8 @@ class TRCorrectionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            pack_path = root / "Muhtemel Ask 12.Bolum_TR_CORRECTION_PACK.zip"
-            output_path = root / "Muhtemel Ask 12.Bolum_TR_TEXT_CORRECTED.zip"
+            pack_path = root / "Muhtemel Ask 15.Bolum_TR_CORRECTION_PACK.zip"
+            output_path = root / "Muhtemel Ask 15.Bolum_TR_TEXT_CORRECTED.zip"
             old_manifest = self._create_pack(
                 pack_path, inputs=inputs, holes=[], hallucinations=[]
             )

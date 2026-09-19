@@ -12,27 +12,27 @@ def _listing(*entries):
 @pytest.mark.parametrize(
     "title",
     (
-        "Muhtemel Aşk 13. Bölüm",
-        "MUHTEMEL ASK 13.BOLUM",
-        "Muhtemel  Ask - 13 . Bolum",
+        "Muhtemel Aşk 15. Bölüm",
+        "MUHTEMEL ASK 15.BOLUM",
+        "Muhtemel  Ask - 15 . Bolum",
     ),
 )
 def test_exact_episode_title_accepts_turkish_and_spacing_variants(title):
-    assert source_discovery.is_exact_episode_title(title, 13)
+    assert source_discovery.is_exact_episode_title(title, 15)
 
 
 @pytest.mark.parametrize(
     "title",
     (
-        "Muhtemel Aşk 13. Bölüm Fragman",
-        "Muhtemel Aşk 13. Bölüm Ön İzleme",
-        "Muhtemel Aşk 13. Bölüm Özeti",
-        "Muhtemel Aşk 13. Bölümden Klip",
-        "Muhtemel Aşk 12. Bölüm",
+        "Muhtemel Aşk 15. Bölüm Fragman",
+        "Muhtemel Aşk 15. Bölüm Ön İzleme",
+        "Muhtemel Aşk 15. Bölüm Özeti",
+        "Muhtemel Aşk 15. Bölümden Klip",
+        "Muhtemel Aşk 16. Bölüm",
     ),
 )
 def test_exact_episode_title_rejects_non_episode_or_extra_words(title):
-    assert not source_discovery.is_exact_episode_title(title, 13)
+    assert not source_discovery.is_exact_episode_title(title, 15)
 
 
 def test_discovery_returns_canonical_watch_url_and_bounded_command(monkeypatch):
@@ -41,14 +41,14 @@ def test_discovery_returns_canonical_watch_url_and_bounded_command(monkeypatch):
     def run(command, *, idle_timeout, total_timeout):
         calls.append((command, idle_timeout, total_timeout))
         return _listing(
-            {"id": "clip0000001", "title": "Muhtemel Aşk 13. Bölüm Fragman"},
-            {"id": "episode0013", "title": "Muhtemel Aşk 13. Bölüm"},
+            {"id": "clip0000001", "title": "Muhtemel Aşk 15. Bölüm Fragman"},
+            {"id": "episode0015", "title": "Muhtemel Aşk 15. Bölüm"},
         )
 
     monkeypatch.setattr(source_discovery, "_run_watchdog", run)
 
-    assert source_discovery.discover_episode_source(13) == (
-        "https://www.youtube.com/watch?v=episode0013"
+    assert source_discovery.discover_episode_source(15) == (
+        "https://www.youtube.com/watch?v=episode0015"
     )
     command, idle_timeout, total_timeout = calls[0]
     assert command[:3] == [source_discovery.sys.executable, "-m", "yt_dlp"]
@@ -67,11 +67,11 @@ def test_discovery_passes_validated_cookie_path_without_reading_contents(monkeyp
 
     def run(command, *, idle_timeout, total_timeout):
         assert command[command.index("--cookies") + 1] == str(cookie.resolve())
-        return _listing({"id": "episode0013", "title": "Muhtemel Ask 13. Bolum"})
+        return _listing({"id": "episode0015", "title": "Muhtemel Ask 15. Bolum"})
 
     monkeypatch.setattr(source_discovery, "_run_watchdog", run)
-    assert source_discovery.discover_episode_source(13, cookies_file=cookie).endswith(
-        "episode0013"
+    assert source_discovery.discover_episode_source(15, cookies_file=cookie).endswith(
+        "episode0015"
     )
 
 
@@ -80,12 +80,12 @@ def test_discovery_rejects_ambiguous_exact_matches(monkeypatch):
         source_discovery,
         "_run_watchdog",
         lambda *args, **kwargs: _listing(
-            {"id": "episode0013", "title": "Muhtemel Aşk 13. Bölüm"},
-            {"id": "episode1013", "title": "Muhtemel Ask 13. Bolum"},
+            {"id": "episode0015", "title": "Muhtemel Aşk 15. Bölüm"},
+            {"id": "episode1015", "title": "Muhtemel Ask 15. Bolum"},
         ),
     )
     with pytest.raises(source_discovery.SourceDiscoveryError, match="multiple exact"):
-        source_discovery.discover_episode_source(13)
+        source_discovery.discover_episode_source(15)
 
 
 def test_discovery_rejects_not_found(monkeypatch):
@@ -93,26 +93,26 @@ def test_discovery_rejects_not_found(monkeypatch):
         source_discovery,
         "_run_watchdog",
         lambda *args, **kwargs: _listing(
-            {"id": "clip0000001", "title": "Muhtemel Aşk 13. Bölüm Fragman"},
-            {"id": "episode0012", "title": "Muhtemel Aşk 12. Bölüm"},
+            {"id": "clip0000001", "title": "Muhtemel Aşk 15. Bölüm Fragman"},
+            {"id": "episode0016", "title": "Muhtemel Aşk 16. Bölüm"},
         ),
     )
     with pytest.raises(source_discovery.SourceDiscoveryError, match="was not found"):
-        source_discovery.discover_episode_source(13)
+        source_discovery.discover_episode_source(15)
 
 
 def test_pipeline_discovers_once_and_persists_immutable_source_url(tmp_path, monkeypatch):
-    source_url = "https://www.youtube.com/watch?v=episode0013"
+    source_url = "https://www.youtube.com/watch?v=episode0015"
     monkeypatch.setattr(source_discovery, "_run_watchdog", lambda *args, **kwargs: b"")
     monkeypatch.setattr("mas.pipeline.episode_dir", lambda episode: tmp_path / str(episode))
     monkeypatch.setattr("mas.pipeline.discover_episode_source", lambda *args, **kwargs: source_url)
     monkeypatch.setattr("mas.pipeline._load_configs", lambda: (_ for _ in ()).throw(RuntimeError("stop")))
 
     with pytest.raises(RuntimeError, match="stop"):
-        source_discovery_path = tmp_path / "13" / "source" / "source.url"
+        source_discovery_path = tmp_path / "15" / "source" / "source.url"
         from mas.pipeline import run
 
-        run(13)
+        run(15)
 
     assert source_discovery_path.read_text(encoding="utf-8") == source_url + "\n"
 
@@ -121,7 +121,7 @@ def test_pipeline_discovers_once_and_persists_immutable_source_url(tmp_path, mon
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not rediscover")),
     )
     with pytest.raises(RuntimeError, match="stop"):
-        run(13)
+        run(15)
 
 
 def test_pipeline_recovers_incomplete_source_url_before_source_initialization(tmp_path, monkeypatch):
@@ -129,12 +129,12 @@ def test_pipeline_recovers_incomplete_source_url_before_source_initialization(tm
     source_dir.mkdir()
     url_path = source_dir / "source.url"
     url_path.write_bytes(b"")
-    resolved = "https://www.youtube.com/watch?v=episode0013"
+    resolved = "https://www.youtube.com/watch?v=episode0015"
     monkeypatch.setattr("mas.pipeline.discover_episode_source", lambda *args, **kwargs: resolved)
 
     from mas.pipeline import _resolve_source_url
 
-    assert _resolve_source_url(url_path, {}, 13) == resolved
+    assert _resolve_source_url(url_path, {}, 15) == resolved
     assert url_path.read_bytes() == (resolved + "\n").encode("utf-8")
 
 
@@ -145,12 +145,12 @@ def test_pipeline_rejects_invalid_source_url_after_source_initialization(tmp_pat
     from mas.pipeline import _resolve_source_url
 
     with pytest.raises(RuntimeError, match="refusing source identity change"):
-        _resolve_source_url(url_path, {"source_sha256": "0" * 64}, 13)
+        _resolve_source_url(url_path, {"source_sha256": "0" * 64}, 15)
 
 
 def test_pipeline_never_rewrites_valid_initialized_source_url(tmp_path, monkeypatch):
     url_path = tmp_path / "source.url"
-    original = "https://www.youtube.com/watch?v=episode0013"
+    original = "https://www.youtube.com/watch?v=episode0015"
     url_path.write_text(original + "\n", encoding="utf-8")
     before = url_path.stat().st_mtime_ns
     monkeypatch.setattr(
@@ -160,7 +160,7 @@ def test_pipeline_never_rewrites_valid_initialized_source_url(tmp_path, monkeypa
 
     from mas.pipeline import _resolve_source_url
 
-    assert _resolve_source_url(url_path, {}, 13, original) == original
+    assert _resolve_source_url(url_path, {}, 15, original) == original
     assert url_path.stat().st_mtime_ns == before
 
 
@@ -169,4 +169,4 @@ def test_pipeline_rejects_invalid_source_urls(tmp_path, url):
     from mas.pipeline import _resolve_source_url
 
     with pytest.raises(RuntimeError, match="source URL is invalid"):
-        _resolve_source_url(tmp_path / "source.url", {}, 13, url)
+        _resolve_source_url(tmp_path / "source.url", {}, 15, url)

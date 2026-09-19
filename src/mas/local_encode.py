@@ -153,7 +153,7 @@ def complete_local_encode(root, episode, *, total_timeout):
                                           target_size_gb=plan['target_size_gb'],
                                           timeout_seconds=min(240, remaining()),
                                           duration_limit_seconds=plan.get('duration_limit_seconds'))
-    output = root / 'final' / f'Muhtemel Ask {episode}.Bolum.id.{identity}.mp4'
+    output = root / 'output' / f'Muhtemel Ask {episode}.Bolum.id.{identity}.mp4'
     timeout = min(14400, remaining())
     burn_indonesian_mp4(source, subtitles, output, encoder='h264_qsv',
                         target_size_gb=plan['target_size_gb'], timeout_seconds=timeout,
@@ -174,10 +174,10 @@ def complete_local_encode(root, episode, *, total_timeout):
         delivery['delivery_scope_sha256'] = plan['delivery_scope_selection']['sha256']
     else:
         delivery['strict_finalization_sha256'] = plan['strict_report_sha256']
-    atomic_json(root / 'final/burned_mp4_delivery.json', delivery)
+    atomic_json(root / 'output/burned_mp4_delivery.json', delivery)
     if semantic:
         atomic_json(
-            root / 'final/delivery-scopes' / plan['delivery_scope'] / 'burned_mp4_delivery.json',
+            root / 'output/delivery-scopes' / plan['delivery_scope'] / 'burned_mp4_delivery.json',
             delivery,
         )
     return delivery

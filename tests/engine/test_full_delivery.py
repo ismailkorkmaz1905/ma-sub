@@ -52,7 +52,7 @@ def staged_episode(tmp_path, monkeypatch):
     (tmp_path / 'source').mkdir()
     atomic_json(tmp_path / 'work/part-plan.json', {'test': 'original plan'})
     atomic_json(tmp_path / 'source/official-source.json', {
-        'episode': 14, 'title': 'Muhtemel Ask 14. Bolum', 'channel_url': CHANNEL_VIDEOS_URL})
+        'episode': 15, 'title': 'Muhtemel Ask 15. Bolum', 'channel_url': CHANNEL_VIDEOS_URL})
     parts, artifacts = [], {}
     for i in range(2):
         ident = f'part-{i + 1:03d}'
@@ -60,9 +60,9 @@ def staged_episode(tmp_path, monkeypatch):
         parts.append(scope)
         folder = tmp_path / 'parts' / ident
         (folder / 'work').mkdir(parents=True)
-        (folder / 'final').mkdir()
+        (folder / 'output').mkdir()
         atomic_json(folder / 'work/partial-export.json', {'mode': df.EXPORT_MODE, 'part_id': ident})
-        mp4 = folder / 'final/burned.mp4'
+        mp4 = folder / 'output/burned.mp4'
         mp4.write_bytes(b'already burned caption')
         artifacts[ident] = mp4
     plan = {'parts': parts, 'audio': {'sample_count': 32000}, 'source': {'sha256': 'f' * 64}}
@@ -71,8 +71,6 @@ def staged_episode(tmp_path, monkeypatch):
     monkeypatch.setattr(partial_finalize, 'validate_partial_export', lambda *a, **kw: (
         {'mode': df.EXPORT_MODE}, {'warnings': [{'reason': 'test quality warning'}]}))
     monkeypatch.setattr(partial_encode, 'validate_partial_encoding', lambda root, ep, ident, **kw: ({}, artifacts[ident]))
-    from mas import notify
-    monkeypatch.setattr(notify, 'enqueue_notification', lambda *a, **kw: None)
     return tmp_path, plan
 
 
@@ -81,8 +79,8 @@ def test_full_delivery_waits_for_first_part_readback(staged_episode, monkeypatch
     root, _ = staged_episode
     monkeypatch.setattr(partial_delivery, 'validate_published_part', lambda *a, **kw: None)
     monkeypatch.setattr(full, 'assemble_parts', lambda *a, **kw: pytest.fail('assembled before first readback'))
-    assert full.publish_full_episode(root, 14, 'drive:delivery', total_timeout=30) is None
-    assert not (root / 'final/delivery-first/full-drive-receipt.json').exists()
+    assert full.publish_full_episode(root, 15, 'drive:delivery', total_timeout=30) is None
+    assert not (root / 'output/delivery-first/full-drive-receipt.json').exists()
 
 
 def test_upload_retry_reuses_assembled_video_and_never_passes_bad_hash(staged_episode, monkeypatch):
@@ -101,11 +99,11 @@ def test_upload_retry_reuses_assembled_video_and_never_passes_bad_hash(staged_ep
     monkeypatch.setattr(full, 'assemble_parts', assemble)
     monkeypatch.setattr(remote, 'upload_verified', upload)
     with pytest.raises(ValueError, match='readback'):
-        full.publish_full_episode(root, 14, 'drive:delivery', total_timeout=30)
-    assert not (root / 'final/delivery-first/full-drive-receipt.json').exists()
-    result = full.publish_full_episode(root, 14, 'drive:delivery', total_timeout=30)
+        full.publish_full_episode(root, 15, 'drive:delivery', total_timeout=30)
+    assert not (root / 'output/delivery-first/full-drive-receipt.json').exists()
+    result = full.publish_full_episode(root, 15, 'drive:delivery', total_timeout=30)
     assert result['status'] == 'DELIVERED_WITH_WARNINGS'
     assert result['single_full_episode_file'] is True
     assert calls == {'assemble': 1, 'upload': 2}
-    assert full.publish_full_episode(root, 14, 'drive:delivery', total_timeout=30) == result
+    assert full.publish_full_episode(root, 15, 'drive:delivery', total_timeout=30) == result
     assert calls == {'assemble': 1, 'upload': 2}

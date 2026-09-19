@@ -154,7 +154,7 @@ def build_part_plan(*, episode, source, audio, vad, captions=None, boundary_poli
         "target_duration_ms": TARGET_DURATION_MS,
     })
     if boundary_policy is not None:
-        if boundary_policy != DELIVERY_BOUNDARY_POLICY or type(episode) is not int or episode < 14:
+        if boundary_policy != DELIVERY_BOUNDARY_POLICY or type(episode) is not int or episode < 1:
             raise PartScopeError("unsupported delivery boundary policy")
         plan['boundary_policy'] = boundary_policy
     plan["parts"] = _planned_parts(plan)
@@ -165,7 +165,7 @@ def validate_part_plan(plan):
     required = {"format", "episode", "source", "audio", "vad", "captions", "target_duration_ms", "parts"}
     if isinstance(plan, dict) and 'boundary_policy' in plan:
         if (plan['boundary_policy'] != DELIVERY_BOUNDARY_POLICY
-                or type(plan.get('episode')) is not int or plan['episode'] < 14):
+                or type(plan.get('episode')) is not int or plan['episode'] < 1):
             raise PartScopeError("unsupported delivery boundary policy")
         required.add('boundary_policy')
     if not isinstance(plan, dict) or set(plan) != required or plan.get("format") != PART_PLAN_FORMAT:
@@ -218,11 +218,11 @@ def validate_part_lineage(plan, part_id, lineage):
     if any(lineage.get(key) != value for key, value in expected.items()):
         raise PartScopeError("derived audio lineage differs from its exact parent part")
     audio = validate_file_record(lineage.get("audio"))
-    if audio["relative_path"] != f"parts/{part_id}/prepare/audio.flac":
+    if audio["relative_path"] != f"parts/{part_id}/work/audio.flac":
         raise PartScopeError("derived audio path belongs to another part")
     if lineage.get("captions") is not None:
         caption = validate_file_record(lineage["captions"])
-        if caption["relative_path"] != f"parts/{part_id}/prepare/captions.vtt":
+        if caption["relative_path"] != f"parts/{part_id}/work/captions.vtt":
             raise PartScopeError("derived captions path belongs to another part")
     if (plan["captions"] is None) != (lineage.get("captions") is None):
         raise PartScopeError("derived caption inventory is missing")

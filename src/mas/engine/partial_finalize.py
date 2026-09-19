@@ -119,9 +119,9 @@ def finalize_partial_episode(root, episode, part_id, *, config_dir=None, total_t
     if (sha256_file(parent_audio) != lineage['parent_audio_sha256']
             or source_record['sha256'] != lineage['parent_source_sha256']):
         raise ValueError('Partial source lineage differs from verified parent chain')
-    prepare = full._require_workflow_directory(child, 'prepare')
-    incoming = full._require_workflow_directory(child, 'translation_input')
-    outgoing = full._require_workflow_directory(child, 'translation_output')
+    prepare = full._require_workflow_directory(child, 'work')
+    incoming = full._require_workflow_directory(child, 'handoff')
+    outgoing = full._require_workflow_directory(child, 'handoff')
     full._require_workflow_directory(child, 'work')
     paths = {
         'source_video': source, 'download_metadata': source_metadata, 'download_marker': download_marker,
@@ -247,7 +247,7 @@ def finalize_partial_episode(root, episode, part_id, *, config_dir=None, total_t
     duration_ms = (lineage['end_sample'] - lineage['start_sample']) * 1000 / lineage['sample_rate_hz']
     if not entries['tr'] or any(entry.start_ms < 0 or entry.end_ms > duration_ms for entry in entries['tr']):
         raise ValueError('Partial subtitle timeline exceeds exact derived audio range')
-    final = child / 'final'
+    final = child / 'output'
     full._safe_output_directory(final, child)
     output_paths = {language + '_srt': final / f'{name}_{part_id}-{language}.srt' for language in entries}
     for language, values in entries.items():
@@ -334,7 +334,7 @@ def validate_partial_export(root, episode, part_id=None, *, total_timeout=300):
         raise ValueError('Partial export inventory empty or duplicated')
     for record in records:
         _verify_file(root, record, deadline)
-    expected_report = f'parts/{part_id}/final/{full._episode_identity(episode)}_{part_id}_PARTIAL_FINALIZATION_REPORT.json'
+    expected_report = f'parts/{part_id}/output/{full._episode_identity(episode)}_{part_id}_PARTIAL_FINALIZATION_REPORT.json'
     if export['report']['relative_path'] != expected_report or export['report'] not in records:
         raise ValueError('Partial report escaped scoped evidence inventory')
     report = read_json(verified_record(root, export['report']))

@@ -72,7 +72,6 @@ def publish_full_episode(root, episode, remote_root, *, total_timeout):
     from .engine.partial_encode import validate_partial_encoding
     from .partial_delivery import validate_published_part, validate_local_tail
     from .remote import upload_verified
-    from .notify import enqueue_notification
     from .source_discovery import CHANNEL_VIDEOS_URL, is_exact_episode_title
     root = Path(root)
     remaining = _clock(total_timeout)
@@ -103,7 +102,7 @@ def publish_full_episode(root, episode, remote_root, *, total_timeout):
         raise ValueError('Full episode does not cover the final source sample')
     identity = {'episode': episode, 'mode': MODE, 'plan_sha256': sha256_file(root / 'work/part-plan.json'),
                 'source': plan['source'], 'parts': records, 'assembler': digest(Path(__file__).read_text(encoding='utf-8'))}
-    folder = root / 'final/delivery-first'
+    folder = root / 'output/delivery-first'
     folder.mkdir(parents=True, exist_ok=True)
     output = folder / ('full-' + digest(identity)[:16] + '.id.mp4')
     encoded_path, receipt_path = folder / 'full-assembled.json', folder / 'full-drive-receipt.json'
@@ -148,6 +147,4 @@ def publish_full_episode(root, episode, remote_root, *, total_timeout):
               'remote': remote, 'quality_report': file_record(quality_path, root),
               'perceptual_acceptance': 'NOT_ASSERTED'}
     write_signed(receipt_path, result, 'full-delivery')
-    enqueue_notification(episode, 'Tam bolum altyazili MP4 Drive teslimi tamamlandi', target,
-                         root=root, kind='terminal')
     return result

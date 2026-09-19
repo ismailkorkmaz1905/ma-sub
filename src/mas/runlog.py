@@ -101,7 +101,6 @@ class RunLog:
             argv=_safe_argv(self.argv),
             git_commit=_git_commit(),
             configured={
-                "gmail": bool(os.getenv("MAS_GMAIL_ADDRESS") and os.getenv("MAS_GMAIL_APP_PASSWORD")),
                 "youtube_cookies": bool(os.getenv("MAS_YTDLP_COOKIES")),
                 "drive": bool(os.getenv("MAS_DRIVE_STRICT_REMOTE")),
                 "runpod": bool(os.getenv("RUNPOD_POD_ID") and os.getenv("RUNPOD_API_KEY")),

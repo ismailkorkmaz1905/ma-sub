@@ -253,8 +253,8 @@ def _pause_episode_budget(local_root, episode, reason, evidence_path, shutdown_p
 
 
 def _validate_local_tr_return(local_root, name):
-    pack = Path(local_root) / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
-    returned = Path(local_root) / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    pack = Path(local_root) / "handoff" / f"{name}_TR_CORRECTION_PACK.zip"
+    returned = Path(local_root) / "handoff" / f"{name}_TR_TEXT_CORRECTED.zip"
     if returned.is_file():
         if not pack.is_file():
             raise RunPodControllerError(
@@ -269,8 +269,8 @@ def _validate_local_tr_return(local_root, name):
 
 
 def _validate_local_semantic_return(local_root, name):
-    pack = Path(local_root) / "translation_input" / f"{name}_SEMANTIC_ALIGNMENT_PACK.zip"
-    returned = Path(local_root) / "translation_output" / f"{name}_SEMANTIC_ALIGNMENT_RETURN.zip"
+    pack = Path(local_root) / "handoff" / f"{name}_SEMANTIC_ALIGNMENT_PACK.zip"
+    returned = Path(local_root) / "handoff" / f"{name}_SEMANTIC_ALIGNMENT_RETURN.zip"
     if not returned.is_file():
         return
     if not pack.is_file():
@@ -415,9 +415,6 @@ def _required_environment():
         "RUNPOD_POD_ID",
         "RUNPOD_API_KEY",
         "MAS_RUNPOD_SSH_KEY",
-        "MAS_GMAIL_ADDRESS",
-        "MAS_GMAIL_APP_PASSWORD",
-        "MAS_NOTIFY_TO",
         "MAS_DRIVE_STRICT_REMOTE",
     )
     values = {}
@@ -931,12 +928,12 @@ def _upload_verified_local_source(
 
 
 def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host, budget=None):
-    source = Path(local_root) / "review" / "audio_review_overrides.json"
+    source = Path(local_root) / "work" / "audio_review_overrides.json"
     if not source.is_file():
         return None
     return _upload_episode_file_verified(
         source,
-        f"{remote_root}/review/audio_review_overrides.json",
+        f"{remote_root}/work/audio_review_overrides.json",
         ssh=ssh,
         scp=scp,
         host=host,
@@ -945,12 +942,12 @@ def _upload_audio_review_overrides(local_root, remote_root, *, ssh, scp, host, b
 
 
 def _upload_audio_review_reset(local_root, remote_root, *, ssh, scp, host, budget=None):
-    source = Path(local_root) / "review" / "audio_review_reset.json"
+    source = Path(local_root) / "work" / "audio_review_reset.json"
     if not source.is_file():
         return None
     return _upload_episode_file_verified(
         source,
-        f"{remote_root}/review/audio_review_reset.json",
+        f"{remote_root}/work/audio_review_reset.json",
         ssh=ssh,
         scp=scp,
         host=host,
@@ -959,12 +956,12 @@ def _upload_audio_review_reset(local_root, remote_root, *, ssh, scp, host, budge
 
 
 def _upload_speaker_evidence(local_root, remote_root, *, ssh, scp, host, budget=None):
-    source = Path(local_root) / "review" / "speaker_evidence_v1.json"
+    source = Path(local_root) / "work" / "speaker_evidence_v1.json"
     if not source.is_file():
         return None
     return _upload_episode_file_verified(
         source,
-        f"{remote_root}/review/speaker_evidence_v1.json",
+        f"{remote_root}/work/speaker_evidence_v1.json",
         ssh=ssh,
         scp=scp,
         host=host,
@@ -1041,9 +1038,6 @@ def _write_runtime_env(path, values, commit):
         "RUNPOD_POD_ID": values["RUNPOD_POD_ID"],
         "RUNPOD_API_KEY": values["RUNPOD_API_KEY"],
         "MAS_RAW_ASR_AUTH_KEY": _derive_raw_asr_auth_key(values["RUNPOD_API_KEY"]),
-        "MAS_GMAIL_ADDRESS": values["MAS_GMAIL_ADDRESS"],
-        "MAS_GMAIL_APP_PASSWORD": values["MAS_GMAIL_APP_PASSWORD"],
-        "MAS_NOTIFY_TO": values["MAS_NOTIFY_TO"],
         "MAS_GIT_COMMIT": commit,
         "MAS_VENV_DIR": "/opt/venv",
         "MAS_RUNTIME_MODE": "immutable",
@@ -1204,7 +1198,7 @@ def _write_delivery_release(local_root, episode, pod_id, audit):
         "episode": episode,
         "pod_id": pod_id,
         "status": "ABSENT",
-        "delivery_sha256": sha256_file(local_root / "final" / "burned_mp4_delivery.json"),
+        "delivery_sha256": sha256_file(local_root / "output" / "burned_mp4_delivery.json"),
         "capacity_state": state_record,
         "capacity_shutdown": shutdown_record,
     }
@@ -1219,7 +1213,7 @@ def _validate_delivery_release(local_root, episode, released_path):
             or release.get("format") != "mas-gpu-released-for-delivery-1"
             or release.get("episode") != episode or release.get("status") != "ABSENT"
             or release.get("delivery_sha256") !=
-                sha256_file(local_root / "final" / "burned_mp4_delivery.json")):
+                sha256_file(local_root / "output" / "burned_mp4_delivery.json")):
         raise RunPodControllerError("transfer-only shutdown/delivery binding changed")
     _capacity_release_evidence(local_root, episode, release.get("pod_id"),
                                release.get("capacity_state"), release.get("capacity_shutdown"))
@@ -1247,45 +1241,11 @@ def _finish_local_encode(local_root, episode, budget):
     audit = safe_relative(local_root, release["capacity_state"]["relative_path"]).parent
     validate_delivery(local_root, episode)
     _write_delivery_release(local_root, episode, release["pod_id"], audit)
-    try:
-        return publish_local_delivery(local_root, episode, remote, total_timeout=budget.check())
-    finally:
-        _drain_notifications(local_root)
-
-
-def _drain_notifications(local_root):
-    try:
-        from .notify import drain_outbox
-        drain_outbox(local_root, total_timeout=60)
-    except Exception as exc:
-        print(f"[EMAIL] drain deferred: {type(exc).__name__}", file=sys.stderr)
-
-
-def drain_cli_notifications(episode):
-    local_root = episode_dir(episode)
-    try:
-        with _controller_lock(ROOT / 'var/production-controller.lock'):
-            reference_path = local_root / 'work/controller-lease.json'
-            if not reference_path.is_file():
-                _drain_notifications(local_root)
-                return
-            from .partial_delivery import _read_bound
-            reference = _read_bound(reference_path)
-            audit = safe_relative(local_root, reference['audit'])
-            state = _read_bound(audit / 'capacity-state.json')
-            if state.get('episode') != episode:
-                raise RunPodControllerError('notification lease belongs to another episode')
-            if state.get('status') == 'NO_CAPACITY' and not state.get('owned_pod_ids'):
-                _drain_notifications(local_root)
-            elif state.get('status') == 'RELEASED':
-                with _drain_after_capacity(local_root, episode, audit):
-                    pass
-    except Exception as exc:
-        print(f'[EMAIL] safe controller drain deferred: {type(exc).__name__}', file=sys.stderr)
+    return publish_local_delivery(local_root, episode, remote, total_timeout=budget.check())
 
 
 @contextmanager
-def _drain_after_capacity(local_root, episode, audit):
+def _record_release_after_capacity(local_root, episode, audit):
     try:
         yield
     finally:
@@ -1298,9 +1258,8 @@ def _drain_after_capacity(local_root, episode, audit):
                 _capacity_release_evidence(local_root, episode, owned[-1],
                     {"relative_path": state_path.relative_to(local_root).as_posix(), "sha256": sha256_file(state_path)},
                     {"relative_path": shutdown_path.relative_to(local_root).as_posix(), "sha256": sha256_file(shutdown_path)})
-                _drain_notifications(local_root)
         except Exception as exc:
-            print(f"[EMAIL] post-release drain deferred: {type(exc).__name__}", file=sys.stderr)
+            print(f"[CAPACITY] release evidence deferred: {type(exc).__name__}", file=sys.stderr)
 
 
 def _production_priority():
@@ -1364,11 +1323,8 @@ def _resume_partial_delivery(local_root, episode):
         if validate_local_tail(local_root, episode, part_id, total_timeout=budget.check()) is not None:
             continue
         if (folder / 'work/gpu-released-for-encode.json').is_file():
-            try:
-                return complete_local_part(local_root, episode, part_id, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
-                                           total_timeout=budget.check())
-            finally:
-                _drain_notifications(local_root)
+            return complete_local_part(local_root, episode, part_id, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
+                                       total_timeout=budget.check())
         handoff_path = local_root / 'work/partial-handoff.json'
         if not delivery_late and handoff_path.is_file():
             from .progressive import validate_partial_handoff
@@ -1397,15 +1353,11 @@ def _resume_partial_delivery(local_root, episode):
                 from .partial_delivery import write_part_release
                 pod_id, audit = released
                 write_part_release(local_root, episode, part_id, pod_id, audit, total_timeout=budget.check())
-                try:
-                    return complete_local_part(local_root, episode, part_id, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
-                                               total_timeout=budget.check())
-                finally:
-                    _drain_notifications(local_root)
+                return complete_local_part(local_root, episode, part_id, os.getenv('MAS_DRIVE_STRICT_REMOTE', ''),
+                                           total_timeout=budget.check())
         return None
     if complete_parts(local_root, episode, total_timeout=budget.check()) is None:
         raise RunPodControllerError('complete-parts inventory changed')
-    _drain_notifications(local_root)
     print('[DELIVERY] planned outputs have verified Drive byte/SHA readback')
     return 0
 
@@ -1472,16 +1424,16 @@ def _part_resume_files(local_root, episode):
     for part in plan['parts']:
         folder = part_directory(local_root, part['part_id'])
         for suffix in ('TR_TEXT_CORRECTED.zip', 'ID_TRANSLATED.zip', 'ID_TRANSLATED.zip.workspace.json'):
-            path = folder / 'translation_output' / f'Muhtemel Ask {episode}.Bolum_{suffix}'
+            path = folder / 'handoff' / f'Muhtemel Ask {episode}.Bolum_{suffix}'
             if path.is_file():
                 paths.append(path)
         for filename in ('audio_review_overrides.json', 'speaker_evidence_v1.json'):
-            path = folder / 'review' / filename
+            path = folder / 'work' / filename
             if path.is_file():
                 paths.append(path)
-        if (folder / 'final/drive_readback_receipt.json').is_file():
+        if (folder / 'output/drive_readback_receipt.json').is_file():
             paths.append(write_worker_delivery_ack(local_root, episode, part['part_id']))
-        elif (folder / 'final/local-tail-ready.json').is_file():
+        elif (folder / 'output/local-tail-ready.json').is_file():
             paths.append(write_worker_tail_ack(local_root, episode, part['part_id']))
     return paths
 
@@ -1521,10 +1473,7 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
                     "MAS_DRIVE_STRICT_REMOTE must not contain line breaks"
                 )
             budget = _episode_budget(local_root, episode)
-            try:
-                return publish_local_delivery(local_root, episode, remote, total_timeout=budget.check())
-            finally:
-                _drain_notifications(local_root)
+            return publish_local_delivery(local_root, episode, remote, total_timeout=budget.check())
         if (local_root / "work/gpu-released-for-encode.json").is_file() and not alignment_recovery:
             return _finish_local_encode(local_root, episode, _episode_budget(local_root, episode))
         values = _required_environment()
@@ -1538,11 +1487,11 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
         if last_status.is_file() and not alignment_recovery:
             previous_job = json.loads(last_status.read_text(encoding="utf-8"))
             expected_returns = {
-                20: local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_TR_TEXT_CORRECTED.zip",
-                21: local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_ID_TRANSLATED.zip",
+                20: local_root / "handoff" / f"Muhtemel Ask {episode}.Bolum_TR_TEXT_CORRECTED.zip",
+                21: local_root / "handoff" / f"Muhtemel Ask {episode}.Bolum_ID_TRANSLATED.zip",
                 SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED:
-                    local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_SEMANTIC_ALIGNMENT_RETURN.zip",
-                WAIT_MP4_SAMPLE: local_root / "review" / "mp4-sample-approval.json",
+                    local_root / "handoff" / f"Muhtemel Ask {episode}.Bolum_SEMANTIC_ALIGNMENT_RETURN.zip",
+                WAIT_MP4_SAMPLE: local_root / "work" / "mp4-sample-approval.json",
             }
             code = previous_job.get("exit_code") if previous_job.get("status") == "EXITED" else None
             budget_path = local_root / "work" / "controller_budget.json"
@@ -1714,7 +1663,7 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
         if not resume_lease:
             reference = {"commit": commit, "source_url": source_url, "audit": audit.relative_to(local_root).as_posix()}
             atomic_json(lease_reference, {"data": reference, "sha256": digest(reference)})
-        with _drain_after_capacity(local_root, episode, audit), CapacityLease(provider, payload, audit, plan,
+        with _record_release_after_capacity(local_root, episode, audit), CapacityLease(provider, payload, audit, plan,
                            ready=None if budget_error or runtime_error else ready, resume=resume_lease) as lease:
             if budget_error:
                 raise budget_error
@@ -1733,11 +1682,8 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
             part_id = json.loads((local_root / 'work/partial-export.json').read_text(encoding='utf-8'))['part_id']
             write_part_release(local_root, episode, part_id, lease.pod['id'], audit,
                                total_timeout=episode_budget.check())
-            try:
-                return complete_local_part(local_root, episode, part_id, values['MAS_DRIVE_STRICT_REMOTE'],
-                                           total_timeout=episode_budget.check())
-            finally:
-                _drain_notifications(local_root)
+            return complete_local_part(local_root, episode, part_id, values['MAS_DRIVE_STRICT_REMOTE'],
+                                       total_timeout=episode_budget.check())
         if result == WAIT_PART_RETURN:
             _pause_episode_budget(local_root, episode, result, local_root / 'work/partial-handoff.json',
                                   audit / 'capacity-shutdown.json')
@@ -1753,7 +1699,7 @@ def _run_remote_episode_once(episode, source_url=None, *, alignment_recovery=Fal
             return result
         if result in (20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED, WAIT_MP4_SAMPLE):
             evidence = (local_root / "work" / "sample-export.json" if result == WAIT_MP4_SAMPLE else
-                        local_root / "translation_input" / (f"Muhtemel Ask {episode}.Bolum_" +
+                        local_root / "handoff" / (f"Muhtemel Ask {episode}.Bolum_" +
                             ("TR_CORRECTION_PACK.zip" if result == 20 else
                              "SEMANTIC_ALIGNMENT_PACK.zip" if result == SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED
                              else "ID_TRANSLATION_PACK.zip")))
@@ -1906,7 +1852,7 @@ def _collection_failure_paths_match(failure, data, status_path):
     if delivery_mode:
         body = dict(manifest)
         tag = body.pop('auth_tag', None)
-        if (type(episode) is not int or episode < 14 or not isinstance(tag, str)
+        if (type(episode) is not int or episode < 1 or not isinstance(tag, str)
                 or not hmac.compare_digest(tag, _tag(body, 'export'))):
             return False
     if (manifest.get("episode") != episode or (not delivery_mode and manifest.get("mode") != expected_mode)
@@ -2005,20 +1951,24 @@ def _remote_attempt_identity(base_input_sha, request_path, status_path):
 
 
 def _remote_input_binding(local_root, source_url, commit, episode):
-    resume_files = [local_root / "translation_output" / f"Muhtemel Ask {episode}.Bolum_{suffix}.zip"
+    resume_files = [local_root / "handoff" / f"Muhtemel Ask {episode}.Bolum_{suffix}.zip"
                     for suffix in ("TR_TEXT_CORRECTED", "SEMANTIC_ALIGNMENT_RETURN", "ID_TRANSLATED")]
     resume_files += [Path(str(resume_files[-1]) + ".workspace.json")]
     resume_files += _part_resume_files(local_root, episode)
-    validated_returns = {path.relative_to(local_root).as_posix(): sha256_file(path)
-                         for path in resume_files if path.is_file() and path.parent.name != 'review'}
+    unvalidated_review_files = {"audio_review_overrides.json", "speaker_evidence_v1.json"}
+    validated_returns = {
+        path.relative_to(local_root).as_posix(): sha256_file(path)
+        for path in resume_files
+        if path.is_file() and path.name not in unvalidated_review_files
+    }
     reset_sha256 = _validated_audio_review_reset_hash(local_root, episode)
     if reset_sha256 is not None:
-        validated_returns["review/audio_review_reset.json"] = reset_sha256
-    resume_files += [local_root / "review" / "audio_review_overrides.json",
-                    local_root / "review" / "audio_review_reset.json",
-                    local_root / "review" / "speaker_evidence_v1.json",
-                    local_root / "review" / "mp4-sample-approval.json",
-                    local_root / "review" / "code-fix-resume.json"]
+        validated_returns["work/audio_review_reset.json"] = reset_sha256
+    resume_files += [local_root / "work" / "audio_review_overrides.json",
+                    local_root / "work" / "audio_review_reset.json",
+                    local_root / "work" / "speaker_evidence_v1.json",
+                    local_root / "work" / "mp4-sample-approval.json",
+                    local_root / "work" / "code-fix-resume.json"]
     inputs = {path.relative_to(local_root).as_posix(): sha256_file(path)
               for path in resume_files if path.is_file()}
     evidence = digest({"source_url": source_url, "files": validated_returns})
@@ -2033,16 +1983,16 @@ def _remote_input_binding(local_root, source_url, commit, episode):
 
 def _validated_audio_review_reset_hash(local_root, episode):
     local_root = Path(local_root)
-    path = local_root / "review" / "audio_review_reset.json"
+    path = local_root / "work" / "audio_review_reset.json"
     if not path.is_file():
         return None
     saved = json.loads(path.read_text(encoding="utf-8"))
     body = saved.get("data")
     name = f"Muhtemel Ask {episode}.Bolum"
     expected_paths = {
-        "prepare/audio_review_v2.json",
-        "prepare/audio_review_v2.recovery.json",
-        f"translation_output/{name}_TR_CORRECTED.zip",
+        "work/audio_review_v2.json",
+        "work/audio_review_v2.recovery.json",
+        f"handoff/{name}_TR_CORRECTED.zip",
     }
     artifacts = body.get("artifacts") if isinstance(body, dict) else None
     if (
@@ -2064,8 +2014,8 @@ def _validated_audio_review_reset_hash(local_root, episode):
         )
     ):
         raise RunPodControllerError("audio-review reset evidence integrity mismatch")
-    pack = local_root / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
-    provisional = local_root / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
+    pack = local_root / "handoff" / f"{name}_TR_CORRECTION_PACK.zip"
+    provisional = local_root / "handoff" / f"{name}_TR_TEXT_CORRECTED.zip"
     validated = validate_tr_correction_output(pack, provisional)
     if (
         body.get("correction_input_sha256") != validated.input_sha256
@@ -2206,7 +2156,7 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
             failure = prior_failure
     else:
         atomic_json(failure_path, {"data": failure, "sha256": digest(failure)})
-    code_fix = local_root / "review/code-fix-resume.json"
+    code_fix = local_root / "work/code-fix-resume.json"
     qualified_code_fix = False
     if code_fix.is_file():
         from .retry_authorization import validate_code_fix_resume
@@ -2240,28 +2190,27 @@ def _guard_failed_remote_job(local_root, episode, source_url, commit):
             checkpoint.get("identity") == identity
             and isinstance(raw_asr_progress, str)
             and raw_asr_progress.startswith("raw_asr:")
-            and "prepare/raw_asr_v2.recovery.json" in relative_paths
-            and "prepare/raw_asr_v2.done.json" not in relative_paths
-            and "prepare/audio.done.json" in relative_paths
+            and "work/raw_asr_v2.recovery.json" in relative_paths
+            and "work/raw_asr_v2.done.json" not in relative_paths
+            and "work/audio.done.json" in relative_paths
             and "source/download.done.json" in relative_paths
             and "source/source.url" in relative_paths
             and any(
-                isinstance(path, str) and path.startswith("prepare/primary_asr/")
+                isinstance(path, str) and path.startswith("work/primary_asr/")
                 for path in relative_paths
             )
             and all(
                 isinstance(path, str)
                 and (
                     path in {
-                        "prepare/audio.done.json",
-                        "prepare/raw_asr_v2.recovery.json",
+                        "work/audio.done.json",
+                        "work/raw_asr_v2.recovery.json",
                         "source/download.done.json",
                         "source/source.url",
                         "work/state.json",
                     }
-                    or path.startswith("prepare/primary_asr/")
+                    or path.startswith("work/primary_asr/")
                     or path.startswith("source/Muhtemel Ask ")
-                    or path.startswith("work/notification-outbox/")
                 )
                 and re.fullmatch(r"[0-9a-f]{64}", item.get("sha256", ""))
                 and type(item.get("size_bytes")) is int
@@ -2341,7 +2290,7 @@ def _partial_failure_identity(local_root, episode):
         raise RunPodControllerError('failed part not present in original plan')
     hashes = {'part_plan_sha256': sha256_file(local_root / 'work/part-plan.json'),
               'part_audio_lineage_sha256': sha256_file(safe_relative(local_root,
-                  f'parts/{part_id}/prepare/audio-part.done.json'))}
+                  f'parts/{part_id}/work/audio-part.done.json'))}
     if (state.get('episode') != episode or state.get('part_id') != part_id
             or any(current.get(key) != value or state.get(key) != value for key, value in hashes.items())):
         raise RunPodControllerError('failed part plan/audio evidence changed')
@@ -2426,19 +2375,9 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
                 current = snapshot.stat()
                 downloaded[record_key] = (snapshot, (current.st_size, current.st_mtime_ns))
                 if (record["relative_path"] in {'work/state.json', 'work/current-part.json'} or re.fullmatch(
-                        r'parts/part-[0-9]{3}/work/state\.json', record['relative_path']) or re.fullmatch(
-                        r"work/notification-outbox/[0-9a-f]{64}\.json", record["relative_path"])):
+                        r'parts/part-[0-9]{3}/work/state\.json', record['relative_path'])):
                     state_path = safe_relative(local_root, record["relative_path"])
                     if state_path.is_file():
-                        if record["relative_path"].startswith("work/notification-outbox/"):
-                            prior_event = json.loads(state_path.read_text(encoding="utf-8"))
-                            remote_event = json.loads(snapshot.read_text(encoding="utf-8"))
-                            prior_data, remote_data = prior_event.get("data"), remote_event.get("data")
-                            if (not isinstance(prior_data, dict) or prior_event.get("sha256") != digest(prior_data)
-                                    or not isinstance(remote_data, dict) or remote_event.get("sha256") != digest(remote_data)):
-                                raise RunPodControllerError("notification checkpoint integrity mismatch")
-                            if all(prior_data.get(key) == remote_data.get(key) for key in ("episode", "event", "kind", "details")):
-                                continue  # Local SMTP outcome/attempts remain authoritative.
                         retained = local_root / "work" / "remote-checkpoints" / sha256_file(state_path) / state_path.name
                         retained.parent.mkdir(parents=True, exist_ok=True)
                         if not retained.exists():
@@ -2480,13 +2419,13 @@ def _collect_diagnostics(episode, local_root, remote_root, ssh, scp, host, retri
     if manifest.get("identity") != expected_identity or manifest.get("kind") != "diagnostics":
         raise RunPodControllerError("diagnostic manifest identity mismatch")
     name = f"Muhtemel Ask {episode}.Bolum"
-    allowed = {f"translation_input/{name}_TR_CORRECTION_PACK.zip", "prepare/audio_review_v2.json",
-               "prepare/forced_alignment_units/resume-identity.json",
-               "prepare/forced_alignment_units/components/latest-conflict-failure.json",
-               "prepare/forced_alignment_units/components/latest-resume-scope-violation.json",
-               "source/download.done.json", "prepare/audio.done.json", "prepare/raw_asr_v2.done.json",
-               "prepare/audio_review_v2.recovery.json", f"translation_output/{name}_TR_TEXT_CORRECTED.zip",
-               f"translation_output/{name}_TR_CORRECTED.zip"}
+    allowed = {f"handoff/{name}_TR_CORRECTION_PACK.zip", "work/audio_review_v2.json",
+               "work/forced_alignment_units/resume-identity.json",
+               "work/forced_alignment_units/components/latest-conflict-failure.json",
+               "work/forced_alignment_units/components/latest-resume-scope-violation.json",
+               "source/download.done.json", "work/audio.done.json", "work/raw_asr_v2.done.json",
+               "work/audio_review_v2.recovery.json", f"handoff/{name}_TR_TEXT_CORRECTED.zip",
+               f"handoff/{name}_TR_CORRECTED.zip"}
     if manifest.get('part_id') is not None:
         from .retry_authorization import retry_diagnostic_layout
         layout = retry_diagnostic_layout(episode, manifest['part_id'])
@@ -2494,7 +2433,7 @@ def _collect_diagnostics(episode, local_root, remote_root, ssh, scp, host, retri
         allowed.update(prefix + relative for prefix in layout['prefixes'] for relative in (
             'resume-identity.json', 'components/latest-conflict-failure.json',
             'components/latest-resume-scope-violation.json'))
-        allowed.add(f"parts/{manifest['part_id']}/prepare/audio_review_v2.recovery.json")
+        allowed.add(f"parts/{manifest['part_id']}/work/audio_review_v2.recovery.json")
     records = manifest.get("files")
     if (not isinstance(records, list) or len(records) > len(allowed)
             or any(not isinstance(record, dict) or record.get("relative_path") not in allowed for record in records)
@@ -2558,7 +2497,7 @@ def _collect_partial_results(exit_code, episode, local_root, remote_root, ssh, s
         for item in records:
             relative = item['relative_path']
             if not (relative.startswith(f'parts/{part_id}/') or relative.startswith('source/')
-                    or relative.startswith('prepare/') or relative in {'work/part-plan.json', 'work/part-vad.json'}):
+                    or relative.startswith('work/') or relative in {'work/part-plan.json', 'work/part-vad.json'}):
                 raise RunPodControllerError('partial transfer escaped its part and parent evidence')
             if relative == f'parts/{part_id}/work/{filename}':
                 continue
@@ -2571,12 +2510,12 @@ def _collect_partial_results(exit_code, episode, local_root, remote_root, ssh, s
                 if not captions['relative_path'].startswith('source/'):
                     raise RunPodControllerError('partial caption dependency escaped source evidence')
                 _download_record(captions, local_root, remote_root, scp, host, budget)
-            lineage_path = folder / 'prepare/audio-part.done.json'
+            lineage_path = folder / 'work/audio-part.done.json'
             if lineage_path.is_file():
                 lineage = _read_bound(lineage_path)
                 derived_captions = lineage.get('captions')
                 if derived_captions is not None and derived_captions['relative_path'] not in relatives:
-                    if not derived_captions['relative_path'].startswith(f'parts/{part_id}/prepare/'):
+                    if not derived_captions['relative_path'].startswith(f'parts/{part_id}/work/'):
                         raise RunPodControllerError('partial derived caption dependency escaped its part')
                     _download_record(derived_captions, local_root, remote_root, scp, host, budget)
         alias = folder / 'work' / filename
@@ -2595,7 +2534,7 @@ def _collect_partial_results(exit_code, episode, local_root, remote_root, ssh, s
             if manifest['kind'] == 'id':
                 from .engine.translation_workspace import prepare_id_translation_workspaces
                 prepare_id_translation_workspaces(safe_relative(local_root, manifest['pack']['relative_path']),
-                                                  folder / 'translation_input/id-workers')
+                                                  folder / 'handoff/id-workers')
         else:
             from .engine.partial_finalize import validate_partial_export
             validate_partial_export(local_root, episode, part_id, total_timeout=budget.check())
@@ -2615,7 +2554,7 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
         raise RunPodControllerError('worker has no unpublished part but local completion evidence is incomplete; '
                                     'refusing a no-progress GPU continuation')
     if exit_code == ALIGNMENT_RECOVERY_COMPLETE:
-        for relative in ("prepare/forced_alignment_v2.json", "prepare/forced_alignment_v2.done.json", "work/state.json"):
+        for relative in ("work/forced_alignment_v2.json", "work/forced_alignment_v2.done.json", "work/state.json"):
             size, signature = _remote_file_signature(ssh, f"{remote_root}/{relative}", budget=budget)
             _download_record({"relative_path": relative, "size_bytes": size, "sha256": signature},
                              local_root, remote_root, scp, host, budget)
@@ -2664,11 +2603,11 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
     elif exit_code == SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED:
         handoff = f"{name}_SEMANTIC_ALIGNMENT_PACK.zip"
     if handoff:
-        local_pack = local_root / "translation_input" / handoff
+        local_pack = local_root / "handoff" / handoff
         local_pack.parent.mkdir(parents=True, exist_ok=True)
-        remote_pack = f"{remote_root}/translation_input/{handoff}"
+        remote_pack = f"{remote_root}/handoff/{handoff}"
         size, signature = _remote_file_signature(ssh, remote_pack, budget=budget)
-        _download_record({"relative_path": f"translation_input/{handoff}",
+        _download_record({"relative_path": f"handoff/{handoff}",
                           "size_bytes": size, "sha256": signature},
                          local_root, remote_root, scp, host, budget)
         if exit_code == 21:
@@ -2677,7 +2616,7 @@ def _collect_remote_results(exit_code, episode, local_root, remote_root, ssh, sc
                 schema = json.loads(archive.read("schema.json"))
             if "production_policy" in schema:
                 from .engine.translation_workspace import prepare_id_translation_workspaces
-                prepare_id_translation_workspaces(local_pack, local_root / "translation_input/id-workers")
+                prepare_id_translation_workspaces(local_pack, local_root / "handoff/id-workers")
         print(f"[HANDOFF] downloaded {local_pack}")
     if exit_code not in (0, 20, 21, SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED,
                          READY_FOR_DELIVERY, READY_FOR_LOCAL_ENCODE, WAIT_MP4_SAMPLE):
@@ -2688,9 +2627,9 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                         alignment_recovery=False):
     name = f"Muhtemel Ask {episode}.Bolum"
     local_root = episode_dir(episode)
-    code_fix_path = local_root / "review/code-fix-resume.json"
+    code_fix_path = local_root / "work/code-fix-resume.json"
     if code_fix_path.is_file():
-        values = dict(values, MAS_CODE_FIX_RESUME=f"/workspace/ma-sub/EPISODES/{name}/review/code-fix-resume.json")
+        values = dict(values, MAS_CODE_FIX_RESUME=f"/workspace/ma-sub/EPISODES/{name}/work/code-fix-resume.json")
     key = Path(values["MAS_RUNPOD_SSH_KEY"]).resolve()
     cookie = Path(values["MAS_YTDLP_COOKIES"]).resolve() if values.get("MAS_YTDLP_COOKIES") else None
     client = RunPodClient(values["RUNPOD_POD_ID"], values["RUNPOD_API_KEY"])
@@ -2786,9 +2725,9 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                     f"{name}_SEMANTIC_ALIGNMENT_RETURN.zip",
                     f"{name}_ID_TRANSLATED.zip",
                 ):
-                    local_return = local_root / "translation_output" / filename
+                    local_return = local_root / "handoff" / filename
                     if local_return.is_file():
-                        destination = f"{remote_root}/translation_output/{filename}"
+                        destination = f"{remote_root}/handoff/{filename}"
                         receipt = _upload_episode_file_verified(local_return, destination, ssh=ssh, scp=scp, host=host,
                                                                 budget=budget, reuse_verified=True)
                         print(f"[RUNPOD] return upload verified: {filename}; "
@@ -2803,9 +2742,9 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                                                             host=host, budget=budget)
                 speaker_receipt = _upload_speaker_evidence(local_root, remote_root, ssh=ssh, scp=scp,
                                                             host=host, budget=budget)
-                approval = local_root / "review" / "mp4-sample-approval.json"
+                approval = local_root / "work" / "mp4-sample-approval.json"
                 if approval.is_file():
-                    _upload_episode_file_verified(approval, f"{remote_root}/review/{approval.name}",
+                    _upload_episode_file_verified(approval, f"{remote_root}/work/{approval.name}",
                                                    ssh=ssh, scp=scp, host=host, budget=budget)
             if code_fix_path.is_file():
                 from .retry_authorization import validate_code_fix_resume
@@ -2814,7 +2753,7 @@ def _run_remote_session(episode, source_url, *, values, commit, budget, pod, res
                 relatives = {record["relative_path"] for record in permit["diagnostics"]}
                 relatives.update(record["relative_path"] for record in permit["predecessors"])
                 relatives.update({permit["fixture_result"]["relative_path"], "work/controller_budget.json",
-                                  "work/remote-failure-invariant.json", "review/code-fix-resume.json"})
+                                  "work/remote-failure-invariant.json", "work/code-fix-resume.json"})
                 for relative in sorted(relatives):
                     _upload_episode_file_verified(safe_relative(local_root, relative), f"{remote_root}/{relative}",
                                                  ssh=ssh, scp=scp, host=host, budget=budget, reuse_verified=True)

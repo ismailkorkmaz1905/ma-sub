@@ -496,7 +496,7 @@ def _empty_delivery_scope(schema):
     return (schema.get('publication_mode') == 'delivery-first-v1'
             and schema.get('quality_status') == 'NOT_STRICT'
             and schema.get('empty_scope') is True
-            and type(schema.get('episode')) is int and schema['episode'] >= 14)
+            and type(schema.get('episode')) is int and schema['episode'] > 0)
 
 
 def validate_aligned_turkish_schema(schema: Mapping[str, Any]) -> dict[str, Any]:

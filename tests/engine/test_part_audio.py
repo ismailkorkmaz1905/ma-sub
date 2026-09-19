@@ -21,7 +21,7 @@ def synthetic_parents(tmp_path, monkeypatch):
     monkeypatch.setattr(part_scope, "TARGET_DURATION_MS", 2000)
     part_audio._VERIFIED_AUDIO.clear()
     source = tmp_path / "source" / "episode.mp4"
-    audio = tmp_path / "prepare" / "audio.wav"
+    audio = tmp_path / "work" / "audio.wav"
     source.parent.mkdir()
     audio.parent.mkdir()
     source.write_bytes(b"synthetic immutable video identity")
@@ -126,7 +126,7 @@ def test_failed_audio_producer_records_failure_and_does_not_repeat(synthetic_par
     with pytest.raises(PartScopeError, match="unchanged derived-audio failure"):
         extract_part_audio(root, 14, "part-001", total_timeout=60)
     assert count == ["part-001-extract"]
-    assert not (root / "parts/part-001/prepare/audio-part.done.json").exists()
+    assert not (root / "parts/part-001/work/audio-part.done.json").exists()
 
 
 def test_tampered_child_audio_and_caption_fail_readback(synthetic_parents):

@@ -9,7 +9,7 @@ from mas.reliability import BudgetExceeded, digest
 
 def _release(path):
     body = {"state_sha256": "a" * 64,
-            "owned_pods": [{"pod_id": "owned-ep13-pod", "status": "ABSENT",
+            "owned_pods": [{"pod_id": "owned-current-pod", "status": "ABSENT",
                             "error_type": None}]}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"data": body, "sha256": digest(body)}), encoding="utf-8")
@@ -23,7 +23,7 @@ def _handoff(path):
 def test_verified_handoff_wait_consumes_the_same_wall_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("MAS_EPISODE_BUDGET_SECONDS", "400")
     started = datetime(2026, 9, 7, tzinfo=timezone.utc)
-    handoff = tmp_path / "translation_input/return.zip"
+    handoff = tmp_path / "handoff/return.zip"
     release = tmp_path / "work/capacity/capacity-state.json"
     _handoff(handoff)
     _release(release)
@@ -59,7 +59,7 @@ def test_unclosed_active_window_charges_crash_and_offline_time(tmp_path, monkeyp
 @pytest.mark.parametrize("reason", [0, 1, 22, 99])
 def test_budget_pause_rejects_non_handoff_reason(tmp_path, reason):
     started = datetime(2026, 9, 7, tzinfo=timezone.utc)
-    handoff = tmp_path / "translation_input/return.zip"
+    handoff = tmp_path / "handoff/return.zip"
     release = tmp_path / "work/capacity/capacity-state.json"
     _handoff(handoff)
     _release(release)
@@ -73,7 +73,7 @@ def test_budget_pause_rejects_non_handoff_reason(tmp_path, reason):
 
 def test_budget_pause_requires_verified_release_and_evidence(tmp_path):
     started = datetime(2026, 9, 7, tzinfo=timezone.utc)
-    handoff = tmp_path / "translation_input/return.zip"
+    handoff = tmp_path / "handoff/return.zip"
     release = tmp_path / "work/capacity/capacity-state.json"
     runpod_controller._episode_budget(tmp_path, 13, now=started)
 
@@ -92,7 +92,7 @@ def test_budget_pause_requires_verified_release_and_evidence(tmp_path):
 
 def test_identical_pause_is_idempotent_but_changed_evidence_fails(tmp_path):
     started = datetime(2026, 9, 7, tzinfo=timezone.utc)
-    handoff = tmp_path / "translation_input/return.zip"
+    handoff = tmp_path / "handoff/return.zip"
     release = tmp_path / "work/capacity/capacity-state.json"
     _handoff(handoff)
     _release(release)

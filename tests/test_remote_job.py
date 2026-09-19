@@ -163,18 +163,18 @@ def test_terminal_identity_is_not_restarted(tmp_path, monkeypatch):
 
 
 def test_checkpoint_manifest_hashes_only_asr_checkpoint_layout(tmp_path):
-    prepare = tmp_path / "EPISODES/Muhtemel Ask 13.Bolum/prepare"
-    primary = prepare / "primary_asr"
+    work = tmp_path / "EPISODES/Muhtemel Ask 15.Bolum/work"
+    primary = work / "primary_asr"
     primary.mkdir(parents=True)
     (primary / "one.json").write_bytes(b"one")
-    (prepare / "raw_asr_v2.recovery.json").write_bytes(b"recovery")
-    (prepare / "raw_asr_v2.json").write_bytes(b"final")
-    (prepare / "unrelated.json").write_bytes(b"skip")
-    result = checkpoint_manifest(tmp_path, 13, COMMIT)
+    (work / "raw_asr_v2.recovery.json").write_bytes(b"recovery")
+    (work / "raw_asr_v2.json").write_bytes(b"final")
+    (work / "unrelated.json").write_bytes(b"skip")
+    result = checkpoint_manifest(tmp_path, 15, COMMIT)
     assert [item["relative_path"] for item in result["files"]] == [
-        "prepare/primary_asr/one.json",
-        "prepare/raw_asr_v2.json",
-        "prepare/raw_asr_v2.recovery.json",
+        "work/primary_asr/one.json",
+        "work/raw_asr_v2.json",
+        "work/raw_asr_v2.recovery.json",
     ]
     assert all(item["size_bytes"] > 0 and len(item["sha256"]) == 64 for item in result["files"])
     assert all((tmp_path / item["snapshot_path"]).read_bytes() for item in result["files"])
@@ -182,16 +182,16 @@ def test_checkpoint_manifest_hashes_only_asr_checkpoint_layout(tmp_path):
 
 def test_checkpoint_manifest_rejects_symlink_outside_episode(tmp_path):
     from pathlib import Path
-    prepare = tmp_path / "EPISODES/Muhtemel Ask 13.Bolum/prepare/primary_asr"
-    prepare.mkdir(parents=True)
+    work = tmp_path / "EPISODES/Muhtemel Ask 15.Bolum/work/primary_asr"
+    work.mkdir(parents=True)
     outside = tmp_path / "outside.json"
     outside.write_text("{}", encoding="utf-8")
     try:
-        (prepare / "escaped.json").symlink_to(outside)
+        (work / "escaped.json").symlink_to(outside)
     except OSError:
         pytest.skip("file symlinks unavailable")
     with pytest.raises(RemoteJobError, match="escaped the episode root"):
-        checkpoint_manifest(tmp_path, 13, COMMIT)
+        checkpoint_manifest(tmp_path, 15, COMMIT)
 
 
 def test_log_reads_bounded_chunks(tmp_path):
@@ -223,8 +223,8 @@ def test_poll_returns_bound_status_log_and_checkpoint_snapshot(tmp_path):
     paths = remote_job._paths(tmp_path, 13, identity["token"])
     paths["log"].parent.mkdir(parents=True)
     paths["log"].write_bytes(b"x" * 65537)
-    checkpoint = paths["episode"] / "prepare" / "raw_asr_v2.json"
-    checkpoint.parent.mkdir(parents=True)
+    checkpoint = paths["episode"] / "work" / "raw_asr_v2.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint.write_bytes(b"checkpoint")
 
     result = poll_job(tmp_path, 13, COMMIT, max_bytes=65536)

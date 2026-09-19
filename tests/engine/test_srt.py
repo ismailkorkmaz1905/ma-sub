@@ -64,7 +64,7 @@ class SRTTests(unittest.TestCase):
             SubtitleEntry(2, 4_000, 5_500, "Masyaallah, kamu baik-baik saja."),
         ]
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "Muhtemel Ask 12.Bolum.id-final.srt"
+            path = Path(temporary) / "Muhtemel Ask 15.Bolum.id-final.srt"
             write_srt(path, entries)
 
             self.assertEqual(path.read_bytes().decode("utf-8"), render_srt(entries))

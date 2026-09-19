@@ -1,4 +1,4 @@
-"""EP12 operational guards. No model calls, text edits, or silent fallbacks.
+"""Operational guards. No model calls, text edits, or silent fallbacks.
 
 The 4-hour deadline measures wall time, including external handoffs. It is a
 budget, not a completion guarantee. A deadline must never turn failed QA into
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-POLICY_VERSION = 'ep12-1'
+POLICY_VERSION = 'mas-1'
 
 
 class IntegrityError(ValueError):

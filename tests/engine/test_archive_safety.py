@@ -50,7 +50,7 @@ class ArchiveSafetyTests(unittest.TestCase):
         schema = make_schema(2)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            valid = root / "Muhtemel Ask 12.Bolum_TRANSLATION_PACK.zip"
+            valid = root / "Muhtemel Ask 15.Bolum_TRANSLATION_PACK.zip"
             crafted = root / "crafted-empty-batch.zip"
             create_translation_pack(schema, valid)
             with zipfile.ZipFile(valid, "r") as archive:

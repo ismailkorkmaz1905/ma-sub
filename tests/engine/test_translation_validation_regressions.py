@@ -451,8 +451,8 @@ class TranslationValidationRegressionTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            pack_path = root / "Muhtemel Ask 12.Bolum_TRANSLATION_PACK.zip"
-            translated_path = root / "Muhtemel Ask 12.Bolum_TRANSLATED.zip"
+            pack_path = root / "Muhtemel Ask 15.Bolum_TRANSLATION_PACK.zip"
+            translated_path = root / "Muhtemel Ask 15.Bolum_TRANSLATED.zip"
             manifest = create_translation_pack(schema, pack_path)
             write_translated_zip(translated_path, schema, records)
 

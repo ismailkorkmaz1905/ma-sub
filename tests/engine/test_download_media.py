@@ -215,7 +215,7 @@ class MediaIntegrityTests(unittest.TestCase):
             source = root / "delayed.mp4"
             _make_source(source, duration=5, audio_offset=2)
 
-            result = extract_audio(source, root / "prepare")
+            result = extract_audio(source, root / "work")
             timeline = result.metadata["source_timeline"]
 
             self.assertEqual(timeline["alignment_version"], AUDIO_ALIGNMENT_VERSION)
@@ -230,7 +230,7 @@ class MediaIntegrityTests(unittest.TestCase):
                 _pcm_rms(result.audio_path, start_seconds=2.2, duration_seconds=0.5),
                 100.0,
             )
-            self.assertTrue(extract_audio(source, root / "prepare").resumed)
+            self.assertTrue(extract_audio(source, root / "work").resumed)
 
     def test_truncated_faststart_source_fails_eof_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -272,13 +272,13 @@ class MediaIntegrityTests(unittest.TestCase):
             source = root / "source.mkv"
             _make_source(source)
             with self.assertRaisesRegex(MediaError, "does not match"):
-                extract_audio(source, root / "prepare", source_sha256="a" * 64)
+                extract_audio(source, root / "work", source_sha256="a" * 64)
 
     def test_audio_marker_without_alignment_evidence_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source.mkv"
-            prepare = root / "prepare"
+            prepare = root / "work"
             _make_source(source)
             result = extract_audio(source, prepare)
             marker = json.loads(result.marker_path.read_text(encoding="utf-8"))
@@ -526,7 +526,7 @@ class DownloadResumeTests(unittest.TestCase):
             root = Path(temporary)
             fixture = root / "fixture.mkv"
             source_dir = root / "source"
-            episode_stem = "Muhtemel Ask 12.Bolum"
+            episode_stem = "Muhtemel Ask 15.Bolum"
             _make_source(fixture)
             state = _FakeYtDlpState(fixture)
 
@@ -568,7 +568,7 @@ class DownloadResumeTests(unittest.TestCase):
                     self.url,
                     source_dir,
                     attempts=1,
-                    output_stem="Muhtemel Ask 11.Bolum",
+                    output_stem="Muhtemel Ask 15.Bolum",
                 )
 
             self.assertEqual(legacy.video_path.name, "source.mkv")
@@ -683,7 +683,7 @@ class DownloadResumeTests(unittest.TestCase):
             fixture = root / "fixture.mkv"
             source_dir = root / "source"
             source_dir.mkdir()
-            episode_stem = "Muhtemel Ask 12.Bolum"
+            episode_stem = "Muhtemel Ask 15.Bolum"
             _make_source(fixture)
             (source_dir / "source.mp4").write_bytes(b"legacy source")
             (source_dir / "source-id.srt").write_text("legacy", encoding="utf-8")

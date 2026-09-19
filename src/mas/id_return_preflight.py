@@ -18,8 +18,8 @@ from .reliability import IntegrityError, atomic_json, digest, file_digest
 def preflight_local_id_return(local_root, episode, config_dir):
     local_root, config_dir = Path(local_root), Path(config_dir)
     name = f"Muhtemel Ask {episode}.Bolum"
-    pack = local_root / "translation_input" / f"{name}_ID_TRANSLATION_PACK.zip"
-    returned = local_root / "translation_output" / f"{name}_ID_TRANSLATED.zip"
+    pack = local_root / "handoff" / f"{name}_ID_TRANSLATION_PACK.zip"
+    returned = local_root / "handoff" / f"{name}_ID_TRANSLATED.zip"
     if not returned.is_file():
         return None
     report_path = local_root / "work" / "id_return_local_preflight.json"

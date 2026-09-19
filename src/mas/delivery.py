@@ -8,7 +8,6 @@ from .reliability import atomic_json, file_digest as sha256_file
 from .remote import upload_verified
 from .source_discovery import CHANNEL_VIDEOS_URL, is_exact_episode_title
 from .state import load, set_stage
-from .notify import enqueue_notification as notify
 
 
 READY_FOR_DELIVERY = 22
@@ -24,8 +23,8 @@ SEMANTIC_ALIGNMENT_HANDOFF_REQUIRED = 29
 def finalization_report_path(root, episode):
     root = Path(root)
     name = f"Muhtemel Ask {episode}.Bolum"
-    strict = root / "final" / f"{name}_FINALIZATION_REPORT_V2.json"
-    semantic = root / "final" / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
+    strict = root / "output" / f"{name}_FINALIZATION_REPORT_V2.json"
+    semantic = root / "output" / f"{name}_SEMANTIC_FINALIZATION_REPORT.json"
     present = [path for path in (strict, semantic) if path.is_file()]
     if len(present) != 1:
         raise ValueError("episode must have exactly one strict or semantic finalization report")
@@ -67,7 +66,7 @@ def _sample_records(root, receipt):
     approval = receipt.get("sample_approval")
     if approval is None:
         return []
-    records = [{"relative_path": "review/mp4-sample-approval.json", "size_bytes": approval["bytes"],
+    records = [{"relative_path": "work/mp4-sample-approval.json", "size_bytes": approval["bytes"],
                 "sha256": approval["sha256"]}]
     approval_file = verified_record(root, records[0])
     approved = json.loads(approval_file.read_text(encoding="utf-8"))
@@ -96,7 +95,7 @@ def _sample_records(root, receipt):
 def validate_delivery(root, episode):
     root = Path(root)
     name = f"Muhtemel Ask {episode}.Bolum"
-    delivery_path = root / "final" / "burned_mp4_delivery.json"
+    delivery_path = root / "output" / "burned_mp4_delivery.json"
     delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
     report_path = finalization_report_path(root, episode)
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -151,7 +150,7 @@ def write_delivery_export(root, episode):
     root = Path(root)
     report_path = finalization_report_path(root, episode)
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    delivery_path = root / "final" / "burned_mp4_delivery.json"
+    delivery_path = root / "output" / "burned_mp4_delivery.json"
     delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
     records = list(report["input_files"].values()) + list(report["outputs"].values())
     mp4_record = delivery["outputs"]["mp4"]
@@ -205,38 +204,33 @@ def publish_local_delivery(root, episode, remote_root, *, total_timeout=3600):
     state = load(state_path, episode)
     set_stage(state_path, state, "drive_readback", "running")
     evidence = {"started_at": datetime.now(timezone.utc).isoformat(), "status": "RUNNING"}
-    evidence["start_notification"] = notify(episode, "Drive aktarimi basladi", "MP4 byte/SHA-256 readback yapiliyor.")
     event_path = root / "work" / "drive-publication.json"
     atomic_json(event_path, evidence)
     try:
         receipt = upload_verified(mp4, f"{remote_root.rstrip('/')}/{title}.mp4",
                                   total_timeout=remaining(),
-                                  preservation_receipt=root / "final" / "drive-preservation.json",
+                                  preservation_receipt=root / "output" / "drive-preservation.json",
                                   require_drive_preflight=True)
         # Local inputs must remain unchanged across the complete network transaction.
         validate_delivery(root, episode)
         remaining()
-        receipt_path = root / "final" / "drive_readback_receipt.json"
+        receipt_path = root / "output" / "drive_readback_receipt.json"
         receipt_body = {"status": "PASS", "mode": delivery_mode, "files": [receipt],
-                        "delivery_sha256": sha256_file(root / "final" / "burned_mp4_delivery.json"),
+                        "delivery_sha256": sha256_file(root / "output" / "burned_mp4_delivery.json"),
                         "perceptual_acceptance": "NOT_ASSERTED"}
         atomic_json(receipt_path, receipt_body)
         if delivery_mode == "semantic-block-v1":
             atomic_json(
-                root / "final" / "delivery-scopes" / delivery["delivery_scope"]
+                root / "output" / "delivery-scopes" / delivery["delivery_scope"]
                 / "drive_readback_receipt.json",
                 receipt_body,
             )
         set_stage(state_path, state, "drive_readback", "pass", receipt=str(receipt_path),
                   sha256=sha256_file(receipt_path))
         evidence["status"] = "PASS"
-        evidence["result_notification"] = notify(episode, "Drive aktarimi tamamlandi", str(receipt_path),
-                                                 root=root, kind="terminal")
     except Exception as exc:
         set_stage(state_path, state, "drive_readback", "failed", error=str(exc))
         evidence.update(status="FAILED", error_type=type(exc).__name__)
-        evidence["result_notification"] = notify(episode, "Drive aktarimi basarisiz", type(exc).__name__,
-                                                 root=root, kind="terminal")
         raise
     finally:
         evidence.update(ended_at=datetime.now(timezone.utc).isoformat(),

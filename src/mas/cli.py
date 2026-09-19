@@ -10,18 +10,15 @@ from pathlib import Path
 from .audio_review_ui import run_audio_review_ui
 from .config import episode_dir
 from .engine.download import DownloadError, _validated_cookie_file
-from .notify import enqueue_notification, send_email
 from .pipeline import run, status, status_summary
 from .runlog import RunLog
-from .runpod_controller import RunPodCleanupRequired, drain_cli_notifications, run_remote_episode
+from .runpod_controller import RunPodCleanupRequired, run_remote_episode
 
 
 def _runpod_preflight(*, worker_only=False):
     failures = []
 
     required = [
-        "MAS_GMAIL_ADDRESS",
-        "MAS_GMAIL_APP_PASSWORD",
         "RUNPOD_POD_ID",
         "RUNPOD_API_KEY",
     ]
@@ -185,39 +182,6 @@ def test():
     return subprocess.call([sys.executable, "-m", "pytest", "-q"])
 
 
-def notify_test():
-    result = send_email(None, "bildirim testi", "MAS e-posta bildirimi çalışıyor.")
-    if result.get("status") != "sent":
-        raise RuntimeError("MAS_GMAIL_ADDRESS and MAS_GMAIL_APP_PASSWORD are required")
-    print(f"Test email sent to {result['recipient']}")
-    return 0
-
-
-def _should_notify_run_failure(exc):
-    if getattr(exc, "_mas_notification_sent", False):
-        return False
-    message = str(exc).lower()
-    if any(
-        text in message
-        for text in (
-            "not enough free gpus",
-            "no free gpu",
-            "capacity-bound",
-            "remote pipeline failed with exit code",
-        )
-    ):
-        return False
-    return True
-
-
-def clean(episode, destroy=False):
-    target = episode_dir(episode) / "work"
-    print(("DELETE " if destroy else "DRY-RUN ") + str(target))
-    if destroy:
-        shutil.rmtree(target, ignore_errors=True)
-    return 0
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="mas")
     commands = parser.add_subparsers(
@@ -239,7 +203,6 @@ def main(argv=None):
     doctor_modes.add_argument("--strict-runpod-worker", action="store_true", help=argparse.SUPPRESS)
     doctor_modes.add_argument("--controller", action="store_true")
     commands.add_parser("test", help="run the local test suite")
-    commands.add_parser("notify-test")
     pilot_parser = commands.add_parser("subtitle-pilot")
     pilot_parser.add_argument("episode", type=int)
     pilot_parser.add_argument("--pack")
@@ -253,20 +216,10 @@ def main(argv=None):
     pilot_parser.add_argument("--offset-ms", type=int, default=0)
     review_audio_parser = commands.add_parser("review-audio")
     review_audio_parser.add_argument("episode", type=int)
-    emergency_parser = commands.add_parser("emergency-segment")
-    emergency_parser.add_argument("episode", type=int)
-    emergency_actions = emergency_parser.add_subparsers(dest="action", required=True)
-    emergency_prepare = emergency_actions.add_parser("prepare")
-    emergency_prepare.add_argument("--corrected-zip")
-    emergency_finalize = emergency_actions.add_parser("finalize")
-    emergency_finalize.add_argument("--translations", required=True)
     recovery_parser = commands.add_parser("plan-alignment-recovery")
     recovery_parser.add_argument("episode", type=int)
     recovery_parser.add_argument("--part-id")
     recovery_parser.add_argument("--max-new-ctc-calls", type=int, required=True)
-    clean_parser = commands.add_parser("clean")
-    clean_parser.add_argument("episode", type=int)
-    clean_parser.add_argument("--destroy", action="store_true")
     args = parser.parse_args(argv)
     context = (
         RunLog(args.episode, ["mas", *(argv or sys.argv[1:])])
@@ -300,16 +253,11 @@ def main(argv=None):
                     result = doctor()
             elif args.command == "test":
                 result = test()
-            elif args.command == "notify-test":
-                result = notify_test()
             elif args.command == "subtitle-pilot":
                 from .subtitle.pilot_command import run_pilot_command
                 result = run_pilot_command(args)
             elif args.command == "review-audio":
                 result = run_audio_review_ui(args.episode)
-            elif args.command == "emergency-segment":
-                from .emergency_segment import run_emergency_segment_command
-                result = run_emergency_segment_command(args)
             elif args.command == "plan-alignment-recovery":
                 from .retry_authorization import propose_alignment_recovery
                 target = propose_alignment_recovery(
@@ -317,28 +265,12 @@ def main(argv=None):
                     part_id=args.part_id, max_new_ctc_calls=args.max_new_ctc_calls)
                 print(f"PROPOSAL NOT AUTHORIZED: {target}")
                 result = 0
-            else:
-                result = clean(args.episode, args.destroy)
             if run_log:
                 run_log.finish(result)
             return result
         except Exception as exc:
             if run_log:
                 run_log.record_exception()
-            if args.command not in {"subtitle-pilot", "plan-alignment-recovery"} and getattr(args, "episode", None) and _should_notify_run_failure(exc):
-                details = f"Sonuç: çalıştırma tamamlanamadı.\nHata: {type(exc).__name__}: {exc}"
-                if run_log:
-                    details += f"\nSon log: {run_log.path}"
-                if isinstance(exc, RunPodCleanupRequired):
-                    details += "\nSonraki adım: owned Pod yokluğunu dışarıdan doğrulayın; doğrulamadan yeniden başlatmayın."
-                else:
-                    details += f"\nSonraki adım: logu inceleyip ./mas run {args.episode} komutuyla güvenli devam edin."
-                enqueue_notification(args.episode, "çalıştırma başarısız", details,
-                                     root=run_log.directory.parent if run_log else episode_dir(args.episode),
-                                     kind="terminal")
-                if (args.command == "run" and not args.fixture and not args.local
-                        and args.stop_after is None and not os.getenv("MAS_REMOTE_JOB_TOKEN")):
-                    drain_cli_notifications(args.episode)
             print(f"FAILED STAGE: {args.command.upper()}\nCAUSE: {exc}\nCHECKPOINT PRESERVED: yes", file=sys.stderr)
             if isinstance(exc, RunPodCleanupRequired):
                 print("DO NOT RELAUNCH: externally verify owned Pod absence first", file=sys.stderr)

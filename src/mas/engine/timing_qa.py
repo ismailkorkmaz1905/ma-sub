@@ -471,7 +471,7 @@ def run_timing_qa_v2(
         "config": asdict(settings),
         # This is an explicit pilot-review warning.  Scores below the hard
         # 0.30 floor are rejected upstream; scores in [0.30, 0.55) are kept
-        # visible for Episode 10 spot-checking without pretending they are a
+        # visible for operator spot-checking without pretending they are a
         # mechanically resolvable publication failure.
         "review_alignment_score_count": review_alignment_score_count,
         **counts,

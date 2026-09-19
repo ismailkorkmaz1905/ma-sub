@@ -5,7 +5,6 @@ from pathlib import Path
 from .delivery import NEXT_PART, safe_relative
 from .engine.episode_archive import file_record
 from .engine.part_audio import _deadline, _remaining, _verify_file
-from .notify import enqueue_notification
 from .reliability import atomic_json, digest, file_digest as sha256_file, read_json
 from .remote import upload_verified
 from .source_discovery import CHANNEL_VIDEOS_URL, is_exact_episode_title
@@ -63,7 +62,7 @@ def validate_published_part(root, episode, part_id, *, total_timeout=300):
     deadline = _deadline(total_timeout)
     root = Path(root)
     folder = part_directory(root, part_id)
-    path = folder / 'final/drive_readback_receipt.json'
+    path = folder / 'output/drive_readback_receipt.json'
     if not path.is_file():
         return None
     data = _read_bound(path)
@@ -80,7 +79,7 @@ def validate_published_part(root, episode, part_id, *, total_timeout=300):
             or data.get('plan_sha256') != sha256_file(root / 'work/part-plan.json')
             or data.get('export_sha256') != sha256_file(folder / 'work/partial-export.json')
             or _verify_file(root, data['mp4'], deadline) != mp4
-            or _verify_file(root, data['encoding_receipt'], deadline) != folder / 'final/partial-encoding.json'
+            or _verify_file(root, data['encoding_receipt'], deadline) != folder / 'output/partial-encoding.json'
             or len(data.get('files', [])) != 1):
         raise ValueError('published part authority changed')
     remote = data['files'][0]
@@ -135,7 +134,7 @@ def validate_worker_published_part(root, episode, part_id, *, total_timeout=300)
         raise ValueError('controller part acknowledgement binding changed')
     record, remote = delivery['mp4'], delivery['files'][0]
     relative = record['relative_path']
-    if (not relative.startswith(f'parts/{part_id}/final/')
+    if (not relative.startswith(f'parts/{part_id}/output/')
             or safe_relative(root, relative).suffix != '.mp4'
             or remote.get('bytes') != record['size_bytes'] or remote.get('sha256') != record['sha256']
             or f'.{part_id}.' not in remote.get('remote', '')):
@@ -147,7 +146,7 @@ def _tail_scope(root, episode, part_id, export):
     from .delivery_first import EXPORT_MODE
     from .engine.part_audio import load_part_plan
     plan = load_part_plan(root, episode, verify_files=False)
-    if (episode < 14 or export.get('mode') != EXPORT_MODE
+    if (export.get('mode') != EXPORT_MODE
             or part_id == plan['parts'][0]['part_id']):
         raise ValueError('Local tail completion cannot replace first-part publication or strict delivery')
 
@@ -155,7 +154,7 @@ def _tail_scope(root, episode, part_id, export):
 def validate_local_tail(root, episode, part_id, *, total_timeout=300):
     root = Path(root)
     folder = part_directory(root, part_id)
-    path = folder / 'final/local-tail-ready.json'
+    path = folder / 'output/local-tail-ready.json'
     if not path.is_file():
         return None
     deadline = _deadline(total_timeout)
@@ -172,7 +171,7 @@ def validate_local_tail(root, episode, part_id, *, total_timeout=300):
             or data.get('plan_sha256') != sha256_file(root / 'work/part-plan.json')
             or data.get('export_sha256') != sha256_file(folder / 'work/partial-export.json')
             or data.get('mp4') != encoding['output']
-            or data.get('encoding_receipt') != file_record(folder / 'final/partial-encoding.json', root)
+            or data.get('encoding_receipt') != file_record(folder / 'output/partial-encoding.json', root)
             or data.get('release') != file_record(folder / 'work/gpu-released-for-encode.json', root)):
         raise ValueError('Local tail completion identity changed')
     _remaining(deadline)
@@ -270,14 +269,11 @@ def complete_local_part(root, episode, part_id, remote_root, *, total_timeout):
                 'export_sha256': sha256_file(folder / 'work/partial-export.json'),
                 'mp4': result['output'], 'encoding_receipt': result['receipt'],
                 'release': file_record(folder / 'work/gpu-released-for-encode.json', root)}
-        write_signed(folder / 'final/local-tail-ready.json', data, 'local-tail-ready')
+        write_signed(folder / 'output/local-tail-ready.json', data, 'local-tail-ready')
         write_worker_tail_ack(root, episode, part_id, total_timeout=remaining())
-        enqueue_notification(episode, part_id + ' yerel encode tamamlandi',
-            'LOCAL_ENCODED_NOT_PUBLISHED: full MP4 icin korunuyor; ayri Drive teslimi degil.',
-            root=root, kind='milestone')
         return NEXT_PART
     receipt = upload_verified(mp4, target, total_timeout=remaining(),
-                              preservation_receipt=folder / 'final/drive-preservation.json',
+                              preservation_receipt=folder / 'output/drive-preservation.json',
                               require_drive_preflight=True)
     if (not isinstance(receipt, dict) or receipt.get('remote') != target
             or type(receipt.get('bytes')) is not int or receipt['bytes'] != result['output']['size_bytes']
@@ -296,10 +292,9 @@ def complete_local_part(root, episode, part_id, remote_root, *, total_timeout):
         from .delivery_first import sign_evidence
         data.update(quality_status='NOT_STRICT', quality_report=export['report'])
         data = sign_evidence(data, 'part-publication')
-    atomic_json(folder / 'final/drive_readback_receipt.json', {'data': data, 'sha256': digest(data)})
+    atomic_json(folder / 'output/drive_readback_receipt.json', {'data': data, 'sha256': digest(data)})
     validate_published_part(root, episode, part_id, total_timeout=remaining())
     write_worker_delivery_ack(root, episode, part_id, total_timeout=remaining())
-    enqueue_notification(episode, part_id + ' Drive teslimi tamamlandi', target, root=root, kind='terminal')
     return NEXT_PART
 
 
@@ -319,13 +314,10 @@ def complete_parts(root, episode, *, total_timeout=300):
     for part in plan['parts']:
         if validate_published_part(root, episode, part['part_id'], total_timeout=_remaining(deadline)) is None:
             return None
-        published.append(file_record(part_directory(root, part['part_id']) / 'final/drive_readback_receipt.json', root))
+        published.append(file_record(part_directory(root, part['part_id']) / 'output/drive_readback_receipt.json', root))
     data = {'format': 'mas-complete-parts-1', 'status': 'COMPLETE_PARTS', 'episode': episode,
             'plan_sha256': sha256_file(root / 'work/part-plan.json'), 'source': plan['source'],
             'audio_sample_count': plan['audio']['sample_count'], 'parts': published,
             'single_full_episode_file': False, 'perceptual_acceptance': 'NOT_ASSERTED'}
-    atomic_json(root / 'final/parts-delivery.json', {'data': data, 'sha256': digest(data)})
-    enqueue_notification(episode, 'Butun parcalar Drive teslimi tamamlandi',
-                         'COMPLETE_PARTS: verified separate part files; no single full-file claim.',
-                         root=root, kind='terminal')
+    atomic_json(root / 'output/parts-delivery.json', {'data': data, 'sha256': digest(data)})
     return data

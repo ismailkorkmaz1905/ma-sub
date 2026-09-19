@@ -293,7 +293,7 @@ def test_duplicate_ownership_and_missing_speech_fail_release(tmp_path):
     with pytest.raises(SemanticAlignmentError, match="unresolved windows"):
         finalize_semantic_blocks(
             episode=15, source_sha256=SHA_A, timeline=built, windows=windows,
-            deterministic_results=[], semantic_results=[], output_dir=tmp_path / "final")
+            deterministic_results=[], semantic_results=[], output_dir=tmp_path / "output")
     finalized = finalize_semantic_blocks(
         episode=15, source_sha256=SHA_A, timeline=built, windows=windows,
         deterministic_results=[], semantic_results=blocks, output_dir=tmp_path / "partial")
@@ -379,7 +379,7 @@ def test_final_timestamps_ownership_and_translation_schema_are_locked(tmp_path):
     assert auto and not unresolved
     finalized = finalize_semantic_blocks(
         episode=15, source_sha256=SHA_A, timeline=built, windows=windows,
-        deterministic_results=auto, semantic_results=[], output_dir=tmp_path / "final")
+        deterministic_results=auto, semantic_results=[], output_dir=tmp_path / "output")
     assert finalized["report"]["release_eligible"] is True
     assert finalized["report"]["assigned_word_count"] == finalized["report"]["eligible_word_count"]
     assert finalized["blocks"][0]["start_ms"] == built["words"][0]["start_ms"]
@@ -456,7 +456,7 @@ def test_partial_and_whole_share_semantic_policy_and_ctc_is_not_called():
     partial = semantic_run_contract(15, "first-hour")
     assert whole["alignment_policy"] == partial["alignment_policy"] == "semantic-block-v1"
     assert whole["delivery_scope"] != partial["delivery_scope"]
-    assert semantic_run_contract(14, "whole-episode")["alignment_policy"] == "strict-ctc-v1"
+    assert semantic_run_contract(1, "whole-episode")["alignment_policy"] == "semantic-block-v1"
 
 
 def test_partial_and_whole_select_from_same_canonical_blocks(tmp_path):
@@ -468,7 +468,7 @@ def test_partial_and_whole_select_from_same_canonical_blocks(tmp_path):
         {"block_uid": "two", "block_index": 2, "start_ms": 3_601_000, "end_ms": 3_602_000},
     ]
     blocks_path.write_text("".join(json.dumps(block) + "\n" for block in blocks), encoding="utf-8")
-    subtitle_dir = root / "final/subtitles"
+    subtitle_dir = root / "output/subtitles"
     entries = [
         SubtitleEntry(1, 3_599_000, 3_600_100, "Bir"),
         SubtitleEntry(2, 3_601_000, 3_602_000, "İki"),
@@ -479,8 +479,8 @@ def test_partial_and_whole_select_from_same_canonical_blocks(tmp_path):
         "episode": 15,
         "input_files": {"final_blocks": {"relative_path": "work/semantic_alignment/final_blocks.jsonl"}},
         "outputs": {
-            "id_srt": {"relative_path": "final/subtitles/episode-id.srt"},
-            "tr_srt": {"relative_path": "final/subtitles/episode-tr.srt"},
+            "id_srt": {"relative_path": "output/subtitles/episode-id.srt"},
+            "tr_srt": {"relative_path": "output/subtitles/episode-tr.srt"},
         },
     }
     whole = prepare_semantic_delivery_scope(

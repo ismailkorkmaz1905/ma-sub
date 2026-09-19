@@ -88,11 +88,11 @@ def _validate_override(uid, kind, raw):
 class AudioReviewStore:
     def __init__(self, root):
         self.root = Path(root)
-        self.report_path = self.root / "prepare" / "audio_review_v2.json"
+        self.report_path = self.root / "work" / "audio_review_v2.json"
         name = self.root.name
-        self.pack_path = self.root / "translation_input" / f"{name}_TR_CORRECTION_PACK.zip"
-        self.output_path = self.root / "translation_output" / f"{name}_TR_TEXT_CORRECTED.zip"
-        self.overrides_path = self.root / "review" / "audio_review_overrides.json"
+        self.pack_path = self.root / "handoff" / f"{name}_TR_CORRECTION_PACK.zip"
+        self.output_path = self.root / "handoff" / f"{name}_TR_TEXT_CORRECTED.zip"
+        self.overrides_path = self.root / "work" / "audio_review_overrides.json"
         self.lock = threading.Lock()
         try:
             self.report_digest = sha256_file(self.report_path)

@@ -84,7 +84,7 @@ def test_alignment_recovery_never_downloads_live_checkpoints(monkeypatch, tmp_pa
         payload = json.loads(_remote_response(command))
         if " poll " in command[-1]:
             payload["checkpoints"]["files"] = [{
-                "relative_path": "prepare/raw_asr_v2.json",
+                "relative_path": "work/raw_asr_v2.json",
                 "sha256": "a" * 64,
                 "size_bytes": 1,
             }]

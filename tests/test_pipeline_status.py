@@ -13,7 +13,7 @@ from mas.reliability import atomic_json, digest, file_digest as sha256_file
 def stored_parts(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "episode_dir", lambda episode: tmp_path)
     source = {"relative_path": "source/movie.mp4", "size_bytes": 10, "sha256": "1" * 64}
-    audio = {"relative_path": "prepare/audio.flac", "size_bytes": 10, "sha256": "2" * 64,
+    audio = {"relative_path": "work/audio.flac", "size_bytes": 10, "sha256": "2" * 64,
              "sample_rate_hz": 16000, "channels": 1, "sample_count": 7200000 * 16}
     regions = [{"vad_region_index": index, "start_ms": start, "end_ms": end, "source": "silero_vad"}
                for index, (start, end) in enumerate([(1000, 2500), (3600000, 3601000),
@@ -49,7 +49,7 @@ def test_simple_status_shows_only_operator_paths(tmp_path, monkeypatch, capsys):
     source = tmp_path / "source/episode.mp4"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"video")
-    pack = tmp_path / "translation_input/Muhtemel Ask 14.Bolum_ID_TRANSLATION_PACK.zip"
+    pack = tmp_path / "handoff/Muhtemel Ask 15.Bolum_ID_TRANSLATION_PACK.zip"
     pack.parent.mkdir(parents=True)
     pack.write_bytes(b"pack")
 
@@ -58,8 +58,8 @@ def test_simple_status_shows_only_operator_paths(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Durum: id_return (bekliyor)" in output
     assert "Kaynak: source" in output and "episode.mp4" in output
-    assert "ChatGPT'ye ver: translation_input" in output
-    assert "Dönüşü koy: translation_output" in output
+    assert "ChatGPT'ye ver: handoff" in output
+    assert "Dönüşü koy: handoff" in output
     assert "--json" in output
 
 
@@ -113,7 +113,7 @@ def test_part_status_shows_exact_plan_current_child_and_stored_handoff(stored_pa
     atomic_json(root / "work/current-part.json", {"data": pointer, "sha256": digest(pointer)})
     handoff = {"format": "mas-partial-handoff-1", "episode": 14, "part_id": "part-001", "kind": "tr",
                "plan_sha256": plan_sha,
-               "expected_return": "parts/part-001/translation_output/Muhtemel Ask 14.Bolum_TR_TEXT_CORRECTED.zip"}
+               "expected_return": "parts/part-001/handoff/Muhtemel Ask 15.Bolum_TR_TEXT_CORRECTED.zip"}
     for filename in ("partial-handoff.json", "partial-handoff-tr.json"):
         atomic_json(child / "work" / filename, {"data": handoff, "sha256": digest(handoff)})
     before = {path: path.read_bytes() for path in root.rglob("*.json")}
@@ -133,7 +133,7 @@ def write_stored_receipt(root, plan):
     child = root / "parts/part-001"
     receipt = {"format": "mas-part-delivery-1", "status": "PASS_PARTIAL", "episode": 14, "part_id": "part-001",
                "plan_sha256": sha256_file(root / "work/part-plan.json")}
-    path = child / "final/drive_readback_receipt.json"
+    path = child / "output/drive_readback_receipt.json"
     atomic_json(path, {"data": receipt, "sha256": digest(receipt)})
     return path, receipt
 

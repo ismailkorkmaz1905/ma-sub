@@ -21,7 +21,6 @@ from .subtitle_metadata import is_subtitle_credit, normalized_text, repetition_w
 WORD_TIMELINE_FORMAT = "mas-semantic-word-timeline-1"
 TIMING_SOURCE = "semantic_word_span_v1"
 ALIGNMENT_POLICY = "semantic-block-v1"
-STRICT_ALIGNMENT_POLICY = "strict-ctc-v1"
 
 
 class SemanticAlignmentError(RuntimeError):
@@ -1133,7 +1132,7 @@ def semantic_run_contract(episode, delivery_scope):
         "format": "mas-run-contract-1",
         "episode": episode,
         "delivery_scope": delivery_scope,
-        "alignment_policy": ALIGNMENT_POLICY if episode >= 15 else STRICT_ALIGNMENT_POLICY,
+        "alignment_policy": ALIGNMENT_POLICY,
     }
 
 
@@ -1402,7 +1401,7 @@ def finalize_semantic_episode(
     input_records = _episode_records(root, evidence_paths)
     configuration_records = _configuration_records(Path(__file__).resolve().parents[3], config_paths)
 
-    final_dir = root / "final"
+    final_dir = root / "output"
     subtitle_dir = final_dir / "subtitles"
     subtitle_dir.mkdir(parents=True, exist_ok=True)
     targets = {

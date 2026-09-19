@@ -18,7 +18,7 @@ def evidence(segments=None, turns=None, offset=0):
             {"word": " dünya.", "start": 1.5, "end": 2.0}]}]
     if turns is None:
         turns = [{"start": 1.0, "end": 2.0, "speaker": "A"}]
-    body = {"format": "mas-acoustic-pilot-1", "episode": 11,
+    body = {"format": "mas-acoustic-pilot-1", "episode": 15,
             "audio_sha256": "a" * 64, "source_sha256": "b" * 64,
             "offset_ms": offset, "duration_ms": 10_000, "segments": segments,
             "speaker_turns": turns}
@@ -186,16 +186,15 @@ def test_sample_provenance_requires_actual_source_bytes_and_offset(tmp_path):
         verify_source_clip(clip, source, "a" * 64, 1)
 
 
-def test_cli_replay_never_starts_runpod_or_sends_error_mail(tmp_path, monkeypatch):
+def test_cli_replay_never_starts_runpod(tmp_path, monkeypatch):
     from mas.subtitle import pilot_command
     monkeypatch.setattr(pilot_command, "episode_dir", lambda _: tmp_path)
     monkeypatch.setattr(cli, "run_remote_episode", lambda *a: pytest.fail("paid run"))
-    monkeypatch.setattr(cli, "enqueue_notification", lambda *a, **k: pytest.fail("unsolicited email"))
     source = tmp_path / "evidence.json"
     source.write_text(json.dumps(evidence()), encoding="utf-8")
-    assert cli.main(["subtitle-pilot", "11", "--evidence", str(source)]) == 0
+    assert cli.main(["subtitle-pilot", "15", "--evidence", str(source)]) == 0
     assert list((tmp_path / "work/subtitle-pilot").glob("*/draft.srt"))
-    assert cli.main(["subtitle-pilot", "12", "--evidence", str(source)]) == 1
+    assert cli.main(["subtitle-pilot", "16", "--evidence", str(source)]) == 1
 
 
 def test_clip_without_word_timing_is_preserved_but_not_accepted():
@@ -208,7 +207,7 @@ def test_clip_without_word_timing_is_preserved_but_not_accepted():
 def test_full_episode_draft_does_not_relax_pilot_limit_or_claim_strict():
     from mas.subtitle.pilot import build_episode_draft
     item = evidence()
-    item['data'].update(episode=12, duration_ms=8_352_921)
+    item['data'].update(episode=16, duration_ms=8_352_921)
     item['sha256'] = digest(item['data'])
     with pytest.raises(IntegrityError, match='exceeds 120 seconds'):
         build_pilot(item)

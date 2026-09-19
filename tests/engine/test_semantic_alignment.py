@@ -24,8 +24,10 @@ from mas.engine.semantic_alignment import (
     finalize_semantic_blocks,
     load_word_timeline,
     prepare_semantic_delivery_scope,
+    read_jsonl,
     semantic_run_contract,
     sign_coarse_fallback_approval,
+    write_jsonl,
 )
 from mas.engine.srt import SubtitleEntry, write_srt
 from mas.engine.semantic_alignment_handoff import (
@@ -117,6 +119,12 @@ def prepare(tmp_path, raw):
     windows = build_semantic_windows(built, evidence_sources(raw))
     auto, unresolved = deterministic_exact_results(windows)
     return built, windows, auto, unresolved
+
+
+def test_empty_semantic_jsonl_remains_a_nonempty_checkpoint(tmp_path):
+    path = write_jsonl(tmp_path / "empty.jsonl", [])
+    assert path.read_bytes() == b"\n"
+    assert read_jsonl(path) == []
 
 
 def pack(tmp_path, windows, built, auto=()):

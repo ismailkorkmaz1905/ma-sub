@@ -494,9 +494,11 @@ def test_pending_extra_audio_review_uids_are_collected_once(tmp_path, monkeypatc
 
 def test_stage_heartbeat_does_not_mark_useful_work(tmp_path, monkeypatch, capsys):
     marks = []
+    timeouts = []
     class Event:
         def __init__(self): self.waits = 0
         def wait(self, timeout):
+            timeouts.append(timeout)
             self.waits += 1
             return self.waits > 2
         def set(self): pass
@@ -510,6 +512,7 @@ def test_stage_heartbeat_does_not_mark_useful_work(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(pipeline, "mark_work_progress", lambda stage, **kw: marks.append((stage, kw)))
     pipeline._stage(tmp_path / "state.json", {"episode": 11}, "audio", lambda: {})
     assert capsys.readouterr().out.count("RUNNING") == 2
+    assert timeouts == [pipeline.STAGE_HEARTBEAT_SECONDS] * 3
     assert marks == [("audio", {}), ("audio", {"completed": True})]
 
 

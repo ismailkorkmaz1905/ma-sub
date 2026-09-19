@@ -2418,6 +2418,7 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
             print("[RUNPOD] start response lost; checking existing job without restarting", flush=True)
     offset = 0
     downloaded = {}
+    last_status = None
     while True:
         poll_idle_timeout = 180 if alignment_recovery else 60
         poll_total_timeout = 240 if alignment_recovery else 120
@@ -2433,7 +2434,10 @@ def _monitor_remote_job(ssh, scp, host, episode, commit, local_root, source_url,
         if status.get("identity") != expected_identity:
             raise RunPodControllerError("remote job status identity mismatch")
         atomic_json(local_root / "work" / "remote-job-status.json", status)
-        print(f"[RUNPOD] remote job status={status.get('status', 'UNKNOWN')}", flush=True)
+        status_name = status.get("status", "UNKNOWN")
+        if status_name != last_status:
+            print(f"[RUNPOD] remote job status={status_name}", flush=True)
+            last_status = status_name
         log = poll["log"]
         text = log.get("text", "")
         if text:

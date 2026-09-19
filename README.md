@@ -1,75 +1,62 @@
 # Muhtemel Ask Subtitles
 
-## EP15+ semantic alignment policy
+One production pipeline downloads an episode, produces Turkish timing evidence,
+creates Indonesian subtitles, burns the Indonesian subtitles into H.264/AAC MP4,
+and verifies the published file by byte count and SHA-256 readback.
 
-New Episode 15 and later runs default to `semantic-block-v1`. The immutable ASR
-word timeline owns timing, ChatGPT Pro file handoff owns difficult Turkish text
-and word-span decisions, and Python owns validation, timestamp derivation and
-release QA. GPT returns word IDs only and cannot return timestamps. Forced CTC
-remains available only through the explicit `strict-ctc-v1` run policy. First-hour
-and whole-episode publication select from one canonical episode-level semantic
-block set; they do not select different alignment policies. See the
-[EP15 semantic architecture](docs/SEMANTIC_ALIGNMENT_EP15.md) and the
-[real EP14 offline replay](docs/EP14_SEMANTIC_REPLAY_2026-09-19.md).
+Production code is under `src/mas/`, configuration is under `config/`, tests are
+under `tests/`, and the operator entrypoint is `./mas` or `.\mas.ps1`. The
+`legacy/` tree is read-only reference material.
 
-Current EP14 launch repair: [18 September 2026 repair and operator checks](docs/EP14_READY_2026-09-18.md).
-This supersedes older controller cleanup, all-tail publication and doctor guidance below.
-First-part Drive readback is followed by verified local tail encoding and one full MP4.
-Real acoustic quality, target runtime and the live controller environment are not certified.
+## Current policies
 
-Current audit and repair: [16 September 2026 A-Z results](docs/AZ_REPAIR_2026-09-16.md). Delivery-first remains the EP14+ policy; real acoustic quality and the four-to-six-hour target are not yet certified.
-
-## Delivery-first policy, 15 September 2026
-
-For Episode 14 onward the default first-hour/local-QSV route prioritizes delivery.
-See [the delivery-first contract](docs/DELIVERY_FIRST_2026-09-15.md). Bounded CTC
-failures retain source cue timing, or omit only the unusable cue with a report.
-Quality warnings must not become strict PASS, but they do not block this separate
-delivery mode. Source/authentication/identity errors remain hard failures. Publish
-the first approximately 60-minute burned-in MP4 first, then one full-episode MP4.
-A real Indonesian return is required; the delivery path uses authenticated primary
-Turkish ASR without requiring a separate manual Turkish correction/review handoff.
-No paid run is authorized merely by editing or testing this code.
-
-Current outcome and next-run checklist: [simple Episode 13 handoff](docs/SON_DURUM_VE_BOLUM_13.md). Main delivery now targets H.264/AAC MP4 with Indonesian subtitles burned into the image. Episode 12 MP4 is complete and delivered with two full remote byte/SHA-256 readbacks. Perceptual subtitle acceptance remains REVIEW_REQUIRED. Historical episode evidence moved outside the repository as described in that handoff.
-
-Muhtemel Ask Subtitles is the single production pipeline for turning one episode source into strict Turkish and Indonesian subtitle deliverables.
+New Episode 15 and later states default to `semantic-block-v1`:
 
 ```text
-source -> audio -> Turkish ASR -> immutable word timeline -> semantic handoff
-       -> word-ID validation -> Indonesian handoff -> subtitle QA -> Drive verification
-       -> notification -> RunPod shutdown request
+source -> audio -> GPU Turkish ASR -> immutable word timeline
+       -> semantic word-span handoff when needed -> Indonesian handoff
+       -> subtitle QA -> local or remote encode -> Drive byte/SHA-256 readback
 ```
 
-Production code lives under `src/mas/` and runs through `./mas`. Notebooks and the imported source snapshot under `legacy/` are read-only reference material, not production entrypoints.
+The ASR word timeline owns timing. ChatGPT Pro may correct Turkish text and select
+owned word spans, but it cannot return timestamps. Python validates ownership,
+derives display times, freezes block IDs, and runs release QA. First-hour and
+whole-episode publication select from the same canonical final blocks.
 
-> Current operator status, 2026-09-06: Episode 12 was explicitly authorized and produced separate REVIEW subtitles after full GPU ASR, CTC and targeted repairs. The user also authorized review MKV/Drive delivery and an Episode 13 launcher. This does not establish strict or release acceptance. See the [readable Episode 12 / Episode 13 report](docs/EP12_TO_EP13_OPERATOR_REPORT.md), [run evidence](docs/EP12_RUN_2026-09-06.md), and [reusable Episode X prompt](docs/EPISODE_OPERATOR_PROMPT.md). The earlier [Astra review](docs/ASTRA_REVIEW_2026-09-06.md) remains historical evidence of unresolved strict gates. No stable tag.
+Forced CTC remains available as the explicit `strict-ctc-v1` policy. Existing
+Episode 14 and older states are not silently migrated. Episode 14 also retains
+its separate delivery-first route. These policies must not share PASS markers or
+mislabel semantic or emergency output as strict CTC output.
 
-## Start here
+Read these current documents first:
 
-- [Mimari harita](docs/ARCHITECTURE_MAP.md)
-- [Operator and architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
-- [EP12 incident acceptance criteria](docs/EP12_ACCEPTANCE.md)
-- [Codex continuation handoff](docs/CODEX_HANDOFF.md)
+- [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
+- [EP15 semantic alignment](docs/SEMANTIC_ALIGNMENT_EP15.md)
+- [EP14 semantic replay](docs/EP14_SEMANTIC_REPLAY_2026-09-19.md)
+- [EP14 launch repair](docs/EP14_READY_2026-09-18.md)
+- [Delivery-first contract](docs/DELIVERY_FIRST_2026-09-15.md)
+- [Codex handoff](docs/CODEX_HANDOFF.md)
 - [Astra handoff](docs/ASTRA_HANDOFF.md)
-- [Astra review prompt](docs/ASTRA_REVIEW_PROMPT.md)
-- [Episode 11 first production run record](docs/EP11_FIRST_PRODUCTION_RUN.md)
+
+Historical incident and run reports remain under `docs/` as evidence. They are
+not current operator instructions when they conflict with the documents above.
 
 ## Requirements
 
 - Python 3.11
-- Git, OpenSSH, and the generated RunPod SSH private key on the Windows controller
-- A configured local `rclone` Google Drive remote; its config is copied to the Pod only for the run
-- A RunPod Pod ID and API key for automatic start and externally verified stop
-- For automatic capacity migration: the exact network volume ID, data center,
-  GPU type, and maximum hourly price in the `MAS_RUNPOD_*` user environment
-  variables
-- A Gmail app password when email stage notifications are expected
-- A Netscape-format YouTube cookies file when authenticated source download is required
+- Git and OpenSSH
+- FFmpeg and FFprobe
+- NVIDIA CUDA for GPU-required worker stages
+- RunPod credentials and SSH key for remote production
+- A configured `rclone` Google Drive remote
+- YouTube cookies when the source requires authentication
+- Gmail credentials only when notifications are enabled
 
-## Local setup
+Keep all credentials outside Git in environment variables or provider secrets.
 
-Linux, macOS, or RunPod:
+## Setup
+
+Linux or RunPod:
 
 ```bash
 uv venv --python 3.11 .venv
@@ -78,182 +65,80 @@ uv pip install --python .venv/bin/python --index-strategy unsafe-best-match --re
 ./mas test
 ```
 
-Windows PowerShell:
+Windows PowerShell controller:
 
 ```powershell
 uv venv --python 3.11 .venv
 uv pip install --python .venv\Scripts\python.exe --index-strategy unsafe-best-match --requirements requirements.lock
-.\mas.ps1 doctor
+.\mas.ps1 doctor --controller
 .\mas.ps1 test
 ```
 
-## Run an episode
-
-Configure secrets outside the repository:
-
-```bash
-export MAS_DRIVE_STRICT_REMOTE='gdrive:Muhtemel_Ask_Subtitles/EPISODES'
-export MAS_GMAIL_ADDRESS='your.account@gmail.com'
-export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
-export MAS_NOTIFY_TO='your.account@gmail.com'
-export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
-```
-
-Start a new strict run. Episode 11 is the first non-EP12 test candidate:
-
-```bash
-./mas run 11
-```
-
-On Windows PowerShell, use `.\mas.ps1 run 11`. This production command validates
-all local secrets and files before spending money, starts the configured EXITED
-RunPod, waits for API and SSH readiness, uploads the clean Git commit and
-short-lived secrets, streams output into the local run log, and externally stops
-and polls the Pod to EXITED on every exit path. It refuses a dirty repository or
-an already-running Pod. Offline fixture runs stay local.
-
-For a new episode, MAS searches the official `@muhtemelaskdizi` videos page and
-accepts only the exact full-episode title equivalent to `Muhtemel Ask 13. Bolum`.
-Turkish accents and spacing may differ. Clips, trailers, previews, recaps, missing
-matches, and ambiguous matches are rejected. The resolved watch URL is saved to
-the episode's immutable `source/source.url`. Use `--source-url` only for an
-explicit operator override before the episode is initialized.
-
-Resume the same run after a Turkish correction or Indonesian translation handoff:
-
-```bash
-./mas run 11
-```
-
-When a handoff blocks progress, the controller downloads the exact input ZIP to
-the local episode `translation_input/` directory and stops the Pod. Put only the
-returned ZIP at the exact printed path under local `translation_output/`, then
-run the same command. The controller uploads that return ZIP and resumes the
-persistent remote checkpoint. Never edit source media, pack manifests, immutable
-IDs, block order, Turkish text in the Indonesian return, or timing in a
-translation return.
-
-Episode 11's returned Turkish correction ZIP has passed the return gate. Its
-previous bounded audio review processed 245 records, resolving 107 and leaving
-138 pending. An independent pinned-model CUDA CTC probe executed for all 138
-pending records, but its 0 normalized exact reference matches and 0 strict
-closures remain diagnostic evidence. The current contextual policy resolves
-non-orphan boundary fragments only after all bounded acoustic passes, records
-the adjacent-context and decode audit, and keeps final forced alignment
-mandatory. Real GPU verification of that policy is still pending.
-
-Resume the production run without manually reviewing 138 clips:
+## Operator commands
 
 ```powershell
-.\mas.ps1 run 11
+.\mas.ps1 doctor --controller
+.\mas.ps1 status 15
+.\mas.ps1 run 15 --source-url 'SOURCE_URL'
+.\mas.ps1 run 15
 ```
 
-The local review UI remains an operator fallback for orphan captions or records
-without adjacent context, and does not start RunPod:
+The first run initializes the source and persists the run contract. Re-run the
+same command after each requested handoff. When the semantic or Indonesian ZIP
+is requested, use the exact printed input and output paths. Do not edit manifests,
+IDs, order, source text, word ownership, timestamps, or hashes.
+
+Exit code 29 means the semantic return is required. The controller collects the
+pack, releases GPU capacity, and waits locally. A semantic return or Indonesian
+return must not open a new GPU lease unless later work genuinely requires GPU.
+
+Useful local commands:
 
 ```powershell
-.\mas.ps1 review-audio 11
+.\mas.ps1 status 14
+.\mas.ps1 review-audio 13
+.\mas.ps1 clean 13
 ```
 
-The command opens a localhost-only browser page. Each save verifies the current
-report, correction input/output bindings, and WAV SHA-256 before atomically
-updating `review/audio_review_overrides.json`. Stop the local server with
-`Ctrl+C`. If fallback decisions are needed, resume with `.\mas.ps1 run 11`; the
-controller verifies the override file by byte count and SHA-256 on the Pod
-before the pipeline starts.
+`clean` is a dry run unless `--destroy` is explicitly supplied.
 
-Useful operator commands:
+## Logs and checkpoints
 
-```bash
-./mas status 13
-./mas doctor
-./mas test
-./mas review-audio 11
-./mas clean 13
-./mas clean 13 --destroy
-```
-
-`clean` is a dry run unless `--destroy` is supplied.
-
-## Run logs
-
-Every `./mas run EPISODE` invocation writes a separate UTF-8 log under:
+Each run writes a separate local log under:
 
 ```text
-EPISODES/Muhtemel Ask 13.Bolum/logs/run-<UTC timestamp>-<PID>.log
+EPISODES/Muhtemel Ask <N>.Bolum/logs/run-<UTC timestamp>-<PID>.log
 ```
 
-`logs/LATEST` contains the newest log filename. Each log records UTC start/end metadata, elapsed seconds, exit code, Git commit, non-secret configuration readiness, console output, errors, and full exception tracebacks. Source URLs are redacted from logged command arguments. Gmail passwords, cookie values, RunPod keys, and other secret values are never written. The resumable machine state remains separately available in `work/state.json`.
+`logs/LATEST` points to the newest log. Stage checkpoints and receipts live under
+the episode `work/` and `final/` trees. Logs are evidence, not cache files. Do not
+delete them as routine repository cleanup.
 
-RunPod also mirrors process output into `logs/runpod-session.log` so provider/watchdog shutdown incidents retain their final console history.
+Long-running stages emit a bounded heartbeat. Useful progress is tracked through
+the dedicated progress marker, not inferred from log chatter.
 
-## Gmail notifications
+## Safety boundary
 
-Notifications cover run start, stage progress, handoff waits, failures, and final readiness. They are enabled only when both `MAS_GMAIL_ADDRESS` and `MAS_GMAIL_APP_PASSWORD` are set. `MAS_NOTIFY_TO` defaults to the sending address.
-
-Use a Google app password, never the account password. Keep it in an environment variable or RunPod secret and verify it before an episode run:
-
-```bash
-./mas notify-test
-```
-
-## YouTube cookies
-
-`MAS_YTDLP_COOKIES` must point to an exported Netscape-format cookies file. Keep the file outside the repository, mount or copy it into RunPod as a secret, and never paste cookie contents into logs, commits, issues, or handoff documents. An authentication failure does not permit an unauthenticated or lower-quality fallback.
-
-The same cookies file is used for official-channel source discovery and source
-download. Discovery has finite yt-dlp retries, socket timeout, total timeout, and
-a no-progress watchdog.
-
-## Strict safety boundary
-
-- Missing CUDA is a hard failure for GPU stages. There is no silent CPU fallback.
 - Source media is immutable after its SHA-256 is recorded.
-- Timing overrides can change timing only. Text mutation is rejected.
-- Verified cross-speaker overlap remains separate. Speaker text is never merged.
-- Strict outputs live under `final/`. Emergency outputs live under `emergency/` and cannot create or replace strict markers.
-- Local file existence is not delivery. Drive publication passes only after remote byte count and SHA-256 readback match.
-- Drive is a delivery target, not a repository mirror. Only the final MKV, Turkish SRT, and Indonesian SRT files are uploaded into each episode folder. Source media, logs, reports, code, and intermediate artifacts stay out of Drive.
-- Episode 12 already contains retained historical deliverables. Before a real run publishes an existing exact filename, preflight must inventory the prior remote object and preserve auditable byte-count and SHA-256 evidence. Do not silently overwrite or delete it.
-- A RunPod stop response is a request, not proof of zero billing. Verify provider state from outside the pod.
+- GPU-required stages never silently fall back to CPU.
+- Known different speakers may overlap, but their text is never merged.
+- Same-speaker overlap fails; unknown-speaker overlap remains review evidence.
+- Strict, semantic, delivery-first, and emergency artifacts keep separate identities.
+- Local file existence is not delivery PASS.
+- Drive PASS requires exact remote byte count and SHA-256 readback.
+- Existing exact Drive filenames are inventoried and preserved before replacement.
+- A provider stop response is not shutdown proof; verify state externally.
+- Tests and fixtures do not authorize paid RunPod work.
+- No stable release exists without independent review and a real GPU episode run.
 
-## RunPod
+## Development checks
 
-Bootstrap an interactive Pod checkout, configure provider and delivery secrets, then start the episode:
-
-```bash
-./runpod/bootstrap.sh
-export RUNPOD_POD_ID='POD_ID'
-export RUNPOD_API_KEY='API_KEY'
-export MAS_DRIVE_STRICT_REMOTE='gdrive:Muhtemel_Ask_Subtitles/EPISODES'
-export MAS_GMAIL_ADDRESS='your.account@gmail.com'
-export MAS_GMAIL_APP_PASSWORD='GMAIL_APP_PASSWORD'
-export MAS_NOTIFY_TO='your.account@gmail.com'
-export MAS_YTDLP_COOKIES='/run/secrets/youtube-cookies.txt'
-./runpod/run-episode.sh 11
+```powershell
+git status --short --branch
+& .\.venv\Scripts\python.exe -m pytest -q tests
+git diff --check
 ```
 
-`run-episode.sh` applies a 14,400-second maximum runtime and a 1,800-second no-log-progress timeout by default. Override them with `MAS_MAX_RUNTIME_SECONDS` and `MAS_IDLE_TIMEOUT_SECONDS`. A RunPod worker only prepares and exports the verified delivery, then exits with the collection handoff code. The external controller owns Drive publication, secret cleanup, and externally verified shutdown; a standalone in-Pod run cannot publish or claim shutdown PASS.
-
-When `MAS_RUNPOD_AUTO_MIGRATE=1`, an exact provider "not enough free GPUs"
-response triggers bounded migration instead of failing the episode. The
-controller first verifies that the old Pod is `EXITED`, its configured network
-volume and data center match, and no local Pod volume is at risk. It then
-terminates only that Pod, attaches the same network volume to an available Pod
-of the configured GPU type, rejects a price above
-`MAS_RUNPOD_MAX_COST_PER_HR`, persists the new Pod ID, and resumes. Other HTTP
-500 errors do not trigger migration.
-
-The controller, complete channel discovery, source identity guards, download
-watchdogs, strict GPU/Drive preflight, handoff transfer, and external shutdown
-polling are implemented and covered by local tests. Episode 11 verified real Pod
-startup, SSH, CUDA raw ASR, handoff download, controller shutdown, and external
-`EXITED` polling. A later independent pinned-model CUDA CTC probe processed
-138/138 pending review records on Pod `tccsb8991x84ua`; the Pod was externally
-verified `EXITED`. The probe closed 0 strict decisions and is not an acoustic
-PASS. Production forced alignment, final mux, and Drive upload/readback remain
-unverified. The
-controller never starts the Pod during setup, `doctor`, tests, status, or fixture
-runs.
-
-Keep provider keys and pipeline credentials in environment secrets, never in the repository or command history. Stopping a Pod releases its GPU but may retain billable volume storage. A Pod with a network volume may require termination instead of stop after artifacts are verified.
+For runtime or release changes, also inspect `Dockerfile` and `runpod/`. Report
+local tests, CI, real GPU execution, Drive readback, and external provider state
+as separate evidence classes.

@@ -50,7 +50,6 @@ from .engine.id_translation import (
 from .engine.semantic_alignment import (
     ALIGNMENT_POLICY as SEMANTIC_ALIGNMENT_POLICY,
     SemanticAlignmentConfig,
-    _write_jsonl as write_semantic_jsonl,
     build_semantic_translation_schema,
     build_semantic_windows,
     build_word_timeline,
@@ -62,6 +61,8 @@ from .engine.semantic_alignment import (
     prepare_semantic_delivery_scope,
     read_jsonl as read_semantic_jsonl,
     semantic_producer_identity,
+    semantic_run_contract,
+    write_jsonl as write_semantic_jsonl,
 )
 from .engine.semantic_alignment_handoff import (
     create_semantic_alignment_pack,
@@ -84,6 +85,7 @@ from .engine.tr_correction import create_tr_correction_pack, read_tr_correction_
 WAIT_TR = 20
 WAIT_ID = 21
 STRICT_DRIVE_OUTPUTS = ("mp4",)
+STAGE_HEARTBEAT_SECONDS = 300
 STAGE_NOTIFICATION_NAMES = {
     "download": "kaynak dosyası kontrolü",
     "audio": "ses dosyası hazırlığı",
@@ -259,7 +261,7 @@ def _stage(path, state, name, action):
     heartbeat_stop = threading.Event()
 
     def heartbeat():
-        while not heartbeat_stop.wait(30):
+        while not heartbeat_stop.wait(STAGE_HEARTBEAT_SECONDS):
             elapsed = time.monotonic() - started
             print(f"[STAGE] {name}: RUNNING elapsed={elapsed:.1f}s", flush=True)
 
@@ -641,15 +643,9 @@ def _resolve_run_contract(state, *, episode, new_state, priority):
                 "delivery_scope": delivery_scope,
                 "alignment_policy": "strict-ctc-v1",
             }
-        policy = requested_policy or (
-            SEMANTIC_ALIGNMENT_POLICY if episode >= 15 else "strict-ctc-v1"
-        )
-        existing = {
-            "format": "mas-run-contract-1",
-            "episode": episode,
-            "delivery_scope": delivery_scope,
-            "alignment_policy": policy,
-        }
+        existing = semantic_run_contract(episode, delivery_scope)
+        if requested_policy:
+            existing["alignment_policy"] = requested_policy
         state["run_contract"] = existing
         return existing
     if (

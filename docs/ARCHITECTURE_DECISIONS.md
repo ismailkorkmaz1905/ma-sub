@@ -1,16 +1,21 @@
 # Architecture decisions
 
-## Current production flow
+## Current production flows
 
 ```text
+EP15+ semantic:
+source -> audio -> GPU raw ASR -> immutable word timeline
+       -> semantic handoff -> Indonesian translation -> semantic finalize
+       -> burn_mp4 -> verified GPU release -> Drive byte/SHA-256 readback
+
+Explicit legacy strict:
 source -> audio -> GPU raw ASR -> Turkish correction -> acoustic review
-       -> GPU forced alignment -> Indonesian translation
-       -> strict_finalize -> burn_mp4 -> controller exit 22 collection
-       -> verified GPU release -> Drive upload and byte/SHA-256 readback
+       -> GPU forced alignment -> Indonesian translation -> strict finalize
+       -> burn_mp4 -> verified GPU release -> Drive byte/SHA-256 readback
 ```
 
-This diagram describes the current code boundary. It is not evidence that a real
-Episode 13 run, Drive publication, or provider shutdown has passed.
+These diagrams describe code boundaries, not proof that a real EP15 GPU run,
+Drive publication, perceptual review, or provider shutdown has passed.
 
 ## ADR-001: One production CLI
 

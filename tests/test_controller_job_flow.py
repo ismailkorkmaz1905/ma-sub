@@ -372,3 +372,24 @@ def test_checkpoint_cache_reuses_verified_stat_until_file_changes(
         ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
         "https://example.invalid/episode", 500, Budget()) == 0
     assert len(downloads) == expected_downloads
+
+
+def test_remote_monitor_logs_only_status_transitions(monkeypatch, tmp_path, capsys):
+    statuses = iter([("RUNNING", None), ("RUNNING", None), ("EXITED", 0)])
+
+    def response(command, **kwargs):
+        payload = json.loads(_remote_response(command))
+        if " poll " in command[-1]:
+            payload["status"]["status"], payload["status"]["exit_code"] = next(statuses)
+        return json.dumps(payload)
+
+    monkeypatch.setattr(controller, "_network_retry", response)
+    monkeypatch.setattr(controller.time, "sleep", lambda _: None)
+
+    assert controller._monitor_remote_job(
+        ["ssh"], ["scp"], "host", 13, "a" * 40, tmp_path,
+        "https://example.invalid/episode", 500, Budget()) == 0
+
+    output = capsys.readouterr().out
+    assert output.count("remote job status=RUNNING") == 1
+    assert output.count("remote job status=EXITED") == 1

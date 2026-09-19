@@ -5,23 +5,20 @@ import hashlib
 import hmac
 import json
 import math
-import os
 import re
-import tempfile
 import unicodedata
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-from .download import atomic_write_json, sha256_file, sha256_json
+from .download import atomic_write_bytes, atomic_write_json, sha256_file, sha256_json
 from .id_translation import validate_aligned_turkish_schema
+from .schema import SchemaError, atomic_write_jsonl, read_jsonl as read_schema_jsonl
 from .subtitle_metadata import is_subtitle_credit, normalized_text, repetition_warnings
 
 
 WORD_TIMELINE_FORMAT = "mas-semantic-word-timeline-1"
-WINDOW_FORMAT = "mas-semantic-windows-1"
-FINAL_BLOCK_FORMAT = "mas-semantic-final-blocks-1"
 TIMING_SOURCE = "semantic_word_span_v1"
 ALIGNMENT_POLICY = "semantic-block-v1"
 STRICT_ALIGNMENT_POLICY = "strict-ctc-v1"
@@ -75,56 +72,21 @@ def _strict_clone(value):
         raise SemanticAlignmentError(f"Semantic evidence is not strict JSON: {exc}") from exc
 
 
-def _canonical_bytes(value):
+def write_jsonl(path, records):
+    records = list(records)
+    if not records:
+        return atomic_write_bytes(path, b"\n")
     try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise SemanticAlignmentError(f"Semantic evidence is not canonical JSON: {exc}") from exc
-
-
-def _write_jsonl(path: Path, records: Iterable[Mapping[str, Any]]):
-    payload = b"\n".join(_canonical_bytes(dict(record)) for record in records) + b"\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return path
+        return atomic_write_jsonl(path, records)
+    except SchemaError as exc:
+        raise SemanticAlignmentError(f"Invalid semantic JSONL: {exc}") from exc
 
 
 def read_jsonl(path):
-    records = []
-    with Path(path).open(encoding="utf-8-sig") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except (json.JSONDecodeError, UnicodeError) as exc:
-                raise SemanticAlignmentError(
-                    f"Invalid semantic JSONL at line {line_number}: {exc}"
-                ) from exc
-            if not isinstance(record, dict):
-                raise SemanticAlignmentError(
-                    f"Semantic JSONL line {line_number} must be an object"
-                )
-            records.append(record)
-    return records
+    try:
+        return read_schema_jsonl(path)
+    except (SchemaError, UnicodeError) as exc:
+        raise SemanticAlignmentError(f"Invalid semantic JSONL: {exc}") from exc
 
 
 def _require_sha(value, label):
@@ -303,7 +265,7 @@ def build_word_timeline(
     timeline_path = output / "word_timeline.jsonl"
     quarantine_path = output / "quarantine.json"
     manifest_path = output / "word_timeline.manifest.json"
-    _write_jsonl(timeline_path, words)
+    write_jsonl(timeline_path, words)
     atomic_write_json(
         quarantine_path,
         {
@@ -1086,7 +1048,7 @@ def finalize_semantic_blocks(
     output = Path(output_dir)
     blocks_path = output / "final_blocks.jsonl"
     report_path = output / "semantic_release_qa.json"
-    _write_jsonl(blocks_path, final_blocks)
+    write_jsonl(blocks_path, final_blocks)
     atomic_write_json(report_path, report)
     review_path = output / "semantic_alignment_review_required.json"
     if review_required_count:
@@ -1543,7 +1505,6 @@ def finalize_semantic_episode(
 
 __all__ = [
     "ALIGNMENT_POLICY",
-    "FINAL_BLOCK_FORMAT",
     "SemanticAlignmentConfig",
     "SemanticAlignmentError",
     "TIMING_SOURCE",
@@ -1562,4 +1523,5 @@ __all__ = [
     "semantic_run_contract",
     "sign_coarse_fallback_approval",
     "validate_coarse_fallback_approvals",
+    "write_jsonl",
 ]

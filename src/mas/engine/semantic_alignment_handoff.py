@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from .download import canonical_json_bytes
 from .id_translation import (
     _jsonl_bytes,
     _open_checked_zip,
@@ -17,7 +18,6 @@ from .semantic_alignment import (
     ALIGNMENT_POLICY,
     SemanticAlignmentConfig,
     SemanticAlignmentError,
-    _canonical_bytes,
     _known_metadata_reason,
     _validate_resolution,
 )
@@ -71,7 +71,7 @@ def _batches(records, *, target_count, maximum_bytes):
     current = []
     current_size = 0
     for record in records:
-        size = len(_canonical_bytes(record)) + 1
+        size = len(canonical_json_bytes(record)) + 1
         if current and (len(current) >= target_count or current_size + size > maximum_bytes):
             batches.append(current)
             current = []
@@ -170,7 +170,7 @@ def create_semantic_alignment_pack(
     }
     manifest = {
         **identity,
-        "input_identity_sha256": hashlib.sha256(_canonical_bytes(identity)).hexdigest(),
+        "input_identity_sha256": hashlib.sha256(canonical_json_bytes(identity)).hexdigest(),
         "file_sha256": {
             name: _sha_bytes(payload)
             for name, payload in sorted(payloads.items())
@@ -223,7 +223,7 @@ def validate_semantic_alignment_pack(path):
         if (
             manifest["format"] != INPUT_FORMAT
             or manifest["alignment_policy"] != ALIGNMENT_POLICY
-            or manifest["input_identity_sha256"] != hashlib.sha256(_canonical_bytes(identity)).hexdigest()
+            or manifest["input_identity_sha256"] != hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
             or manifest["batch_count"] != len(manifest["batches"])
             or manifest["window_count"] != len(manifest["window_ids"])
             or len(manifest["window_ids"]) != len(set(manifest["window_ids"]))
@@ -301,7 +301,7 @@ def validate_semantic_alignment_return(input_pack, returned_zip, *, config=None)
         if (
             manifest["format"] != RETURN_FORMAT
             or manifest["input_identity_sha256"] != input_manifest["input_identity_sha256"]
-            or manifest["input_manifest_sha256"] != hashlib.sha256(_canonical_bytes(input_manifest)).hexdigest()
+            or manifest["input_manifest_sha256"] != hashlib.sha256(canonical_json_bytes(input_manifest)).hexdigest()
             or manifest["source_sha256"] != input_manifest["source_sha256"]
             or manifest["word_timeline_sha256"] != input_manifest["word_timeline_sha256"]
             or manifest["producer_sha256"] != input_manifest["producer_sha256"]

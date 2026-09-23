@@ -65,7 +65,7 @@ if not shutil.which("ffmpeg"):
     raise RuntimeError("FFmpeg is missing from this Colab runtime")
 '''
 # Deno version/checksum are inherited from the existing repository bootstrap.
-config_files={p.name:p.read_text(encoding='utf-8') for p in (ROOT/'config/production').iterdir()
+config_files={p.name:p.read_text(encoding='utf-8') for p in sorted((ROOT/'config/production').iterdir())
               if p.name in ['TRANSLATION_INSTRUCTIONS.md','names.yaml','religious_terms.yaml']}
 setup='''from google.colab import drive
 from pathlib import Path

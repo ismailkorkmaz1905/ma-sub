@@ -44,3 +44,10 @@ metne yeniden forced alignment uygulanmaz. Önce `colab/README.md` ve
 `colab/REVIEW.md` okuyun. `colab/build_notebook.py` ile notebook kopyasını
 yeniden üretin; kaynak/notebook eşitliğini test edin. GPU testi yapılmadan
 canlı üretim veya akustik doğruluk iddiasında bulunmayın.
+
+## Resmî altyazı yolu
+
+`src/mas/official_subtitles.py` yayıncının mevcut WebVTT zamanlarını kullanır.
+ASR çalıştırmaz; sahte kelime zamanları üretmeyin. Önce `automation/README.md`
+okuyun. Çeviri mevcut ChatGPT'de yapılır; ücretli API veya başka çeviri modeli
+eklemeyin. Yayıncı zamanı korumasını gerçek ses senkron testiyle karıştırmayın.

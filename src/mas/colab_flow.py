@@ -256,7 +256,7 @@ def build_schema(episode, source_sha, duration_ms, words, speech, glossary, inst
                 words=words, speech=speech, cues=cues, gaps=uncovered_speech(speech, words))
 
 
-def make_pack(root, schema, instructions, batch_size=150):
+def make_pack(root, schema, instructions, batch_size=150, *, evidence_notes=None):
     root = Path(root)
     sha = digest(schema)
     if hashlib.sha256(instructions.encode()).hexdigest() != schema['instructions_sha256']:
@@ -267,14 +267,14 @@ def make_pack(root, schema, instructions, batch_size=150):
     write_json(schema_path, schema)
     payloads = {'schema.json': canonical(schema), 'glossary.json': canonical(schema['glossary']),
                 'TRANSLATION_INSTRUCTIONS.md': instructions.encode('utf-8'),
-                'EVIDENCE_NOTES.md': EVIDENCE_NOTES.encode('utf-8')}
+                'EVIDENCE_NOTES.md': (EVIDENCE_NOTES if evidence_notes is None else evidence_notes).encode('utf-8')}
     batches = []
     cues = schema['cues']
     for offset in range(0, len(cues), batch_size):
         name = f'batch_{len(batches)+1:03d}.jsonl'
         records = []
         for j, cue in enumerate(cues[offset:offset+batch_size], offset):
-            records.append(dict(cue, schema_sha256=sha, schema_version=VERSION, episode=schema['episode'],
+            records.append(dict(cue, schema_sha256=sha, schema_version=schema.get('version',VERSION), episode=schema['episode'],
                 timing_text=cue['primary_text'], verification_text=None, youtube_text=None,
                 duration_ms=cue['end_ms']-cue['start_ms'],
                 target_character_budget=min(84, int((cue['end_ms']-cue['start_ms'])/1000*POLICY['max_cps'])),
@@ -283,7 +283,7 @@ def make_pack(root, schema, instructions, batch_size=150):
         payloads[name] = b'\n'.join(canonical(r) for r in records) + b'\n'
         batches.append(dict(filename=name, count=len(records), sha256=hashlib.sha256(payloads[name]).hexdigest(),
                             block_uids=[r['block_uid'] for r in records]))
-    manifest = dict(version=VERSION, episode=schema['episode'], schema_sha256=sha,
+    manifest = dict(version=schema.get('version',VERSION), episode=schema['episode'], schema_sha256=sha,
                     source_sha256=schema['source_sha256'], total_blocks=len(cues), batches=batches,
                     file_sha256={k: hashlib.sha256(v).hexdigest() for k,v in payloads.items()})
     payloads['manifest.json'] = canonical(manifest)

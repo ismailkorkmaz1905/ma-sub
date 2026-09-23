@@ -1,5 +1,11 @@
 # Muhtemel Ask Subtitles
 
+## Otomatik resmî altyazı yolu
+
+[Yeni sade akış](automation/README.md): resmî Türkçe altyazı + zamanlanmış ChatGPT
+çevirisi + Drive teslimi. PC, GPU ve ücretli API gerektirmez. Yayıncının Türkçe
+dosyası hazır olmalıdır; sesle senkron doğrulaması henüz tamamlanmadı.
+
 ## Colab ile PC kapalıyken çalışma
 
 Yeni RunPod gerektirmeyen akış: [Colab kullanım adımları](colab/README.md),

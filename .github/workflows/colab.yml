@@ -1,0 +1,26 @@
+name: Colab subtitle contracts
+on:
+  push:
+    paths: ['colab/**', 'src/mas/colab_flow.py', 'tests/test_colab_flow.py', 'src/mas/video_flow.py', 'tests/test_video_flow.py', '.github/workflows/colab.yml']
+  pull_request:
+    paths: ['colab/**', 'src/mas/colab_flow.py', 'tests/test_colab_flow.py', 'src/mas/video_flow.py', 'tests/test_video_flow.py', '.github/workflows/colab.yml']
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - run: python -m pip install pytest==8.3.5 PyYAML==6.0.2 numpy==2.2.6
+      - run: python colab/build_notebook.py && git diff --exit-code -- colab/Muhtemel_Ask.ipynb
+      - run: python -m pytest -q tests/test_colab_flow.py tests/test_video_flow.py
+        env:
+          PYTHONPATH: src
+          CUDA_VISIBLE_DEVICES: '-1'
+          HF_HUB_OFFLINE: '1'
+      - run: git diff --check

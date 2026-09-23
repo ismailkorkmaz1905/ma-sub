@@ -1,0 +1,307 @@
+{
+  "date": "2026-09-23",
+  "gpu": "NVIDIA L4",
+  "gpu_memory_mib": 23034,
+  "cpus": 12,
+  "system_ram_gb": 52.96,
+  "disk_gb": 235.68,
+  "account_plan_observed": "Colab Pro",
+  "account_compute_units_start": 80,
+  "account_compute_units_end": 79.16,
+  "account_delta_units": 0.84,
+  "other_session_left_running": "one pre-existing CPU session, approximately 0.08 units/hour",
+  "l4_units_per_hour_observed": 1.62,
+  "drive_mount": "User approved broad access; mounted, checkpoint resumed after T4->L4 runtime change",
+  "runtime_shutdown": "Production run cell successfully flushed Drive and unassigned L4; UI Not connected to runtime and active sessions fell from 2 to 1",
+  "full_episode_processed": false,
+  "full_download": "Interrupted when user clarified short samples only; temporary partial source not delivered",
+  "source_page": "https://www.showtv.com.tr/dizi/tum_bolumler/muhtemel-ask-sezon-1-bolum-14-izle/134887",
+  "test_windows": [
+    {
+      "label": "beginning",
+      "requested_source_start_seconds": 65,
+      "audio_duration_ms": 61141,
+      "source_sha256": "ce44c57f9c63f52afca77ad3b98e76f3540602f66de3a5e2bab8e9d45432a0c3",
+      "asr_seconds": 17.98,
+      "cues": 13,
+      "unresolved_gaps": 1,
+      "rejected_windows": 0
+    },
+    {
+      "label": "middle",
+      "requested_source_start_seconds": 4500,
+      "audio_duration_ms": 60139,
+      "source_sha256": "10f29b12eace3c186cf0c2cd50470019d4f7f7ebc5a5ce0616ae527b84d17810",
+      "asr_seconds": 19.4,
+      "cues": 18,
+      "unresolved_gaps": 2,
+      "rejected_windows": 2
+    },
+    {
+      "label": "end",
+      "requested_source_start_seconds": 8100,
+      "audio_duration_ms": 60139,
+      "source_sha256": "6d8f4382ff1d33e4facafae7f3e77f1d13a918bc291b57700b92477cc4cdf448",
+      "asr_seconds": 20.18,
+      "cues": 21,
+      "unresolved_gaps": 1,
+      "rejected_windows": 1
+    }
+  ],
+  "test_clips_cutting": "Stream copy at keyframes; requested offsets not precise publisher alignment references",
+  "asr_method": "large-v3 wide and separate speech windows, same model; no post-edit forced alignment",
+  "asr_version": "colab-speech-window-3",
+  "asr_limits": "Unconfirmed zero-duration stock phrases quarantined with raw words and unresolved audio interval; no listening/absence-of-speech approval",
+  "rejected_experiments": [
+    "Merging speech windows within 1 second reduced stock phrases but moved one onset about 3 seconds earlier; not deployed",
+    "Removing name prompt did not remove stock phrase hallucinations; not deployed"
+  ],
+  "burn_1080p": {
+    "total_seconds": 8.215243365999868,
+    "target_size_gb": 0.03207413333333334,
+    "scaled_limit_bytes": 33410555,
+    "receipt": {
+      "format": "mas-burned-id-mp4-2",
+      "status": "VERIFIED_ENCODING",
+      "inputs": {
+        "source_sha256": "6d8f4382ff1d33e4facafae7f3e77f1d13a918bc291b57700b92477cc4cdf448",
+        "id_srt_sha256": "6fdd5debaeb654bbd16c213c27e586064ae68322884cd54eea05319f264935af"
+      },
+      "encoder": "h264_nvenc",
+      "encoding_settings": {
+        "encoder": "h264_nvenc",
+        "encoder_options": [
+          "-preset",
+          "p4",
+          "-rc",
+          "vbr"
+        ],
+        "target_size_gb": 0.03207413333333334,
+        "target_bytes": 32074133,
+        "target_policy": "SOFT_TARGET",
+        "planned_video_bitrate_bps": 4066243,
+        "audio_bitrate_bps": 192000,
+        "source_sha256": "6d8f4382ff1d33e4facafae7f3e77f1d13a918bc291b57700b92477cc4cdf448",
+        "source_duration_seconds": 60.257969,
+        "identity_sha256": "d4526149e3f69b957bb1369c290231768203bab936481db0119cfba6bd0d33b3"
+      },
+      "sample_approval": null,
+      "style": "FontName=Arial,FontSize=14,Outline=0.7,Shadow=0,MarginV=14,MarginL=26,MarginR=26",
+      "subtitle_blocks": 21,
+      "output_sha256": "3c69620f5c7b2e596ac85c21589587df3c9cbc355e4108a7fdfebc63091cf7f0",
+      "output_bytes": 32566295,
+      "duration_seconds": 60.32,
+      "encode_elapsed_seconds": 7.21567377700012,
+      "width": 1920,
+      "height": 1080,
+      "audio_codec": "aac",
+      "audio_language": "tur",
+      "subtitle_language": "id",
+      "subtitles_burned_in": true,
+      "perceptual_acceptance": "NOT_ASSERTED",
+      "storage_preflight": {
+        "required_free_bytes": 33677840,
+        "output": {
+          "path": "/content/drive/MyDrive/Muhtemel_Ask_Subtitles/Colab_v1/Test_14_three_windows/end_guarded/output/9b5c0fe1f783defe",
+          "filesystem_capacity_bytes": 253055008768,
+          "filesystem_used_bytes": 66899845120,
+          "filesystem_free_bytes": 186155163648
+        },
+        "scratch": {
+          "path": "/content/drive/MyDrive/Muhtemel_Ask_Subtitles/Colab_v1/Test_14_three_windows/end_guarded/output/9b5c0fe1f783defe",
+          "filesystem_capacity_bytes": 253055008768,
+          "filesystem_used_bytes": 66899845120,
+          "filesystem_free_bytes": 186155163648
+        }
+      },
+      "command": [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-n",
+        "-i",
+        "/content/drive/MyDrive/Muhtemel_Ask_Subtitles/Colab_v1/Test_14_three_windows/end_guarded/source.mp4",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0",
+        "-sn",
+        "-dn",
+        "-vf",
+        "subtitles=id.srt:force_style='FontName=Arial,FontSize=14,Outline=0.7,Shadow=0,MarginV=14,MarginL=26,MarginR=26'",
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "p4",
+        "-rc",
+        "vbr",
+        "-b:v",
+        "4066243",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ac",
+        "2",
+        "-metadata:s:a:0",
+        "language=tur",
+        "-movflags",
+        "+faststart",
+        "-progress",
+        "pipe:1",
+        "-stats_period",
+        "1",
+        "/content/drive/MyDrive/Muhtemel_Ask_Subtitles/Colab_v1/Test_14_three_windows/end_guarded/output/9b5c0fe1f783defe/.burn-0m_twpha/encoded.mp4"
+      ]
+    },
+    "status": "BURNED_DRAFT",
+    "size_verified": true,
+    "encode_attempts": [
+      {
+        "path": "/content/drive/MyDrive/Muhtemel_Ask_Subtitles/Colab_v1/Test_14_three_windows/end_guarded/output/9b5c0fe1f783defe/Muhtemel_Ask_14_ID.draft.mp4",
+        "bytes": 32566295,
+        "target_size_gb": 0.03207413333333334
+      }
+    ],
+    "issues": [
+      {
+        "block_uid": "6d8f4382ff1d-00001",
+        "code": "low_asr_confidence"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00002",
+        "code": "early_start_against_vad"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00002",
+        "code": "translator_review"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00003",
+        "code": "translator_review"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00004",
+        "code": "short_cue"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00005",
+        "code": "low_asr_confidence"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00005",
+        "code": "translator_review"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00007",
+        "code": "short_cue"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00007",
+        "code": "early_end_against_vad"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00008",
+        "code": "allah_missing"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00009",
+        "code": "translator_review"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00011",
+        "code": "short_cue"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00012",
+        "code": "short_cue"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00014",
+        "code": "short_cue"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00014",
+        "code": "suspicious_asr_segment"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00014",
+        "code": "translator_review"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00015",
+        "code": "short_cue"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00015",
+        "code": "translator_review"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00018",
+        "code": "translator_review"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00019",
+        "code": "tr_final_reading_speed"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00021",
+        "code": "translator_review"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00021",
+        "code": "tr_final_reading_speed"
+      },
+      {
+        "block_uid": "gap-0001",
+        "code": "uncovered_speech"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00001",
+        "code": "sample_listening_required"
+      },
+      {
+        "block_uid": "6d8f4382ff1d-00021",
+        "code": "sample_listening_required"
+      },
+      {
+        "block_uid": "episode",
+        "code": "full_playback_not_reviewed"
+      }
+    ],
+    "path": "/content/drive/MyDrive/Muhtemel_Ask_Subtitles/Colab_v1/Test_14_three_windows/end_guarded/output/9b5c0fe1f783defe/Muhtemel_Ask_14_ID.draft.mp4"
+  },
+  "video_drive_file_id": "17NtwKc4dBiTKmmVh6ycGKbzvUYE0cN3Z",
+  "independent_drive_readback": true,
+  "production_notebook": {
+    "drive_id": "1ZsUB_JFQcQnlEONhf9ry1JV5SeBIUIpJ",
+    "bytes": 249389,
+    "sha256": "64010c8202e7563afe4f5966380bac9cede668c5117cd0cffe5d5d571dbe1f70",
+    "independent_readback": true
+  },
+  "production_encoding": {
+    "target_bytes": 4800000000,
+    "strict_upper_limit_bytes": 5000000000,
+    "max_encodes": 2,
+    "shared_timeout_seconds": 3600,
+    "keep_source_resolution": true,
+    "encoder": "h264_nvenc",
+    "preset": "p4",
+    "rate_control": "vbr",
+    "estimated_150_minute_burn_minutes": [
+      18,
+      25
+    ],
+    "full_length_measured": false
+  },
+  "validation": {
+    "targeted_tests": 41,
+    "full_tests": 1300,
+    "full_suite_seconds": 77.89,
+    "audio_listened": false,
+    "quality_approved": false
+  },
+  "asr_evidence_drive_file_id": "1G8cvK5UY4bKx5WN508GDl2mkhAKHYz_d"
+}

@@ -1,5 +1,18 @@
 # Muhtemel Ask Subtitles
 
+## PC kapalıyken, RunPod olmadan
+
+[Yeni akış](automation/README.md): bölüm videosunu Drive'a indir → resmî altyazı
+hazırsa kullan, yoksa GPU ASR → mevcut ChatGPT ile doğal Endonezce → **altyazısı
+gömülü MP4**. Resmî altyazının ertesi gün çıkması beklenmez.
+
+[Colab notebook](colab/Muhtemel_Ask.ipynb), [kullanım](colab/README.md).
+`video_flow.py` eski `engine/burned_mp4.py` NVIDIA kodunu kullanır. Düzeltilmiş
+metne yeniden forced alignment uygulanmaz. Canlı denemenin kapsamı ve otomasyonun
+kurulum durumu `automation/README.md` içindedir.
+
+## Mevcut üretim komutu
+
 Bir bölümü başlatmak veya kaldığı yerden sürdürmek için tek komut kullanılır:
 
 ```powershell

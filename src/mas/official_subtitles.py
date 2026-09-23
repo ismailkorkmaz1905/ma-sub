@@ -68,6 +68,21 @@ def discover(episode):
     return next(iter(urls),None)
 
 
+def media(episode):
+    """Find the real MP4 before captions exist; never guess a CDN filename."""
+    page_url=discover(episode)
+    if not page_url:return None
+    page=Page(get(page_url).decode('utf-8'))
+    videos=[j for j in page.metadata if isinstance(j,dict) and j.get('@type')=='VideoObject']
+    episodes=[j for j in page.metadata if isinstance(j,dict) and j.get('@type')=='TVEpisode']
+    if len(videos)!=1 or len(episodes)!=1 or str(episodes[0].get('episodeNumber'))!=str(episode):
+        raise f.ContractError('Publisher episode identity is ambiguous')
+    url=videos[0]['contentUrl'];parsed=urlparse(url)
+    if parsed.scheme!='https' or parsed.hostname!='vmcdn.ciner.com.tr' or not parsed.path.endswith('.mp4'):
+        raise f.ContractError('Publisher did not provide a direct MP4')
+    return dict(page_url=page_url,media_url=url)
+
+
 def milliseconds(stamp):
     parts=stamp.split(':')
     if len(parts)==2:parts.insert(0,'0')

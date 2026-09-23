@@ -1,0 +1,46 @@
+{
+  "date": "2026-09-23",
+  "scope": "episode_14_sample_only",
+  "source_interval_seconds": [
+    65,
+    155
+  ],
+  "source_full_url": "https://vmcdn.ciner.com.tr/ht/2026/09/17/7A73CF815507B1252AD750F42F5A7255_1920x1080.mp4",
+  "source_full_content_length": 6226057304,
+  "source_sample_sha256": "8b521f299cac03129d2869cf138cf077550523cbaaec58ec8f1a99456258fbbe",
+  "gpu": "Tesla T4, 15360 MiB",
+  "model_revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+  "asr": "large-v3 wide pass plus separate speech windows; publisher ASR shortcut disabled",
+  "translation": "ChatGPT; unchanged production language instructions; some demo corrections used publisher reference",
+  "audio_listening_performed": false,
+  "full_episode_test": false,
+  "quality_approved": false,
+  "cue_count": 15,
+  "qa_issues": 25,
+  "output": {
+    "encoder": "h264_nvenc",
+    "style": "FontName=Arial,FontSize=14,Outline=0.7,Shadow=0,MarginV=14,MarginL=26,MarginR=26",
+    "output_bytes": 29961085,
+    "output_sha256": "1f35113b2c6066731822efe6cf174d694e4cfa0f9d2b3efcaae0fb1825b52a9d",
+    "duration_seconds": 90.005,
+    "width": 1280,
+    "height": 720,
+    "encode_elapsed_seconds": 14.306789835000018,
+    "subtitles_burned_in": true
+  },
+  "visual_check": "Actual decoded 720p frames at 11.8 and 54 s; readable burned single/two-line text",
+  "source_drive_file_id": "1A9pV1fKkV83g1Clj-LQvcHCRE-lw6b-p",
+  "output_drive_file_id": "1T3uHHPUxwWfo2xd0DkrB91-D1-pgLGD7",
+  "drive_readback_verified": true,
+  "colab_notebook_file_id": "1Mb8C7r-7WGbfb0xt0f3FkAN-r4N4dSas",
+  "production_notebook_file_id": "1ZsUB_JFQcQnlEONhf9ry1JV5SeBIUIpJ",
+  "known_limitations": [
+    "Uncertain shout recognition and onset",
+    "Fast prayer recognition needs listening",
+    "Short/long cues and coverage warnings remain",
+    "No guaranteed unattended Colab runtime start",
+    "No completed full-episode delivery"
+  ],
+  "drive_mount": "NOT_AUTHORIZED: automatic approval review rejected broad Colab access to all Drive files; approval pending",
+  "drive_readback_method": "Authenticated Drive viewer Download; independent browser download bytes and SHA-256 matched"
+}

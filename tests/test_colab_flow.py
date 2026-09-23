@@ -252,8 +252,8 @@ def test_review_player_escapes_text_and_keeps_absolute_times():
 def test_interrupted_worker_reuses_completed_chunk_and_rejects_tampering(tmp_path,monkeypatch):
     import numpy as np
     root=tmp_path/'episode';root.mkdir();config=Path(__file__).resolve().parents[1]/'config/production'
-    (root/'source.media').write_bytes(b'fake source for checkpoint test')
-    source_sha=f.file_hash(root/'source.media')
+    (root/'source.mp4').write_bytes(b'fake source for checkpoint test')
+    source_sha=f.file_hash(root/'source.mp4')
     f.write_json(root/'source.json',dict(episode=15,sha256=source_sha,bytes=35,url=''))
     with wave.open(str(root/'audio.wav'),'wb') as w:
         w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000)
@@ -264,17 +264,21 @@ def test_interrupted_worker_reuses_completed_chunk_and_rejects_tampering(tmp_pat
         def __init__(self,*args,**kwargs):pass
         def transcribe(self,audio,**kwargs):
             state['calls']+=1
-            if state['fail'] and state['calls']==2:raise RuntimeError('simulated disconnect')
+            if state['fail'] and state['calls']==3:raise RuntimeError('simulated disconnect')
             word=types.SimpleNamespace(word='Merhaba.',start=1.,end=2.,probability=.95)
-            segment=types.SimpleNamespace(words=[word],avg_logprob=-.1,no_speech_prob=.01,compression_ratio=1.,end=2.)
+            segment=types.SimpleNamespace(id=0,words=[word],avg_logprob=-.1,no_speech_prob=.01,compression_ratio=1.,end=2.)
             return iter([segment]),None
     fw=types.ModuleType('faster_whisper');fw.WhisperModel=Model
     vad=types.ModuleType('faster_whisper.vad')
     vad.VadOptions=lambda **kwargs:kwargs
-    vad.get_speech_timestamps=lambda *args,**kwargs:[dict(start=0,end=730*16000)]
+    vad.get_speech_timestamps=lambda audio,**kwargs:[dict(start=0,end=len(audio))]
     hub=types.ModuleType('huggingface_hub')
     hub.HfApi=lambda:types.SimpleNamespace(model_info=lambda *args,**kwargs:types.SimpleNamespace(sha='revision-test'))
-    hub.snapshot_download=lambda *args,**kwargs:'model-test'
+    def model_download(*args,**kwargs):
+        # A real T4 run failed with 80-vs-128 mel inputs when this file was omitted.
+        assert 'preprocessor_config.json' in kwargs['allow_patterns']
+        return 'model-test'
+    hub.snapshot_download=model_download
     monkeypatch.setitem(sys.modules,'faster_whisper',fw);monkeypatch.setitem(sys.modules,'faster_whisper.vad',vad)
     monkeypatch.setitem(sys.modules,'huggingface_hub',hub)
     monkeypatch.setattr(f.importlib.metadata,'version',lambda p:'test-version')
@@ -282,10 +286,11 @@ def test_interrupted_worker_reuses_completed_chunk_and_rejects_tampering(tmp_pat
     checkpoint=root/'asr/chunk_0000.json';before=checkpoint.read_bytes()
     state['fail']=False
     f.worker(root,config)
-    assert checkpoint.read_bytes()==before and state['calls']==4
+    assert checkpoint.read_bytes()==before and state['calls']==7
     s=f.read_json(root/'schema.json')
     assert [w['start_ms'] for w in s['words']]==[1000,301000,601000]
     assert s['provenance']['model_revision']=='revision-test'
+    assert 'chunk_cut_in_speech' in s['words'][1]['risk_flags']
     broken=f.read_json(checkpoint);broken['words'][0]['text']='Changed'
     f.write_json(checkpoint,broken)
     with pytest.raises(f.ContractError,match='Chunk checkpoint'):f.worker(root,config)

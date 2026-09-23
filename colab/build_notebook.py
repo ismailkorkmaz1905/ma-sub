@@ -9,31 +9,30 @@ def cell(kind,source):
     if kind=='code':result.update(execution_count=None,outputs=[])
     return result
 
-intro='''# Muhtemel Aşk: Türkçe ses -> doğal Endonezce altyazı
+intro='''# Muhtemel Aşk: indir → çevir → altyazıyı MP4'e göm
 
-PC ve RunPod gerekmez. Hazırlama aşaması Colab GPU kullanır; çeviri burada ChatGPT'de
-mevcut sözlük ve çeviri kurallarıyla yapılır. Son aşama CPU oturumunda çalışabilir.
+RunPod veya açık PC gerekmez. Colab T4 GPU kullanır. Kaynak video, ASR parçaları,
+çeviri paketi ve Endonezce altyazısı gömülü MP4 Drive'da saklanır.
 
-1. Telefonda Colab'ı aç. Runtime > Change runtime type > GPU seç.
-2. Bölüm numarasını ve varsa video bağlantısını gir. Hazırlama bölümündeki kod hücrelerini sırayla çalıştır.
-3. Drive'da gösterilen `TRANSLATION_PACK.zip` dosyasını ChatGPT'ye ver.
-4. Dönen `TRANSLATED.zip` dosyasını aynı `handoff` klasörüne koy.
-5. `MODE = "finish"` yapıp hazırlama bölümündeki kod hücrelerini tekrar çalıştır. GPU gerekmez.
-6. Taslak SRT ve kontrol listesini incele. Dinleme aracıyla işaretli yerleri düzelt.
+1. GPU oturumunda `MODE = "prepare"`: bölüm indirilir. Resmî Türkçe altyazı hazırsa
+   aynı video kaynağıyla kullanılır; yoksa **beklenmeden large-v3 ASR başlar**.
+2. Çeviri mevcut ChatGPT ile, paketteki özgün talimat ve sözlükle yapılır.
+3. `MODE = "finish"`: çeviri doğrulanır ve eski projenin NVIDIA destekli koduyla
+   altyazı **MP4'e gömülür**. SRT tek başına son teslim değildir.
 
-**06:00'da kendiliğinden başlama kurulmuş değildir.** Colab oturumu ve Drive izni
-telefondan açılır. GPU/kota/oturum süresi garanti değildir. Tamamlanan ASR parçaları
-Drive'da kalır. GPU'yu çeviri beklerken Runtime > Disconnect and delete runtime ile
-serbest bırak; devam etmek için notebook'u yeniden aç.
+Cuma 25 Eylül 06:00 **Singapur** için ChatGPT kontrol görevi kuruldu. Bu notebook
+kendi başına zamanlayıcı değildir. Colab GPU tahsisi ve Drive izni geçerli olmalıdır;
+ücretsiz Colab gözetimsiz başlatma/çalışma garantisi vermez. Görev gerçek erişim
+engeli olursa bildirir; olmayan altyazıyı sessizce beklemez.
 
-Bu bir üretim adayıdır: gerçek Colab GPU ve tam bölüm dinleme testi henüz yapılmadı.
-Whisper kelime zamanları tahmindir. Yazı düzeltilince yeniden forced alignment yoktur;
-yalnız dinlenerek yapılan, kaydı tutulan zaman düzeltmeleri uygulanır.
-YouTube indirme engellenirse erişebildiğin kaynak videoyu Drive'a koyup SOURCE_FILE kullan.
+Yalnız kaynak ASR kelime zamanları kullanılır; düzeltilmiş metne tekrar forced
+alignment yoktur. Belirsiz senkron yerleri dinleme ekranından düzeltilir. İncelemesi
+bitmemiş video `.draft.mp4` olarak üretilir; kalite kontrolü yapılmış gibi sunulmaz.
 '''
 settings='''EPISODE = 15
 MODE = "prepare"  # "prepare" veya "finish"
-SOURCE_URL = ""  # Boşsa resmî kanalda tam bölüm başlığını arar.
+SOURCE_URL = ""  # Boşsa Show TV sayfasındaki gerçek MP4 bulunur; ayrıca YouTube URL kabul edilir.
+FORCE_ASR = False  # True: yayıncı altyazısı olsa da ses üzerinden çalışır.
 SOURCE_FILE = ""  # Alternatif: Drive içindeki kaynak videonun tam yolu.
 DRIVE_ROOT = "/content/drive/MyDrive/Muhtemel_Ask_Subtitles/Colab_v1"
 '''
@@ -49,7 +48,7 @@ if MODE == "prepare":
     from pathlib import Path
     libs=[str(Path(nvidia.cublas.lib.__path__[0])),str(Path(nvidia.cudnn.lib.__path__[0]))]
     os.environ["LD_LIBRARY_PATH"] = ":".join(libs+[os.environ.get("LD_LIBRARY_PATH","")])
-    if not SOURCE_FILE:
+    if SOURCE_URL and any(host in SOURCE_URL for host in ["youtube.com", "youtu.be"]):
         import hashlib, urllib.request, zipfile, io
         tool_dir=Path('/content/ma-sub-tools');tool_dir.mkdir(exist_ok=True)
         executable=tool_dir/'deno'
@@ -67,40 +66,48 @@ if not shutil.which("ffmpeg"):
 # Deno version/checksum are inherited from the existing repository bootstrap.
 config_files={p.name:p.read_text(encoding='utf-8') for p in sorted((ROOT/'config/production').iterdir())
               if p.name in ['TRANSLATION_INSTRUCTIONS.md','names.yaml','religious_terms.yaml']}
+support_names=['__init__.py','official_subtitles.py','video_flow.py','progress.py','reliability.py',
+               'engine/__init__.py','engine/burned_mp4.py','engine/download.py','engine/srt.py']
+support_files={name:(ROOT/'src/mas'/name).read_text() for name in support_names}
 setup='''from google.colab import drive
 from pathlib import Path
-import importlib, sys
+import importlib, sys, shutil
 drive.mount("/content/drive")
 ROOT = Path(DRIVE_ROOT) / f"Muhtemel Ask {EPISODE}.Bolum"
 CONFIG = Path("/content/ma_sub_config")
 CONFIG.mkdir(exist_ok=True)
+'''+ 'support_files = '+repr(support_files)+'\n'+'''for name,content in support_files.items():
+    target=Path('/content/mas')/name;target.parent.mkdir(parents=True,exist_ok=True)
+    target.write_text(content,encoding='utf-8')
+shutil.copyfile('/content/ma_sub_colab.py','/content/mas/colab_flow.py')
 '''+ 'config_files = '+repr(config_files)+'\n'+'''for name,content in config_files.items():
     (CONFIG/name).write_text(content,encoding="utf-8")
 if "/content" not in sys.path: sys.path.insert(0,"/content")
-import ma_sub_colab as flow
-flow = importlib.reload(flow)
+from mas import colab_flow as flow, video_flow as video
+flow = importlib.reload(flow);video = importlib.reload(video)
 RETURN = ROOT / "handoff" / f"Muhtemel Ask {EPISODE}.Bolum_TRANSLATED.zip"
 print("Bölüm klasörü:",ROOT)
 '''
 run='''if MODE == "prepare":
-    PACK = flow.prepare(ROOT, EPISODE, CONFIG, source_file=SOURCE_FILE, source_url=SOURCE_URL)
+    PACK = video.prepare(ROOT, EPISODE, CONFIG, source_file=SOURCE_FILE, source_url=SOURCE_URL, force_asr=FORCE_ASR)
     print("ChatGPT'ye verilecek dosya:",PACK)
     print("Çeviri beklerken GPU oturumunu kapat. Drive'daki dosyalar korunur.")
 elif MODE == "finish":
-    report = flow.finalize(ROOT, RETURN)
-    print("Kontrol listesi:",ROOT/"latest_output.json")
+    report = video.finish(ROOT, RETURN)
+    print("Altyazısı gömülü MP4:", report["path"])
 else:
     raise ValueError("MODE prepare veya finish olmalı")
 '''
 review='''# Yalnız çeviri döndükten sonra çalıştır.
-flow.review_ui(ROOT, RETURN)
+if flow.read_json(ROOT/"video_workflow.json")["route"] == "asr":
+    flow.review_ui(ROOT, RETURN)
+else:
+    print("Yayıncı zamanları kullanıldı; kaynakla senkron dinleme kontrolü gerekir.")
 '''
-preview='''# SRT'yi videoyla VLC gibi bir oynatıcıda da açabilirsin.
-# Aşağıdaki isteğe bağlı hücre hızlı MKV üretir; videoyu yeniden kodlamaz.
-MAKE_PREVIEW = False
-BURN_IN_MP4 = False  # True: altyazıyı videoya gömer; CPU'da uzun sürebilir.
-if MAKE_PREVIEW or BURN_IN_MP4:
-    flow.mux_preview(ROOT, burn=BURN_IN_MP4)
+preview='''# Son çıktının durumu ve tam Drive yolu.
+if (ROOT / "video_output.json").exists():
+    result=flow.read_json(ROOT / "video_output.json")
+    print(result["status"],result["path"])
 '''
 nb={'nbformat':4,'nbformat_minor':5,'metadata':{'kernelspec':{'display_name':'Python 3','language':'python','name':'python3'},
     'language_info':{'name':'python'},'colab':{'name':'Muhtemel_Ask.ipynb','provenance':[]}},

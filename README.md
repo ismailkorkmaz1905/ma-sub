@@ -1,16 +1,15 @@
 # Muhtemel Ask Subtitles
 
-## Otomatik resmî altyazı yolu
+## PC kapalıyken, RunPod olmadan
 
-[Yeni sade akış](automation/README.md): resmî Türkçe altyazı + zamanlanmış ChatGPT
-çevirisi + Drive teslimi. PC, GPU ve ücretli API gerektirmez. Yayıncının Türkçe
-dosyası hazır olmalıdır; sesle senkron doğrulaması henüz tamamlanmadı.
+[Yeni akış](automation/README.md): bölüm videosunu Drive'a indir → resmî altyazı
+hazırsa kullan, yoksa GPU ASR → mevcut ChatGPT ile doğal Endonezce → **altyazısı
+gömülü MP4**. Resmî altyazının ertesi gün çıkması beklenmez.
 
-## Colab ile PC kapalıyken çalışma
-
-Yeni RunPod gerektirmeyen akış: [Colab kullanım adımları](colab/README.md),
-[notebook](colab/Muhtemel_Ask.ipynb) ve [inceleme notları](colab/REVIEW.md).
-Gerçek Colab GPU / bölüm kalite testi henüz tamamlanmamış bir üretim adayıdır.
+[Colab notebook](colab/Muhtemel_Ask.ipynb), [kullanım](colab/README.md).
+`video_flow.py` eski `engine/burned_mp4.py` NVIDIA kodunu kullanır. Düzeltilmiş
+metne yeniden forced alignment uygulanmaz. Canlı denemenin kapsamı ve otomasyonun
+kurulum durumu `automation/README.md` içindedir.
 
 ## Mevcut üretim komutu
 

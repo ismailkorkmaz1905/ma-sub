@@ -51,3 +51,12 @@ canlı üretim veya akustik doğruluk iddiasında bulunmayın.
 ASR çalıştırmaz; sahte kelime zamanları üretmeyin. Önce `automation/README.md`
 okuyun. Çeviri mevcut ChatGPT'de yapılır; ücretli API veya başka çeviri modeli
 eklemeyin. Yayıncı zamanı korumasını gerçek ses senkron testiyle karıştırmayın.
+
+## Video teslimi (23 Eylül son talep)
+
+`video_flow.py` kaynak indirme, yayıncı altyazısı/ASR seçimi ve mevcut
+`engine/burned_mp4.py` GPU gömmesini bağlar. Yayıncı altyazısını bekleme.
+`colab_flow.py` geniş ASR + ayrı konuşma aralığı ASR kullanır; iki geçiş aynı
+modeldir, bağımsız doğrulayıcı veya dinleme diye sunma. Gerçek T4 testinde gerekli
+`preprocessor_config.json` eksikliği düzeltildi. Cuma görevi kayıtlı olsa bile
+Colab/Drive başlangıcı ve ses kalitesi doğrulanmadan tam otomatik başarı iddia etme.

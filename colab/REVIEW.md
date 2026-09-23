@@ -30,10 +30,9 @@ Resmî altyazı beklenmez. RunPod ve ücretli çeviri API'si yoktur.
 - Bağırılan isim, hızlı dua, kısa cue ve olası eksik konuşma yerleri inceleme ister.
   Örnek çeviride birkaç belirsizlik yayıncı metniyle düzeltildi. ASR yedeğinin
   tek başına kusursuz anlam/senkron sağladığı iddia edilmez. Çıktı DRAFT'tır.
-- Cuma 25 Eylül 06:00 Asia/Singapore kontrol görevi kayıtlıdır. Ücretsiz Colab GPU
-  ve oturum tahsisi gözetimsiz başlangıç garantisi değildir.
-- `Mount Drive` otomatik onay kontrolünde, tüm Drive'a geniş erişim istediği için
-  reddedildi. Bu erişim açılmadı. Kullanıcının bu özel izni bekleniyor.
+- Cuma 25 Eylül 06:00 Asia/Singapore kontrol görevi kayıtlıdır. Colab Pro/L4 ve
+  kullanıcı onayı sonrası Drive bağlama artık canlı doğrulandı. Gelecekteki GPU
+  tahsisi yine garanti değildir. Güncel L4/kota/1080p kanıtı automation/README.md içindedir.
 
 ## Kanıt ve denetim
 
@@ -45,3 +44,16 @@ Yazılım testleri gerçek videodaki ses/çeviri kalite sorunlarını geçersiz 
 Opus incelemesinde özellikle: konuşma dışı geniş-ASR adayları, kısa seslerde isim
 hataları, işaretlenmiş zamanlar, parça sınırı uyarıları, checkpoint devamı ve
 Drive izin kapsamı kontrol edilmelidir. Eski üretim/RunPod/forced-align kodu silinmedi.
+
+## Son L4 doğrulaması
+
+Üç 1080p parçada gerçek ASR, 60 saniyelik bir parçada doğal Endonezce çeviri ve
+7.216 saniyede GPU yakma tamamlandı. 5 GB sınırı ölçeklenmiş gerçek boyutla
+denendi; tam bölüm yapılmadı. Notebook'un kendi kapanış hücresi Drive'ı flush
+edip L4'ü serbest bıraktı. 80 başlangıç bakiyesi 79.16 oldu.
+
+Sahte stok sözler ham kanıtları korunarak açık incelemeye ayrılıyor. Zamanı
+erkene çeken bağlam birleştirme denemesi reddedildi. Son örnek 26 açık QA maddesi
+ile DRAFT: bunlar 26 ayrı işitilmiş hata anlamına gelmez; dinleme gereği, kısa
+süreler ve belirsizlik işaretlerini içerir. Eyvallah satırında mevcut Allah
+kontrolünün alt-dize eşleşmesi ayrıca bir uyarı üretiyor; kural gevşetilmedi.

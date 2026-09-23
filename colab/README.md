@@ -9,15 +9,15 @@ yazılım testi ses/çeviri kalitesinin kanıtı değildir.
 1. `Muhtemel_Ask.ipynb` dosyasını GitHub'dan indirip Colab'da **Upload notebook**
    ile aç. Özel repo için Colab'ın GitHub erişimi zaten açıksa doğrudan da açabilirsin.
    Notebook kodu ve sözlüğü içinde taşır; çalışma sırasında GitHub token'ı istemez.
-2. **Runtime > Change runtime type > GPU** seç. `EPISODE = 15`, `MODE = "prepare"`.
+2. **Runtime > Change runtime type > L4 GPU** seç (yoksa T4). `EPISODE = 15`, `MODE = "prepare"`.
 3. `SOURCE_URL` tam bölüm bağlantısıdır. Boşsa Show TV sayfasındaki gerçek MP4
    bulunur. Resmî altyazı hazır değilse beklenmeden GPU ASR başlar. İndirme engellenirse kaynak
    dosyayı Drive'a koyup `SOURCE_FILE` alanını kullan. Engeli aşma döngüsü yoktur.
 4. Hazırlama hücrelerini sırayla çalıştır; Drive bağlama iznini ver.
 5. Gösterilen `TRANSLATION_PACK.zip` dosyasını ChatGPT'ye ver. Paket içindeki
-   talimatlara göre tüm batch'leri çevirmesini iste. GPU oturumunu beklerken kapat.
+   talimatlara göre tüm batch'leri çevirmesini iste. İşlem hücresi Drive kaydını tamamlayıp GPU’yu kendisi kapatır.
 6. Dönüş ZIP'ini bölüm kökündeki `handoff` klasörüne koy. `MODE = "finish"` seç.
-   T4 GPU oturumunda kurulum ve işlem hücrelerini yeniden çalıştır; MP4 otomatik gömülür.
+   Yeni L4/T4 GPU oturumunda kurulum ve işlem hücrelerini yeniden çalıştır; MP4 otomatik gömülür.
 7. TR ve ID SRT'ler ile sorun listesi oluşur. **Dinleme ve düzeltme** hücresini
    aç. İşaretli satırları, örnekleri ve olası eksik konuşmaları dinle. Önizlemede
    yazı yalnız seçili zaman aralığında görünür. Zaman alanları mutlak milisaniyedir.
@@ -105,3 +105,19 @@ git diff --check
 
 `build_notebook.py`, bağımsız modülü ve mevcut üç dil dosyasını notebook içine
 birebir yerleştirir. Hücrelerde çıktı, anahtar veya kullanıcıya ait medya yoktur.
+
+## Boyut ve GPU bütçesi
+
+Varsayılan hedef 4.8 GB, kesin teslim sınırı 5,000,000,000 byte altıdır. Gerçek
+çıktı büyükse yalnız bir küçültme denemesi yapılır; video kesilmez. İki encode
+için ortak üst süre bir saattir. Kaynak çözünürlüğü korunur.
+
+`AUTO_RELEASE_GPU=True` prepare/finish sonunda ve işlem hatasında Drive flush
+başarılı olunca oturumu kapatır. Çeviri sırasında GPU beklemez. Dinleme ekranını
+kullanmak için yeniden bağlanıp kurulum hücrelerini çalıştır; yalnız inceleme
+sırasında otomatik kapanmayı kapatabilirsin. Kurulum veya Drive bağlantı hatası
+olursa çalışan GPU'yu ayrıca kapat.
+
+Sıfır süreli kelime içeren ve geniş ASR tarafından desteklenmeyen belirli stok
+sözler, ham kanıtları korunarak incelemeye ayrılır. Bunların ses aralıkları QA'da
+kalır; konuşma yokmuş gibi sessizce onaylanmaz.

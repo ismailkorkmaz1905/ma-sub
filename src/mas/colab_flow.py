@@ -22,7 +22,7 @@ import wave
 import zipfile
 from pathlib import Path
 
-VERSION = 'colab-speech-window-2'
+VERSION = 'colab-speech-window-3'
 POLICY = dict(max_chars=84, max_ms=6000, pause_ms=450, tail_ms=200,
               max_cpl=42, max_lines=2, max_cps=20, min_ms=700,
               max_word_ms=2000, minimum_probability=0.45, coverage_gap_ms=1500)
@@ -694,8 +694,9 @@ def speech_window_words(model, audio, part, wide_words, names):
     for a,b in sorted(windows):
         if merged and a<=merged[-1][1]:merged[-1]=(merged[-1][0],max(b,merged[-1][1]))
         else:merged.append((a,b))
-    words=[]
+    words=[];rejected=[]
     for index,(a,b) in enumerate(merged):
+        window_words=[]
         segments,_=model.transcribe(audio[a:b],language='tr',beam_size=5,temperature=0,
             word_timestamps=True,condition_on_previous_text=False,vad_filter=False,
             initial_prompt=', '.join(names))
@@ -712,11 +713,26 @@ def speech_window_words(model, audio, part, wide_words, names):
                 if (part['unsafe_start'] and start-origin<2000
                         or part['unsafe_end'] and part['end_ms']-end<2000):
                     own_flags.append('chunk_cut_in_speech')
-                words.append(dict(text=word.word.strip(),start_ms=start,end_ms=end,
+                window_words.append(dict(text=word.word.strip(),start_ms=start,end_ms=end,
                     probability=float(word.probability),segment_id=f'{part["index"]}:window:{index}:{segment.id}',
                     risk_flags=own_flags))
+        # A zero-duration stock phrase unsupported by the wider pass is evidence
+        # to review, not dialogue to burn. Preserve every rejected word and its
+        # audio interval; the worker creates an explicit unresolved QA item.
+        def letters(text):
+            return ''.join(c for c in text.casefold() if c.isalpha())
+        local=letters(' '.join(w['text'] for w in window_words))
+        nearby=letters(' '.join(w['text'] for w in wide_words
+            if w['end_ms']>origin+a/16-200 and w['start_ms']<origin+b/16+200))
+        if (local in {'altyazımk','izlediğiniziçinteşekkürederim','izlediğiniziçinteşekkürler'}
+                and any(w['start_ms']==w['end_ms'] for w in window_words)
+                and local not in nearby):
+            rejected.append(dict(start_ms=origin+round(a/16),end_ms=origin+round(b/16),
+                reason='unconfirmed_stock_phrase',words=window_words))
+        else:
+            words.extend(window_words)
         print(f'Speech window {index+1}/{len(merged)} completed',flush=True)
-    return words
+    return words,rejected
 
 
 def worker(root,config_dir):
@@ -766,7 +782,7 @@ def worker(root,config_dir):
                       compute_type='float16',language='tr',beam_size=5,condition_on_previous_text=False,
                       speech=speech,chunks=chunk_plan(speech,duration))
             write_json(plan_path,plan)
-        plan_sha=digest(plan);model=None;all_words=[];all_wide=[]
+        plan_sha=digest(plan);model=None;all_words=[];all_wide=[];all_rejected=[]
         for part in plan['chunks']:
             checkpoint=root/'asr'/f'chunk_{part["index"]:04d}.json'
             if checkpoint.exists():
@@ -803,15 +819,19 @@ def worker(root,config_dir):
                                           segment_id=f'{part["index"]}:{segment_index}',risk_flags=own_flags))
                     print(f'ASR chunk {part["index"]+1}/{len(plan["chunks"])}: {segment.end:.1f} seconds decoded',flush=True)
                 wide_words=words
-                words=speech_window_words(model,audio[first:last],part,wide_words,names['canonical_names'])
+                words,rejected=speech_window_words(model,audio[first:last],part,wide_words,names['canonical_names'])
                 result=dict(plan_sha256=plan_sha,chunk=part,words=words,words_sha256=digest(words),
-                            wide_words=wide_words,wide_words_sha256=digest(wide_words))
+                            wide_words=wide_words,wide_words_sha256=digest(wide_words),
+                            rejected_windows=rejected,rejected_windows_sha256=digest(rejected))
                 write_json(checkpoint,result)
                 if read_json(checkpoint)!=result:raise ContractError('Chunk save readback mismatch')
             all_words.extend(result['words'])
             if digest(result['wide_words'])!=result['wide_words_sha256']:
                 raise ContractError('Wide ASR reference changed')
             all_wide.extend(result['wide_words'])
+            if digest(result['rejected_windows'])!=result['rejected_windows_sha256']:
+                raise ContractError('Rejected ASR evidence changed')
+            all_rejected.extend(result['rejected_windows'])
         for i,w in enumerate(all_words):w['word_id']=i
         schema=build_schema(saved['episode'],saved['sha256'],duration,all_words,plan['speech'],glossary,instructions,
                             dict(asr_plan_sha256=plan_sha,model_revision=plan['model_revision'],versions=versions,
@@ -825,6 +845,10 @@ def worker(root,config_dir):
             if not any(g['start_ms']==gap['start_ms'] and g['end_ms']==gap['end_ms'] for g in schema['gaps']):
                 gap['issue_id']=f'gap-{len(schema["gaps"])+1:04d}'
                 schema['gaps'].append(gap)
+        schema['rejected_asr']=all_rejected
+        for item in all_rejected:
+            schema['gaps'].append(dict(issue_id=f'gap-{len(schema["gaps"])+1:04d}',
+                start_ms=item['start_ms'],end_ms=item['end_ms'],reason=item['reason']))
         path=make_pack(root,schema,instructions)
         print('Translation pack saved:',path,flush=True)
         print(f'{len(schema["cues"])} cues; {len(schema["gaps"])} potential missing-speech regions.',flush=True)

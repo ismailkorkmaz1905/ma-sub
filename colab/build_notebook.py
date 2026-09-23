@@ -11,7 +11,7 @@ def cell(kind,source):
 
 intro='''# Muhtemel Aşk: indir → çevir → altyazıyı MP4'e göm
 
-RunPod veya açık PC gerekmez. Colab T4 GPU kullanır. Kaynak video, ASR parçaları,
+RunPod veya açık PC gerekmez. Colab L4 GPU kullanır; L4 yoksa T4 seçilebilir. Kaynak video, ASR parçaları,
 çeviri paketi ve Endonezce altyazısı gömülü MP4 Drive'da saklanır.
 
 1. GPU oturumunda `MODE = "prepare"`: bölüm indirilir. Resmî Türkçe altyazı hazırsa
@@ -22,7 +22,7 @@ RunPod veya açık PC gerekmez. Colab T4 GPU kullanır. Kaynak video, ASR parça
 
 Cuma 25 Eylül 06:00 **Singapur** için ChatGPT kontrol görevi kuruldu. Bu notebook
 kendi başına zamanlayıcı değildir. Colab GPU tahsisi ve Drive izni geçerli olmalıdır;
-ücretsiz Colab gözetimsiz başlatma/çalışma garantisi vermez. Görev gerçek erişim
+Colab aboneliği gözetimsiz başlatma/çalışma garantisi vermez. Görev gerçek erişim
 engeli olursa bildirir; olmayan altyazıyı sessizce beklemez.
 
 Yalnız kaynak ASR kelime zamanları kullanılır; düzeltilmiş metne tekrar forced
@@ -35,6 +35,8 @@ SOURCE_URL = ""  # Boşsa Show TV sayfasındaki gerçek MP4 bulunur; ayrıca You
 FORCE_ASR = False  # True: yayıncı altyazısı olsa da ses üzerinden çalışır.
 SOURCE_FILE = ""  # Alternatif: Drive içindeki kaynak videonun tam yolu.
 DRIVE_ROOT = "/content/drive/MyDrive/Muhtemel_Ask_Subtitles/Colab_v1"
+TARGET_SIZE_GB = 4.8  # Son dosya kesinlikle 5,000,000,000 byte altında olmalı.
+AUTO_RELEASE_GPU = True  # İşlem bitince veya hata olunca kota tüketimini durdur.
 '''
 install='''import os, subprocess, sys, shutil
 os.environ["HF_HUB_ETAG_TIMEOUT"] = "30"
@@ -88,16 +90,27 @@ flow = importlib.reload(flow);video = importlib.reload(video)
 RETURN = ROOT / "handoff" / f"Muhtemel Ask {EPISODE}.Bolum_TRANSLATED.zip"
 print("Bölüm klasörü:",ROOT)
 '''
-run='''if MODE == "prepare":
-    PACK = video.prepare(ROOT, EPISODE, CONFIG, source_file=SOURCE_FILE, source_url=SOURCE_URL, force_asr=FORCE_ASR)
-    print("ChatGPT'ye verilecek dosya:",PACK)
-    print("Çeviri beklerken GPU oturumunu kapat. Drive'daki dosyalar korunur.")
-elif MODE == "finish":
-    report = video.finish(ROOT, RETURN)
-    print("Altyazısı gömülü MP4:", report["path"])
-else:
-    raise ValueError("MODE prepare veya finish olmalı")
+run='''import traceback
+from google.colab import runtime
+try:
+    if MODE == "prepare":
+        PACK = video.prepare(ROOT, EPISODE, CONFIG, source_file=SOURCE_FILE, source_url=SOURCE_URL, force_asr=FORCE_ASR)
+        print("ChatGPT çeviri paketi:", PACK, flush=True)
+    elif MODE == "finish":
+        report = video.finish(ROOT, RETURN, target_size_gb=TARGET_SIZE_GB)
+        print("Altyazısı gömülü MP4:", report["path"], flush=True)
+    else:
+        raise ValueError("MODE prepare veya finish olmalı")
+except BaseException:
+    traceback.print_exc()
+    raise
+finally:
+    if AUTO_RELEASE_GPU:
+        drive.flush_and_unmount()
+        print("Drive kayıtları korunarak GPU oturumu kapatılıyor.", flush=True)
+        runtime.unassign()
 '''
+
 review='''# Yalnız çeviri döndükten sonra çalıştır.
 if flow.read_json(ROOT/"video_workflow.json")["route"] == "asr":
     flow.review_ui(ROOT, RETURN)
@@ -110,7 +123,8 @@ if (ROOT / "video_output.json").exists():
     print(result["status"],result["path"])
 '''
 nb={'nbformat':4,'nbformat_minor':5,'metadata':{'kernelspec':{'display_name':'Python 3','language':'python','name':'python3'},
-    'language_info':{'name':'python'},'colab':{'name':'Muhtemel_Ask.ipynb','provenance':[]}},
+    'language_info':{'name':'python'},'accelerator':'GPU',
+    'colab':{'name':'Muhtemel_Ask.ipynb','provenance':[],'gpuType':'L4','machine_shape':'hm'}},
     'cells':[cell('markdown',intro),cell('code',settings),cell('code',install),
              cell('markdown','## İşlem kodu\nBu hücre repodaki `src/mas/colab_flow.py` dosyasının birebir kopyasıdır.\n'),
              cell('code','%%writefile /content/ma_sub_colab.py\n'+(ROOT/'src/mas/colab_flow.py').read_text()),

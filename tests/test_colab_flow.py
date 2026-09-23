@@ -307,3 +307,25 @@ def test_translation_cannot_add_unclaimed_timing_or_skip_foreign_content(tmp_pat
     s,m,rows,ret,_=setup_return(tmp_path)
     with zipfile.ZipFile(ret,'a') as z:z.writestr('translated_batch_001.jsonl',f.canonical(rows[0]))
     with pytest.raises(f.ContractError):f.read_return(ret,s,m)
+
+
+def test_stock_phrase_is_preserved_for_review_unless_wide_audio_supports_it(monkeypatch):
+    import numpy as np
+    vad=types.ModuleType('faster_whisper.vad')
+    vad.VadOptions=lambda **kwargs:kwargs
+    vad.get_speech_timestamps=lambda audio,**kwargs:[dict(start=0,end=len(audio))]
+    monkeypatch.setitem(sys.modules,'faster_whisper.vad',vad)
+    class Model:
+        def transcribe(self,*args,**kwargs):
+            ws=[types.SimpleNamespace(word=t,start=s,end=e,probability=.8)
+                for t,s,e in [('Altyazı',0.,0.),('M.K.',0.,.4)]]
+            return iter([types.SimpleNamespace(id=0,words=ws,avg_logprob=-.1,
+                        no_speech_prob=.1,compression_ratio=1.)]),None
+    part=dict(index=0,start_ms=1000,end_ms=2000,unsafe_start=False,unsafe_end=False)
+    reference=[dict(text='Bak.',start_ms=1000,end_ms=1400,probability=.9,risk_flags=[])]
+    kept,rejected=f.speech_window_words(Model(),np.zeros(16000),part,reference,[])
+    assert not kept and [w['text'] for w in rejected[0]['words']]==['Altyazı','M.K.']
+    assert (rejected[0]['start_ms'],rejected[0]['end_ms'])==(1000,2000)
+    reference[0]['text']='Altyazı M.K.'
+    kept,rejected=f.speech_window_words(Model(),np.zeros(16000),part,reference,[])
+    assert len(kept)==2 and not rejected  # Could be genuinely spoken; no blacklist deletion.

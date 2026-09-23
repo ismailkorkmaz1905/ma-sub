@@ -2,6 +2,7 @@
 from pathlib import Path
 import json
 import subprocess
+import time
 import zipfile
 
 from . import colab_flow as f, official_subtitles as official
@@ -42,7 +43,15 @@ def prepare(root, episode, config, *, source_file='', source_url='', force_asr=F
     return f.prepare(root,episode,config,source_file=str(source))
 
 
-def finish(root, returned_zip, *, encoder='h264_nvenc', target_size_gb=3.0):
+def finish(root, returned_zip, *, encoder='h264_nvenc', target_size_gb=4.8,
+           max_output_bytes=5_000_000_000, timeout_seconds=3600):
+    if type(max_output_bytes) is not int or max_output_bytes <= 0:
+        raise ValueError('Output limit must be positive bytes')
+    if type(target_size_gb) not in (float,int) or not 0 < target_size_gb*1e9 < max_output_bytes:
+        raise ValueError('Encoding target must be strictly below the output limit')
+    if not 0 < timeout_seconds <= 7200:
+        raise ValueError('Encoding needs a bounded time budget')
+    started=time.monotonic()
     root=Path(root);route=f.read_json(root/'video_workflow.json')
     if f.file_hash(root/'source.mp4')!=route['source_sha256']:raise f.ContractError('Video changed')
     work=root/route['work_directory']
@@ -63,12 +72,29 @@ def finish(root, returned_zip, *, encoder='h264_nvenc', target_size_gb=3.0):
         subtitle=work/item['path'];draft=bool(report['issues'])
     if f.file_hash(subtitle)!=item['sha256']:raise f.ContractError('Subtitle changed')
     episode=f.read_json(root/'source.json')['episode']
-    identity=f.digest(dict(source=route['source_sha256'],subtitle=item['sha256'],encoder=encoder,target=target_size_gb))[:16]
-    output=root/'output'/identity/(f'Muhtemel_Ask_{episode}_ID'+('.draft' if draft else '')+'.mp4')
-    receipt=burn_indonesian_mp4(root/'source.mp4',subtitle,output,encoder=encoder,
-                               target_size_gb=target_size_gb,timeout_seconds=14400)
+    # VBR is a soft target. At most one smaller retry; never truncate an episode.
+    attempts=[]
+    for attempt in range(2):
+        identity=f.digest(dict(source=route['source_sha256'],subtitle=item['sha256'],
+                               encoder=encoder,target=target_size_gb))[:16]
+        output=root/'output'/identity/(f'Muhtemel_Ask_{episode}_ID'+('.draft' if draft else '')+'.mp4')
+        remaining=timeout_seconds-(time.monotonic()-started)
+        if remaining<=0:raise TimeoutError('Shared video encoding budget exhausted')
+        receipt=burn_indonesian_mp4(root/'source.mp4',subtitle,output,encoder=encoder,
+                                   target_size_gb=target_size_gb,timeout_seconds=remaining,
+                                   idle_timeout_seconds=min(180,remaining))
+        size=output.stat().st_size
+        if size!=receipt['output_bytes']:raise f.ContractError('Output size changed')
+        attempts.append(dict(path=str(output),bytes=size,target_size_gb=target_size_gb))
+        if size<max_output_bytes:break
+        # Preserve the oversized result and use a distinct bound output path.
+        target_size_gb*=max_output_bytes/size*.94
+    else:
+        f.write_json(root/'video_size_failure.json',dict(max_output_bytes=max_output_bytes,attempts=attempts))
+        raise f.ContractError('MP4 still exceeds the size limit after one retry; not deliverable')
     result=dict(status='BURNED_DRAFT' if draft else 'BURNED_REVIEWED',path=str(output),
                 source_path=str(root/'source.mp4'),receipt=receipt,subtitle_report=report,
+                size_limit_bytes=max_output_bytes,size_verified=True,encode_attempts=attempts,
                 delivery='Mounted filesystem verified; independent Drive readback still required')
     f.write_json(root/'video_output.json',result)
     print('Burned MP4:',output,flush=True)

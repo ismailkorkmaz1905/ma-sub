@@ -33,7 +33,8 @@ ChatGPT kontrol görevi **25 Eylül 2026 Cuma 06:00 Asia/Singapore** başlangı�
 saatte bir, en fazla 96 kontrol. Son talebe göre video/ASR/burn teslimini ister.
 Bu kayıt tek başına Colab GPU veya Drive yetkisinin gelecekte hazır olacağını
 kanıtlamaz. Görev ilk çalışmada erişimi kontrol eder; somut engeli bildirir.
-Ücretsiz Colab oturumu, GPU kotası ve yeni Drive yetkisi kullanıcı adımı isteyebilir.
+Colab Pro ve L4 erişimi canlı doğrulandı; gelecek oturum tahsisi yine garanti değildir.
+Drive bağlama izni kullanıcı tarafından verildi ve gerçek kayıt/yeniden okuma çalıştı.
 
 Repo: `ismailkorkmaz1905/ma-sub`, PR #2, `codex/colab-subtitles-no-forced-alignment`.
 Drive hesabı: `ismailkorkmaz490@gmail.com`.
@@ -77,11 +78,47 @@ tam MP4 uzak byte/hash doğrulaması yapılmadan COMPLETE durumu yazma.
 Gerçek çalışma makbuzu: [live-test-2026-09-23.json](live-test-2026-09-23.json).
 Drive notebook: `1ZsUB_JFQcQnlEONhf9ry1JV5SeBIUIpJ`.
 
-## Bekleyen gerçek izin
+## L4 ve kota testi — 23 Eylül, ikinci koşu
 
-Colab `Mount Drive` girişimi otomatik onay kontrolünde reddedildi: notebook'un
-yalnız proje klasörü yerine tüm Drive'a geniş erişim istemesi gerekçe gösterildi.
-Bu yetki verilmedi; başka yoldan aynı geniş erişim açılmadı. Mevcut Drive
-connector'ı ile 90 saniyelik kaynak/MP4 teslimi yapılabildi. Tam bölümün Colab'dan
-Drive'a doğrudan checkpoint/kayıt yolu için kullanıcıdan bu özel izin istenmelidir.
-Görev izin yokken hazırmış gibi davranmamalı veya resmî altyazıyı beklemeye dönmemeli.
+Kullanıcı önceki geniş Drive erişim sorusuna devam izni verdi. Colab Drive bağlandı;
+T4 checkpoint'i Drive'a kopyalanıp yeni L4 oturumunda tekrar açıldı. İlk 80 compute
+unit bakiyesi test sonunda 79.16 idi (hesap toplamındaki fark 0.84; başka bir CPU
+oturumu da açıktı). L4 yaklaşık 1.62 unit/saat gösterdi. Test L4 oturumu, üretim
+hücresinin `drive.flush_and_unmount()` ve `runtime.unassign()` yolu ile kapandı.
+Diğer kullanıcının açık oturumuna dokunulmadı.
+
+14. bölümün tamamı işlenmedi. İndirilmeye başlanan tam dosya, kullanıcı yalnız
+parça testi istediğinde kesildi; 65, 4500 ve 8100 saniye civarından yaklaşık
+birer dakikalık 1080p parçalar test edildi. Stream-copy kesimleri keyframe'e bağlıdır;
+bunlar yayıncı zamanına milisaniye hassasiyetinde hizalanmış referans klipler değildir.
+
+- Son ASR sürümünde üç parça 17.98 / 19.40 / 20.18 saniyede hazırlandı.
+- Aynı modelin iki geçişi kullanılır. Üç stok halüsinasyon, sıfır süreli kelime ve
+  geniş ASR uyuşmazlığı nedeniyle altyazıya alınmadı; ham kelimeler/hash korunup
+  ses aralıkları açık QA boşlukları olarak kaydedildi. Bu, o aralıkta konuşma
+  olmadığına dair onay değildir; dinleme yapılmadı.
+- Yakın aralıkları bir saniyelik boşlukla birleştiren deneme sahte sözleri azalttı,
+  fakat bir sözü yaklaşık üç saniye erkene çektiği için üretime alınmadı.
+- Son 1080p örnek: 60.32 saniye, 21 Endonezce cue, H.264/AAC, 32,566,295 byte;
+  gerçek encode 7.216 saniye. Önceki 720p/90 saniye L4 denemesi 7.153 saniyeydi.
+- Son 1080p dosya Drive’dan bağımsız geri indirildi; 32,566,295 byte ve
+  SHA-256 3c69620f5c7b2e596ac85c21589587df3c9cbc355e4108a7fdfebc63091cf7f0 eşleşti.
+- 1080p örneğin bit hızı, 2.5 saatlik video için 4.8 GB hedefinin karşılığıdır.
+  2.5 saat yakma tahmini 18–25 dakika; tam bölüm ölçümü veya taahhüt değildir.
+  Kaynak indirme, ASR, çeviri ve Drive aktarımı bu tahmine dahil değildir.
+
+Üretim `TARGET_SIZE_GB=4.8`, kesin teslim sınırı **5,000,000,000 byte altı**.
+VBR hedefi tek başına boyut garantisi değildir. Gerçek dosya kontrol edilir; aşarsa
+bir kez küçültülerek yeniden kodlanır. İki denemenin ortak süre bütçesi bir saattir.
+İkinci çıktı da büyükse teslim edilmez. Video kesilmez; kaynak çözünürlüğü korunur.
+
+`AUTO_RELEASE_GPU=True`: prepare ve finish sonrasında (işlem hatasında da) Drive
+flush başarılı olursa GPU kapanır. ChatGPT çevirisi sırasında GPU açık bekletilmez.
+Kurulum/bağlama hücresi işlem hücresinden önce hata verirse görev mevcut oturumu
+ayrıca kontrol ederek kapatır. Drive flush hatasında kayıtlar güvenceye alınmadan
+oturumu silmez. Bölüm yayınlanmamışsa saatlik kontrol GPU başlatmaz.
+
+Altyazısız yedek rota çalışıyor; kusursuz diyalog ve senkron onayı tamamlanmış değil.
+Başlangıçtaki bağırma/dua, belirsiz sözcükler ve kısa cue'lar inceleme gerektiriyor.
+Gövde video üretimi ile kalite onayı ayrı tutulur; çözülmeyen işler DRAFT kalır.
+Kanıt: [live-l4-test-2026-09-23.json](live-l4-test-2026-09-23.json).

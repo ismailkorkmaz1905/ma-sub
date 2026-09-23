@@ -1,0 +1,13 @@
+# Independent of the legacy torch/WhisperX/RunPod stack.
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+yt-dlp[default]==2026.8.19
+PyYAML==6.0.2
+ipywidgets==8.1.7
+numpy==2.2.6
+onnxruntime==1.30.0
+huggingface-hub==1.32.0
+tokenizers==0.23.2
+av==18.1.0
+nvidia-cublas-cu12==12.8.4.1
+nvidia-cudnn-cu12==9.10.2.21

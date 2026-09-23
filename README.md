@@ -1,5 +1,13 @@
 # Muhtemel Ask Subtitles
 
+## Colab ile PC kapalıyken çalışma
+
+Yeni RunPod gerektirmeyen akış: [Colab kullanım adımları](colab/README.md),
+[notebook](colab/Muhtemel_Ask.ipynb) ve [inceleme notları](colab/REVIEW.md).
+Gerçek Colab GPU / bölüm kalite testi henüz tamamlanmamış bir üretim adayıdır.
+
+## Mevcut üretim komutu
+
 Bir bölümü başlatmak veya kaldığı yerden sürdürmek için tek komut kullanılır:
 
 ```powershell

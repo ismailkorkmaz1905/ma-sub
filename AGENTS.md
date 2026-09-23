@@ -35,3 +35,12 @@ git diff --check
 
 Basit çözümü seçin. Tek kullanım için soyutlama eklemeyin. Büyük JSON, altyazı,
 log veya medya dosyalarını gereksiz yere açmayın.
+
+## Bağımsız Colab adayı
+
+Kullanıcının 23 Eylül 2026 talebiyle `src/mas/colab_flow.py` ve `colab/`
+RunPod gerektirmeyen ayrı bir giriş olarak eklenmiştir. Bu yolda düzeltilmiş
+metne yeniden forced alignment uygulanmaz. Önce `colab/README.md` ve
+`colab/REVIEW.md` okuyun. `colab/build_notebook.py` ile notebook kopyasını
+yeniden üretin; kaynak/notebook eşitliğini test edin. GPU testi yapılmadan
+canlı üretim veya akustik doğruluk iddiasında bulunmayın.

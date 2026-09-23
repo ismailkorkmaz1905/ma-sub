@@ -1,5 +1,9 @@
 # Review notes: Colab candidate
 
+Update: the scheduled publisher-caption path is documented in
+[`automation/README.md`](../automation/README.md). It avoids Colab and paid APIs.
+The findings below describe the earlier, separate Colab implementation.
+
 Base reviewed: `9352d3631e5ea58f860f6b2bf1da2e677e2f833b`.
 Goal: natural Indonesian subtitles for newly released Muhtemel Aşk episodes,
 without an online personal PC or RunPod, and without another post-edit forced
